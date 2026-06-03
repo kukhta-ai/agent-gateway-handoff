@@ -254,6 +254,14 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
      * Defaults to the gateway default (≈15m, the window TTL). Set 0 to disable reuse (always re-prompt).
      */
     authReuseTtlMs?: number;
+    /**
+     * The minimum auth strength a handoff step-up must reach for the gateway to authorize the grant
+     * (`GatewayOptions.requiredAuthStrength`; defaults to the gateway default `"webauthn"`). Set `"password"` to
+     * PERMIT the password fallback (a delegated provider's password login then satisfies the gate), or `"webauthn"`
+     * to DEMAND the phishing-resistant method. The gateway's gating logic (`strengthSufficient`) is unchanged — this
+     * only threads the requirement from composition (authentik-dual-method-flow.md §4; the value a deployment sets).
+     */
+    requiredAuthStrength?: "password" | "webauthn";
     /** Where the channel writes the recipient-bound handoff link (defaults to stdout). */
     deliverySink?: DeliverySink;
     /** A shared identity service (so enrollment + handoff use the SAME enrolled credential store). */
@@ -456,6 +464,11 @@ export function createProvisioningBridge(
       // The auth-reuse TTL (GLA-050/051): a recipient's step-up stays valid for a later window for THIS recipient,
       // so scenario-01 Phase 12's second window opens with no re-prompt. Defaults to the gateway default (~15m).
       ...(h.authReuseTtlMs !== undefined ? { authReuseTtlMs: h.authReuseTtlMs } : {}),
+      // The required step-up strength (default webauthn): set "password" to permit a delegated provider's password
+      // fallback, "webauthn" to demand the passkey. Threads the requirement; the gateway's gating is unchanged.
+      ...(h.requiredAuthStrength !== undefined
+        ? { requiredAuthStrength: h.requiredAuthStrength }
+        : {}),
     });
     route = new RouteController({ gateway });
     handoffDeps = {
