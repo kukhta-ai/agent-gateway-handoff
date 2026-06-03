@@ -10,6 +10,7 @@
     { "path": "../admission" },
     { "path": "../assembly" },
     { "path": "../audit" },
+    { "path": "../../adapters/auth-authentik" },
     { "path": "../../adapters/auth-webauthn" },
     { "path": "../bridge" },
     { "path": "../capability" },
