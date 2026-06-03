@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Building the scenario-01 MVP (a same-session browser handoff) through the BMAD SDLC, slice by slice.
+The **scenario-01 MVP is complete** — all 66 backlog tasks done, 428 tests green, the full same-session browser-handoff thread (Phases E,0–15) proven end-to-end through the real modules, built slice by slice through the BMAD SDLC with a security review on every seam.
 
 ### Added
 
@@ -24,6 +24,8 @@ Building the scenario-01 MVP (a same-session browser handoff) through the BMAD S
 - **The second handoff (Phases 9–14)** — the agent inspects `/verify` over its resumed connector, **re-opens a second window on the same capsule** (no re-provision), the human enters the verification code agent-blind, the url-watcher completes on `/dashboard` (`verified`), and the agent configures the account — proven by a real two-handoff end-to-end test. The one new mechanism is **auth reuse on re-open**: a recipient already authenticated within a TTL is not re-prompted for WebAuthn (recipient-bound to the signed grant, the grant still cryptographically verified every time). Most "without rebuilding" steps were verified to reuse the existing machinery unchanged.
 - **Teardown (Phase 15)** — `gla task complete` / `gla task revoke` drive one terminal Task transition that tears down every session (cancel any open window, **stop the capsule** and reap the ephemeral workspace) and performs a **single revoke of the task capability** so — by signed lineage — every descendant (session grants, the agent connector) stops verifying. Verified against a real capsule: the process is gone, the temp profile deleted, the route unmounted, the caps `auth.revoked`, **host-mounted paths and persisted outputs survive**, and re-running teardown is idempotent with the reconciler confirming no orphan.
 - **Scenario-01 end-to-end (the MVP capstone)** — a single **cold** test drives the entire scenario-01 thread (Phases E,0–15) through the real modules with real headless Chromium, a real WebAuthn ceremony (virtual authenticator), the agent-blind CDP broker, and a stub target site — asserting the full behaviour plus the security invariants (recipient fail-closed, agent-blind, stateless verify, offline-reject exit codes, out-of-contract rejection, forwarded-link-useless). The import boundary holds and a provider swap (channel) runs through the thread with no core change. **The MVP is proven.**
+- **Deployable as a service** — `gla serve` binds the Access Gateway on `:3000` (the public entry, behind Caddy) and the Agent Bridge on a local socket; the `gla` CLI drives the running daemon's shared state via `GLA_ENDPOINT`, and `--public-base-url` makes handoff/enrollment links reachable. Graceful shutdown tears down live capsules with no orphan.
+- **Agent-native installer** — a `wpm/` bundle-project (gla-core + browser-runtime, human-view, isolation, edge-proxy, identity-provider) that an operator's agent runs to stand GLA up on a host (detect → setup → verify → record receipt per bundle); `wpm project validate` and `build dry-run` pass.
 
 ---
 

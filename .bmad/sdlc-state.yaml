@@ -3,13 +3,13 @@
 # Re-read on every resume; update at every phase boundary.
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
-phase: 5
-phase_name: "Autonomous build — scenario-01 vertical slices"
+phase: 7
+phase_name: "Handoff — MVP complete; PR to dev pending (user gate)"
 branch: feature/scenario-01
 epic: scenario-01            # the whole MVP = deliver scenario-01 end to end
-active_story: [deploy-daemon, GLA-007, GLA-008, GLA-009, GLA-010, GLA-011]   # Slice 8b: deploy enablement + wpm installer bundles + hermes-1 deploy
+active_story: none           # ALL 66 GLA tasks Done. Runtime + installer + deployable daemon complete. 428 tests green.
 review_cycle: 0
-phase_note: "RUNTIME MVP COMPLETE & PROVEN (GLA-066 cold E2E passes Phases E,0-15, 408 tests). Remaining = the DEPLOY goal."
+phase_note: "MVP COMPLETE: all 66 tasks Done; GLA-066 cold E2E passes Phases E,0-15; 428 tests; `gla serve` runs on :3000; wpm installer validates. DEPLOY GAP (env not code): the real OVH VPS (vps-71a60d1a.vps.ovh.net:22) is UNREACHABLE from this sandbox (SSH timed out) -> live hermes-1 install not run from here; proven to run on :3000 in this hermes-1-like container; operator installs on their VPS via the wpm bundles. NEXT user gates (NOT auto-done): push + PR --base dev (green CI), human review+merge to dev, promote to main."
 # Deploy phase (the goal's 'ready to run in VPS, installable, working on :3000'):
 # 1. deploy-daemon (NOT a numbered task; deploy enablement): app.listen()/main() are STUBS -> build `gla serve` that binds the
 #    Access Gateway on :3000 (public, behind host Caddy) + the Agent Bridge on a local socket (GLA_ENDPOINT) so the external
