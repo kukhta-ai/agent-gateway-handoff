@@ -698,6 +698,19 @@ export interface CreateEnrollmentStackOptions {
   port?: number;
   /** Where the channel writes the enrollment invite link (defaults to stdout). */
   deliverySink?: DeliverySink;
+  /**
+   * A PRE-BUILT auth provider to inject behind the kernel `AuthProviderPort`, bypassing {@link buildAuthProvider}
+   * (GLA-070). This is a composition seam — it lets a caller supply an {@link AuthAuthentikProvider} constructed
+   * with SHARED stores and (for deterministic enrollment E2E) the `fake-authentik` `fetch`/`jwks`/`randomness`
+   * seams, so the delegated enrollment service path is provable end-to-end through the real gateway with NO real
+   * network. When set, it wins over `authProvider`/`authentik`; `authModule` is taken from {@link authModuleOverride}
+   * (or, when that is absent, the resolved provider kind). Mirrors `createProvisioningBridge`'s `handoff.identity`
+   * injection. (The PRODUCTION browser-redirect/callback path that feeds `{code,state}` to `enrollComplete` is
+   * GLA-072's shared deliverable, see authentik-integration.md §2 / authentik-enrollment.md §8.1.)
+   */
+  authProviderOverride?: AuthProviderPort;
+  /** The module marker recorded in {@link EnrollmentStack.authModule} when {@link authProviderOverride} is set. */
+  authModuleOverride?: string;
 }
 
 /**
@@ -750,18 +763,31 @@ export interface EnrollmentStack {
 export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): EnrollmentStack {
   // Provider selection (doc §1/§7): default → the in-tree WebAuthn provider (constructed exactly as before);
   // `authentik` → the delegated OIDC adapter. Both implement `AuthProviderPort` (the IdentityService injection
-  // is identical), so swapping the provider is this one `buildAuthProvider` call — no downstream change.
-  const { provider: authProvider, module: authModule } = buildAuthProvider(
-    {
-      ...(opts.authProvider !== undefined ? { authProvider: opts.authProvider } : {}),
-      ...(opts.authentik !== undefined ? { authentik: opts.authentik } : {}),
-    },
-    {
-      rpID: opts.rpID ?? "localhost",
-      rpName: opts.rpName ?? "GLA",
-      expectedOrigin: opts.expectedOrigin,
-    },
-  );
+  // is identical), so swapping the provider is this one `buildAuthProvider` call — no downstream change. A
+  // pre-built `authProviderOverride` (GLA-070 — e.g. an AuthAuthentikProvider with shared stores + fake-authentik
+  // seams) wins, so the delegated enrollment path is testable end-to-end with no real network.
+  let authProvider: AuthProviderPort;
+  let authModule: string;
+  if (opts.authProviderOverride !== undefined) {
+    authProvider = opts.authProviderOverride;
+    authModule =
+      opts.authModuleOverride ??
+      (opts.authProvider === "authentik" ? AUTH_AUTHENTIK_MODULE : AUTH_WEBAUTHN_MODULE);
+  } else {
+    const built = buildAuthProvider(
+      {
+        ...(opts.authProvider !== undefined ? { authProvider: opts.authProvider } : {}),
+        ...(opts.authentik !== undefined ? { authentik: opts.authentik } : {}),
+      },
+      {
+        rpID: opts.rpID ?? "localhost",
+        rpName: opts.rpName ?? "GLA",
+        expectedOrigin: opts.expectedOrigin,
+      },
+    );
+    authProvider = built.provider;
+    authModule = built.module;
+  }
   const identity = new IdentityService({ authProvider });
   const capability = new CapabilityService();
   const channel = new ChannelCli({
