@@ -7,8 +7,16 @@ phase: 5
 phase_name: "Autonomous build — scenario-01 vertical slices"
 branch: feature/scenario-01
 epic: scenario-01            # the whole MVP = deliver scenario-01 end to end
-active_story: GLA-066   # Slice 8a: the cold E2E capstone — full scenario-01 Phases E,0-15 + all S-1..S-10 invariants
+active_story: [deploy-daemon, GLA-007, GLA-008, GLA-009, GLA-010, GLA-011]   # Slice 8b: deploy enablement + wpm installer bundles + hermes-1 deploy
 review_cycle: 0
+phase_note: "RUNTIME MVP COMPLETE & PROVEN (GLA-066 cold E2E passes Phases E,0-15, 408 tests). Remaining = the DEPLOY goal."
+# Deploy phase (the goal's 'ready to run in VPS, installable, working on :3000'):
+# 1. deploy-daemon (NOT a numbered task; deploy enablement): app.listen()/main() are STUBS -> build `gla serve` that binds the
+#    Access Gateway on :3000 (public, behind host Caddy) + the Agent Bridge on a local socket (GLA_ENDPOINT) so the external
+#    `gla` CLI drives the running daemon's SHARED state; public-base-url config (https://57.131.31.126/) for reachable handoff links.
+# 2. GLA-007..011 = the wpm bundle-project (gla-core + browser-runtime + human-view + isolation + edge-proxy + identity) authored with
+#    the local wpm (/workspace/active/work-package-manager, npm link) per the bundle model (manifest.yml + bundles/<id>/install-backlog detect->setup->verify).
+# 3. Deploy + test in hermes-1 (LXD container on the OVH VPS, or the local vps-rehearsal): pnpm install+build, gla serve :3000, verify installable+working.
 # Slice 7 done: teardown (Phase 15) verified vs real capsule (pid gone, caps revoked cascade, host file survives, idempotent, no orphan). RUNTIME COMPLETE Phases E,0-15. 407 tests.
 # GLA-066 = the single cold capstone E2E composing all phases + asserting the 10 security invariants (test-strategy §3). Then: wpm bundles GLA-007..011 + deploy to hermes-1 (gla on :3000 behind host Caddy at https://57.131.31.126/).
 # Slice 6 done + reviewed clean: second handoff Phases 9-14 work (auth reuse, agent-blind both windows, re-open same capsule, 2nd completion /dashboard=verified). 384 tests. Runtime works Phases E,0-14.

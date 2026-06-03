@@ -51,6 +51,7 @@ import {
   attachConnector,
 } from "@gla/worker";
 import { WORKSPACE_PROFILE_MODULE, WorkspaceProfileAdapter } from "@gla/workspace-profile";
+import { type DaemonHandle, runServe, serve } from "./daemon.js";
 
 /** The MVP default wiring (baseline §5): which adapter is bound to each kernel port. */
 export interface Wiring {
@@ -64,11 +65,17 @@ export interface Wiring {
   channel: string;
 }
 
-/** The composed application handle. A real `listen()` lands in a later task. */
+/** The composed application handle. `listen()` boots the real long-running daemon (the `:3000` deployable). */
 export interface App {
   readonly wiring: Wiring;
-  /** Bind the Access Gateway on :3000. Stubbed in the GLA-003 skeleton (returns the port only). */
-  listen(port?: number): Promise<{ port: number }>;
+  /**
+   * Boot the real long-running daemon: bind the Access Gateway on the PUBLIC `:port` (default 3000), bind the
+   * Agent Bridge on a LOCAL endpoint, and stay alive until `close()`. Returns the running {@link DaemonHandle}
+   * (gateway addr, bridge endpoint, public base, and the graceful-shutdown `close()`). For full control over the
+   * bind host, the bridge endpoint, and the public base URL, call {@link serve} directly (this is the terse
+   * default: `0.0.0.0:<port>`, the default uds bridge endpoint, links against `http://127.0.0.1:<port>`).
+   */
+  listen(port?: number): Promise<DaemonHandle>;
 }
 
 /** Compose the default single-operator profile: bind the default adapters to the kernel ports. */
@@ -85,10 +92,8 @@ export function createApp(): App {
   };
   return {
     wiring,
-    listen(port = 3000) {
-      // Skeleton: no socket is bound yet. The Access Gateway (packages/gateway) wires here later.
-      return Promise.resolve({ port });
-    },
+    // Boot the real daemon (no longer a stub): bind the gateway + the local bridge, stay alive, graceful shutdown.
+    listen: (port = 3000) => serve({ port }),
   };
 }
 
@@ -705,8 +710,20 @@ function buildUrlWatcherContract(
   };
 }
 
-/** Process entry point for the :3000 deployable. Stub: composes the app, does not yet bind. */
-export async function main(): Promise<void> {
-  const app = createApp();
-  await app.listen(3000);
+/**
+ * Process entry point for the `:3000` deployable: boot the real long-running daemon and keep it alive until a
+ * termination signal, then shut down GRACEFULLY (tear down live capsules → close the connector/gateway/bridge).
+ * Delegates to {@link runServe} (the `gla serve` command), which wires SIGINT/SIGTERM → `handle.close()`.
+ */
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  await runServe(argv);
 }
+
+export {
+  serve,
+  runServe,
+  parseServeArgs,
+  defaultBridgeEndpoint,
+  endpointIsLocal,
+} from "./daemon.js";
+export type { ServeOptions, DaemonHandle } from "./daemon.js";
