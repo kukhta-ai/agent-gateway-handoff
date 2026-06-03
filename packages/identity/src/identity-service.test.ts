@@ -43,13 +43,23 @@ describe("IdentityService.bind (port shape)", () => {
   });
 });
 
-describe("enrollment/verification are deferred to Slice 4", () => {
-  it("enroll throws a typed error (not implemented in Slice 1)", async () => {
+describe("enrollment/verification require an injected AuthProvider (Slice 4a)", () => {
+  const discharge = "tok" as unknown as Parameters<IdentityService["enroll"]>[1];
+  it("enroll without a provider throws dependency.unavailable", async () => {
     const svc = new IdentityService();
-    await expect(svc.enroll()).rejects.toThrow(/not implemented/i);
+    await expect(svc.enroll(tg, discharge)).rejects.toThrow(/no auth provider|unavailable/i);
   });
-  it("verify throws a typed error (not implemented in Slice 1)", async () => {
+  it("verify without a provider on an UN-enrolled recipient denies (ok:false), no throw", async () => {
+    // An un-enrolled recipient is denied directly (a recipient is verifiable only if enrolled, §7) — the
+    // provider is never consulted, so a bind-only service answers the deny path without throwing.
     const svc = new IdentityService();
-    await expect(svc.verify()).rejects.toThrow(/not implemented/i);
+    const r = await svc.verify(tg, {});
+    expect(r.ok).toBe(false);
+    expect(r.authStrength).toBe("none");
+  });
+  it("a bind-only service reports an un-enrolled recipient as not enrolled", () => {
+    const svc = new IdentityService();
+    expect(svc.isEnrolled(tg)).toBe(false);
+    expect(svc.verifyStrength(tg)).toBe("none");
   });
 });

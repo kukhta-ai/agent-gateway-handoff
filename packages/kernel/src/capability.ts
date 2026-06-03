@@ -66,6 +66,17 @@ export interface VerifyContext {
   revocations: RevocationSnapshot;
   /** The path/scope being accessed, checked against any `scope` caveat (optional). */
   scopePath?: string;
+  /**
+   * When `true`, the `recipient` caveat's **presenter-equality check is skipped** — but the caveat is still
+   * authenticated by the signature (it is part of the signed payload, so a tampered/forged recipient breaks the
+   * HMAC tag and verification still fails). The caller then reads the bound recipient out of the returned
+   * {@link VerifyResult.capability}'s caveats. This is the **enrollment** path: an `operator-discharge` grant is
+   * presented at `GET /enroll?grant=…` carrying only the token — the gateway has no separate presenter to compare
+   * against, so it reads the recipient FROM the verified (signature-authenticated) grant rather than trusting an
+   * unsigned query param. It is a no-op when no `recipient` caveat is present. Defaults to `false` (the strict,
+   * fail-closed handoff path is unchanged).
+   */
+  bindRecipientFromCapability?: boolean;
 }
 
 /**
