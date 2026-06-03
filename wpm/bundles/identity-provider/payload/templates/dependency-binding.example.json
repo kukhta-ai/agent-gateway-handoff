@@ -1,0 +1,66 @@
+{
+  "//": "EXAMPLE DependencyBinding for the identity-provider dependency, authentik branch (GLA-074). The shape is",
+  "//1": "docs/architecture/dependency-strategy.md §5: { dependency, ownershipMode, connection?, installed,",
+  "//2": "inverseOp?, lastProbe? }. wpm WRITES this into the verify task's receipt; GLA's runtime READS + re-probes",
+  "//3": "it (doctor/probe), and availability is system-derived from lastProbe. The whole authentik stack",
+  "//4": "(server+worker+Postgres[+Redis]) is ONE dependency from GLA's view — GLA dials only the OIDC endpoints.",
+  "//5": "CRITICAL: the client SECRET is NEVER a literal here — connection carries a secret-REF handle the secret",
+  "//6": "seam resolves; the real secret lives behind that seam, never in this receipt, a connection literal, or a log.",
+
+  "example_local_external_adopted": {
+    "dependency": "identity-provider",
+    "ownershipMode": "local-external",
+    "connection": {
+      "issuer": "https://idp.example/application/o/gla/",
+      "clientId": "gla",
+      "redirectUri": "https://57.131.31.126/auth/callback",
+      "scopes": "openid profile",
+      "clientSecretRef": "secret://gla/authentik/client-secret",
+      "amrMap": null
+    },
+    "installed": false,
+    "lastProbe": {
+      "at": "2026-06-03T18:00:00.000Z",
+      "result": "available",
+      "detail": "discovery 200; jwks 2 keys; /authorize accepts gla+redirect; amr distinguishes swk->webauthn, pwd->password; enroll/re-auth same sub"
+    }
+  },
+
+  "example_managed_installed": {
+    "//": "ONLY where nested Docker is proven working (NOT the hermes-1 reference). Carries inverseOp = the teardown.",
+    "dependency": "identity-provider",
+    "ownershipMode": "managed",
+    "connection": {
+      "issuer": "https://idp.example/application/o/gla/",
+      "clientId": "gla",
+      "redirectUri": "https://57.131.31.126/auth/callback",
+      "scopes": "openid profile",
+      "clientSecretRef": "secret://gla/authentik/client-secret"
+    },
+    "installed": true,
+    "inverseOp": "docker compose -f <authentik-dir>/docker-compose.yml down -v   # tears down server+worker+postgres[+redis] + volumes (only because WE stood it up)",
+    "lastProbe": {
+      "at": "2026-06-03T18:00:00.000Z",
+      "result": "available",
+      "detail": "stood up authentik <tag>; same probes as above pass"
+    }
+  },
+
+  "example_unavailable": {
+    "//": "A down provider surfaces as unavailable (never a silent pass) — admission/step-up then fails closed.",
+    "dependency": "identity-provider",
+    "ownershipMode": "remote-external",
+    "connection": {
+      "issuer": "https://idp.example/application/o/gla/",
+      "clientId": "gla",
+      "redirectUri": "https://57.131.31.126/auth/callback",
+      "clientSecretRef": "secret://gla/authentik/client-secret"
+    },
+    "installed": false,
+    "lastProbe": {
+      "at": "2026-06-03T18:05:00.000Z",
+      "result": "unavailable",
+      "detail": "GET <issuer>/.well-known/openid-configuration did not answer (connect refused) — provider down or unreachable from the GLA container"
+    }
+  }
+}
