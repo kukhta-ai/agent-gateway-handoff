@@ -25,12 +25,16 @@ an `identity-provider-5`/`-6` acceptance criterion.
 - [ ] The provider's **authentication flow** presents **both** a **passkey/WebAuthn** stage **and** a
       **password** stage (plus any MFA the operator wants); an Identification stage routes to a WebAuthn-validator
       stage and/or a Password stage, and the user **chooses**.
-- [ ] **The flow emits an `amr` (or `acr`) in the id_token that distinguishes passkey from password.** Concretely
-      a **custom property/scope mapping** populates `amr` from the authentication context:
-      - a **passkey** login → an `amr` token in GLA's webauthn set: one of `{hwk, swk, webauthn, fido}` →
-        strength **`webauthn`**;
-      - a **password** login → `{pwd}` (with/without MFA companions `{mfa, otp, sms}`) → strength **`password`**.
-      (The map is `adapters/auth-authentik/src/strength.ts` `DEFAULT_METHOD_MAPS`.)
+- [ ] **The flow emits an `amr` (or `acr`) in the id_token that distinguishes passkey from password.** authentik
+      2025.10 emits `amr: []` (empty) by default and does NOT distinguish them out of the box (PROVEN in the
+      GLA-074 rehearsal) — so this is a **REQUIRED** step, not an assumption. Apply this bundle's
+      **`amr-scope-mapping.py`** as a custom OAuth2 provider scope mapping (`scope_name: "openid"`, attached to
+      GLA's provider's property mappings; see `amr-scope-mapping.md`). It populates `amr` from authentik's
+      recorded login method:
+      - a **passkey** login → `["swk"]` (in GLA's webauthn set `{hwk, swk, webauthn, fido}`) → strength **`webauthn`**;
+      - a **password** login → `["pwd"]` (with/without MFA companions `{mfa, otp, sms}`) → strength **`password`**.
+      (The map is `adapters/auth-authentik/src/strength.ts` `DEFAULT_METHOD_MAPS` — which the expression matches,
+      so no `GLA_AUTHENTIK_AMR_MAP` override is needed. Proven live: a real password login → `amr:["pwd"]`.)
 - [ ] If this instance's labels differ, `GLA_AUTHENTIK_AMR_MAP` / `GLA_AUTHENTIK_ACR_MAP` are set to the **actual**
       labels — but the flow **must emit something** separating the two tiers. **Verify against the running
       instance** (a real passkey login → `webauthn`, a real password login → `password`); never assume defaults.
