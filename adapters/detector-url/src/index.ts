@@ -93,12 +93,19 @@ export class DetectorUrlAdapter {
   }
 
   /**
-   * Watch the capsule's current URL and emit a {@link RawCompletionSignal} on the first match of the
-   * declared `intermediate` (status `url-intermediate`) then the `complete_on` (status `url-complete`)
-   * URL fragment (kernel `CompletionDetectorPort.watch`). It polls the active page target's URL over the
-   * capsule's CDP on `pollMs`; each fragment fires AT MOST ONCE (so a stable page does not re-emit), and
-   * the iterator COMPLETES after the `complete_on` match (the terminal navigation). A consumer that stops
-   * iterating (a closed window) abandons the watch cleanly.
+   * Watch the capsule's current URL and emit a {@link RawCompletionSignal} on a TRANSITION into the declared
+   * `intermediate` (status `url-intermediate`) then the `complete_on` (status `url-complete`) URL fragment (kernel
+   * `CompletionDetectorPort.watch`). It polls the active page target's URL over the capsule's CDP on `pollMs`.
+   *
+   * **The intermediate is EDGE-triggered; the complete is level-triggered.** The intermediate fires only on a
+   * TRANSITION *into* it — the previous poll's URL did NOT match the intermediate and this one does — so a window
+   * whose page is ALREADY at the intermediate when the watch begins does **not** re-fire it. This is what makes the
+   * SECOND handoff correct (scenario-01 Phase 12/13): window 2 RE-OPENS while the capsule still shows `/verify` (the
+   * intermediate window 1 already completed on); without edge-triggering, window 2 would instantly re-complete on the
+   * stale `/verify` instead of waiting for the human to reach `/dashboard`. The first poll establishes the BASELINE
+   * URL (no intermediate fire on it). The `complete_on` match is the terminal navigation and fires on ANY match
+   * (level — a page that reaches it completes regardless of where it started), after which the iterator COMPLETES.
+   * Each fragment still fires AT MOST ONCE. A consumer that stops iterating (a closed window) abandons it cleanly.
    *
    * The `result` carries the matched `url` + `match` (the fragment matched) — detector-shaped data the
    * Completion service validates + normalizes. It does NOT decide completion: it reports the mechanical
@@ -119,16 +126,24 @@ export class DetectorUrlAdapter {
       return;
     }
     let firedIntermediate = false;
-    // Poll the live URL; emit on first match of each fragment. Stop after the complete match (terminal).
+    // The previous poll's URL — `undefined` only before the FIRST observation, so the first observed URL is the
+    // BASELINE (the intermediate is never fired on it; only a later TRANSITION into the intermediate fires).
+    let prevUrl: string | undefined;
+    // Poll the live URL; the intermediate emits on a TRANSITION into it, the complete on any match (terminal).
     for (;;) {
       const url = await this.readUrl(handle);
       if (url !== undefined) {
-        if (
+        const transitionedIntoIntermediate =
           intermediate !== undefined &&
           !firedIntermediate &&
           url.includes(intermediate) &&
-          !url.includes(completeOn)
-        ) {
+          !url.includes(completeOn) &&
+          // EDGE: the previous observation did NOT match the intermediate (a fresh navigation INTO it). On the
+          // first poll `prevUrl` is undefined ⇒ the baseline is suppressed (a window that opens already at the
+          // intermediate does not re-fire it — the second-handoff correctness, scenario-01 Phase 12/13).
+          prevUrl !== undefined &&
+          !prevUrl.includes(intermediate);
+        if (transitionedIntoIntermediate) {
           firedIntermediate = true;
           yield this.signal("url-intermediate", url, intermediate);
         }
@@ -136,6 +151,7 @@ export class DetectorUrlAdapter {
           yield this.signal("url-complete", url, completeOn);
           return; // the terminal navigation — the watch is done.
         }
+        prevUrl = url;
       }
       await delay(this.pollMs);
     }

@@ -297,7 +297,12 @@ export class CapabilityService {
       // ATTENUATE from the session/task capability — child ⊆ parent. `attenuate` REJECTS (throws
       // auth.attenuation_widened) if the request would widen the recipient/scope/ttl beyond the parent,
       // so the request can never widen the grant. The grant descends by lineage (revoke-parent cascade).
-      const minted = await this.port.attenuate(req.parentToken, caveats);
+      // RE-CLASS the child to `session` (the grant IS a handoff grant that descends from the task cap by
+      // lineage, NOT a task/agent-authority token) — so the gateway's edge verify, which asserts class=`session`,
+      // accepts it. The caveats still only narrow and the full ancestor lineage (the cascade) is preserved; only
+      // the class label is `session`. Without this the grant would inherit the parent's class and the edge would
+      // refuse it (auth.insufficient) even though it is a valid, narrowed handoff grant.
+      const minted = await this.port.attenuate(req.parentToken, caveats, "session");
       return { capability: minted.capability, token: minted.token, scopePath };
     }
     // Degraded path: no parent threaded → mint a fresh session-class root (still recipient-bound + short TTL).

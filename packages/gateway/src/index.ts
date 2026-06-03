@@ -32,7 +32,7 @@ import type {
   SessionId,
 } from "@gla/kernel";
 import { enrollPageHtml, refusalPageHtml } from "./enroll-page.js";
-import { handoffPageHtml, handoffRefusalHtml } from "./handoff-page.js";
+import { handoffPageHtml, handoffRefusalHtml, handoffReusedPageHtml } from "./handoff-page.js";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
 export const GATEWAY_MODULE = "@gla/gateway" as const;
@@ -192,6 +192,17 @@ export interface GatewayOptions {
    */
   requiredAuthStrength?: RequiredAuthStrength;
   /**
+   * The **auth-reuse TTL** (ms) — how long a successful recipient step-up stays valid for REUSE across a LATER
+   * handoff window for the SAME recipient (scenario-01 Phase 12: "auth still valid, no re-prompt"). On a successful
+   * step-up the gateway records a short-lived `{recipient, auth_strength, expiresAt}` validity; a SECOND window's
+   * grant for the SAME recipient, while that validity is unexpired AND meets the required strength, is authorized
+   * WITHOUT a fresh WebAuthn ceremony (no re-prompt). An expired/absent validity, or a DIFFERENT recipient, falls
+   * back to a full step-up (Phase 6 behaviour). The grant is STILL verified cryptographically on every request +
+   * upgrade — reuse only skips the interactive ceremony, never the grant check (recipient-specific, TTL-bounded,
+   * not bypassable). Default 15 minutes (≈ the handoff window TTL). Set 0 to DISABLE reuse (always re-prompt).
+   */
+  authReuseTtlMs?: number;
+  /**
    * The bind host. Default `0.0.0.0` (the hermes-1 deployment target, behind host Caddy). Tests pass `127.0.0.1`
    * with an ephemeral port.
    */
@@ -261,6 +272,20 @@ export class AccessGateway {
    * marker. Cleared on the grant's revoke/force-close so a revoked grant cannot reach the capsule.
    */
   private readonly authorizedGrants = new Set<CapabilityId>();
+  /**
+   * The RECIPIENT-level auth-reuse record (scenario-01 Phase 12, GLA-050/051): a successful step-up records the
+   * recipient's `{auth_strength, expiresAt}`, keyed by the recipient READ FROM THE SIGNED GRANT (never client-
+   * supplied). A LATER window's grant for the SAME recipient, while this is unexpired AND meets the required
+   * strength, is authorized WITHOUT a fresh ceremony (no re-prompt). It is the small mutable edge state the reuse
+   * needs; the grant is STILL verified cryptographically every request/upgrade (reuse skips only the interactive
+   * WebAuthn ceremony, never the grant check) — so reuse is recipient-specific, TTL-bounded, and not bypassable.
+   */
+  private readonly recipientAuth = new Map<
+    RecipientRef,
+    { authStrength: AuthStrength; expiresAt: number }
+  >();
+  /** The auth-reuse TTL (ms) — how long a step-up stays valid for reuse on a later window. 0 disables reuse. */
+  private readonly authReuseTtlMs: number;
   /** Live proxied sockets per grant id, so a revoke/force-close can sever them (GLA-039 AC#3). */
   private readonly liveSockets = new Map<CapabilityId, Set<Socket>>();
   /** The WS-proxy upstream connect timeout (ms) — a stalled dial cannot pin an fd waiting on `connect`. */
@@ -274,6 +299,7 @@ export class AccessGateway {
     this.sessionGrants = opts.sessionGrants;
     this.stepUp = opts.stepUp;
     this.requiredAuthStrength = opts.requiredAuthStrength ?? "webauthn";
+    this.authReuseTtlMs = opts.authReuseTtlMs ?? 15 * 60 * 1000;
     this.host = opts.host ?? "0.0.0.0";
     this.port = opts.port ?? 3000;
     this.proxyConnectTimeoutMs = opts.proxyConnectTimeoutMs ?? 10_000;
@@ -609,6 +635,15 @@ export class AccessGateway {
       );
       return;
     }
+    // ── AUTH REUSE (scenario-01 Phase 12, GLA-050/051): if THIS recipient's prior step-up is still VALID (unexpired
+    //    + sufficient strength), authorize THIS grant WITHOUT a fresh ceremony and serve a page that opens the stream
+    //    DIRECTLY (no re-prompt). The recipient is the SIGNED grant's caveat (recipient-specific); the grant was just
+    //    verified above (not bypassable). An expired/absent validity falls through to the full step-up page (Phase 6).
+    if (this.recipientAuthValid(verified.recipient)) {
+      this.authorizedGrants.add(verified.capability.id as CapabilityId);
+      this.sendHtml(res, 200, handoffReusedPageHtml(grant, route.path, String(verified.recipient)));
+      return;
+    }
     // Serve the step-up page (runs navigator.credentials.get against the recipient's registered credential).
     this.sendHtml(res, 200, handoffPageHtml(grant, route.path, String(verified.recipient)));
   }
@@ -710,6 +745,10 @@ export class AccessGateway {
     }
     // The bound recipient authenticated to the required strength: authorize the grant so its WS upgrade proxies.
     this.authorizedGrants.add(verified.capability.id as CapabilityId);
+    // Record the RECIPIENT-level auth validity for REUSE on a later window (scenario-01 Phase 12, GLA-050/051) —
+    // keyed by the recipient from the SIGNED grant, TTL-bounded. A second window's grant for THIS recipient, while
+    // unexpired + sufficient, skips the ceremony. Disabled when the reuse TTL is 0.
+    this.recordRecipientAuth(verified.recipient, factResult.authStrength);
     this.sendJson(res, 200, { authorized: true, auth_strength: factResult.authStrength });
   }
 
@@ -741,13 +780,22 @@ export class AccessGateway {
         this.refuseUpgrade(socket, statusForReason(verified.reason));
         return;
       }
-      // Require the bound identity: the grant must have been authorized by a successful step-up (GLA-035 AC#4).
-      if (!this.authorizedGrants.has(verified.capability.id as CapabilityId)) {
-        this.refuseUpgrade(socket, 401);
-        return;
+      // Require the bound identity: the grant must have been authorized by a successful step-up (GLA-035 AC#4) —
+      // OR, on a SECOND window, by a still-VALID reused auth for the bound recipient (GLA-050/051: no re-prompt).
+      // Reuse authorizes THIS grant only when the recipient's prior step-up is unexpired + sufficient; an
+      // expired/absent validity (or a different recipient) is NOT authorized → refused. The grant was already
+      // verified statelessly above, so reuse never bypasses the grant check.
+      const grantId = verified.capability.id as CapabilityId;
+      if (!this.authorizedGrants.has(grantId)) {
+        if (this.recipientAuthValid(verified.recipient)) {
+          this.authorizedGrants.add(grantId);
+        } else {
+          this.refuseUpgrade(socket, 401);
+          return;
+        }
       }
       // AUTHORIZED, in-window: proxy the WS upgrade to the capsule's noVNC endpoint and NOTHING else.
-      this.proxyUpgrade(req, socket, head, route, verified.capability.id as CapabilityId);
+      this.proxyUpgrade(req, socket, head, route, grantId);
     } catch {
       this.refuseUpgrade(socket, 500);
     }
@@ -829,6 +877,51 @@ export class AccessGateway {
   private strengthSufficient(strength: AuthStrength): boolean {
     const rank: Record<AuthStrength, number> = { none: 0, password: 1, webauthn: 2 };
     return rank[strength] >= rank[this.requiredAuthStrength];
+  }
+
+  /**
+   * Record a recipient's successful step-up for REUSE on a later window (GLA-050/051), TTL-bounded by `authReuseTtlMs`
+   * from now. Keyed by the recipient READ FROM THE SIGNED GRANT (recipient-specific). A 0 TTL disables reuse (records
+   * nothing → every window re-prompts).
+   */
+  private recordRecipientAuth(recipient: RecipientRef, authStrength: AuthStrength): void {
+    if (this.authReuseTtlMs <= 0) {
+      return; // reuse disabled — never re-prompt-free.
+    }
+    this.recipientAuth.set(recipient, {
+      authStrength,
+      expiresAt: Date.now() + this.authReuseTtlMs,
+    });
+  }
+
+  /**
+   * Is this recipient's prior step-up still VALID for reuse — an unexpired record whose strength meets the required
+   * strength (GLA-050/051)? An EXPIRED record is pruned and treated as absent (so a later check re-prompts). A
+   * different recipient (no record) is not valid. The check is the only thing reuse consults beyond the (already
+   * performed) cryptographic grant verify — so reuse stays recipient-specific + TTL-bounded + non-bypassable.
+   */
+  private recipientAuthValid(recipient: RecipientRef): boolean {
+    if (this.authReuseTtlMs <= 0) {
+      return false;
+    }
+    const rec = this.recipientAuth.get(recipient);
+    if (rec === undefined) {
+      return false;
+    }
+    if (Date.now() >= rec.expiresAt) {
+      // Expired: prune it so a stale record can never authorize, and the next window re-prompts (Phase 6).
+      this.recipientAuth.delete(recipient);
+      return false;
+    }
+    return this.strengthSufficient(rec.authStrength);
+  }
+
+  /**
+   * Is this recipient's auth currently valid for reuse? (A probe for tests/observability — GLA-050/051: a returning
+   * recipient within the TTL reuses; an expired one re-prompts.) Read-only.
+   */
+  isRecipientAuthValid(recipient: RecipientRef): boolean {
+    return this.recipientAuthValid(recipient);
   }
 
   /** Refuse a WS upgrade with a minimal HTTP status line, then destroy the socket (resolves onward to nothing). */
