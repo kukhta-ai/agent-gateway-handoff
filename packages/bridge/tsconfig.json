@@ -11,6 +11,9 @@
       "path": "../../packages/kernel"
     },
     {
+      "path": "../../packages/admission"
+    },
+    {
       "path": "../../packages/assembly"
     },
     {
@@ -18,6 +21,12 @@
     },
     {
       "path": "../../packages/catalog"
+    },
+    {
+      "path": "../../packages/session"
+    },
+    {
+      "path": "../../packages/task"
     }
   ]
 }
