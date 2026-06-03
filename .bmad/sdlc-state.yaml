@@ -7,9 +7,17 @@ phase: 5
 phase_name: "Build — authentik delegated-IdP epic (GLA-067..076), per-story loop"
 branch: feature/authentik
 epic: authentik             # delegated identity provider behind the existing AuthProvider seam (passkey + password + MFA)
-active_story: GLA-075        # next: plan the E2E verification. DONE through GLA-074 (8/10).
+active_story: GLA-074        # RE-OPENED to incorporate real-authentik rehearsal findings (amr recipe + bootstrap seam). DONE through GLA-075 (9/10 + 074 hardening).
 review_cycle: 0
-authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-074]   # 073 standup plan; 074 wpm authentik installer (3 install-backlog tasks + standup skill + 4 templates + 3 probes; wpm validate+dry-run clean; secrets parameterized; honest-deferral AC#8). REMAINING: 075 e2e-plan, 076 capstone E2E (full browser round-trip + deploy validation).
+authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
+# REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
+# (Redis-free path; postgres+server+worker); GLA's REAL adapter did a REAL OIDC round-trip -> finishEnrollment+verifyAssertion ->
+# {ok:true, authStrength:"password"} against real discovery + real RS256 JWKS + real iss/aud/nonce + real sub-bind (hashed_user_id =
+# immutable sub, stable on re-auth); real negative subject_mismatch; ADAPTER UNCHANGED. KEY GOTCHA (confirms 073 §8): authentik 2025.10
+# emits amr:[] by DEFAULT -> GLA correctly floors to password (never up-maps); a DISTINGUISHING amr needs a custom OAuth2 scope mapping
+# reading the login Event's auth_method (proven recipe -> amr:["pwd"]). GLA-074 RE-OPENED to capture that recipe + a first-boot bootstrap
+# seam (the installer was operationally incomplete without them). Passkey->webauthn real round-trip stays deploy-only (authentik flow config).
+# Live authentik UP at localhost:9000 (/tmp/authentik-rehearsal/; teardown: docker compose down -v).
 # NOTE: real authentik can't be stood up in this sandbox (Docker present but /workspace disk ~457M free); 074 validated
 # structurally (wpm project validate + build dry-run) + probe LOGIC; the real host-level standup + E2E OIDC proof is the
 # hermes-1 deploy / GLA-076. Per GLA-073 §1, authentik runs Local-External at the VPS host (nested Docker broken in hermes-1).
