@@ -42,7 +42,12 @@ import {
   type TaskId,
   glaError,
 } from "@gla/kernel";
-import { type ProvisionResult, SessionService, type SessionView } from "@gla/session";
+import {
+  type HandoffView,
+  type ProvisionResult,
+  SessionService,
+  type SessionView,
+} from "@gla/session";
 import { type CreateTaskInput, TaskService, type TaskView } from "@gla/task";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
@@ -419,6 +424,104 @@ export class AgentBridge {
     return this.session.list(f).map(SessionService.toView);
   }
 
+  // ── Handoff (Slice 4b, docs/05 §3 handoff) ─────────────────────────────────────────────────────
+
+  /**
+   * `handoff open --session <id> [--reason --recipient --ttl]` (docs/05; GLA-032/033): open a recipient-bound
+   * window onto a live session — the open-window saga (mint grant -> program route -> deliver link). Returns
+   * `{handoff_id, link, recipient, expires_at}`. A session with no live capsule throws `state.conflict` (exit 7);
+   * a saga step failure throws the typed error (the CLI maps `.code` -> its exit code).
+   */
+  async handoffOpen(args: {
+    session: string;
+    reason?: string;
+    recipient?: string;
+    ttl?: string;
+  }): Promise<HandoffView> {
+    const opts: { recipient?: RecipientRef; reason?: string; ttl?: string } = {};
+    if (args.reason !== undefined) {
+      opts.reason = args.reason;
+    }
+    if (args.recipient !== undefined) {
+      opts.recipient = args.recipient as RecipientRef;
+    }
+    if (args.ttl !== undefined) {
+      opts.ttl = args.ttl;
+    }
+    return this.session.openHandoff(args.session as SessionView["session_id"], opts);
+  }
+
+  /**
+   * `handoff wait <id> [--timeout]` (docs/05; GLA-032): BLOCK until the human completes the window or it expires.
+   * **Slice 4b scope:** the long-poll blocks until the window leaves `open` (cancel/expire) or the timeout elapses;
+   * on timeout/expiry it throws `auth.expired` which the wait surface maps to **exit 6** (Slice 5 makes it RETURN a
+   * completion envelope when the Completion service validates the human's done-signal). It polls the window state on
+   * an interval, so a crashed agent can re-issue the wait and re-attach. Read-only long-poll.
+   *
+   * @param id        the handoff window id
+   * @param timeoutMs the per-call deadline in ms (defaults to the window's own TTL via its `expires_at`)
+   */
+  async handoffWait(id: string, timeoutMs?: number): Promise<HandoffWaitResult> {
+    const windowId = id as HandoffView["handoff_id"];
+    // Resolve the deadline: the explicit timeout, else the window's own TTL.
+    const view = this.session.handoffGet(windowId); // throws state.not_found (exit 5) if unknown
+    const ttlDeadline = Date.parse(view.expires_at);
+    const deadline =
+      timeoutMs !== undefined
+        ? Date.now() + timeoutMs
+        : Number.isNaN(ttlDeadline)
+          ? Date.now() + 15 * 60_000
+          : ttlDeadline;
+
+    const POLL_MS = 50;
+    // Block until the window leaves `open`, or the deadline passes.
+    for (;;) {
+      const w = this.session.handoffGet(windowId);
+      if (w.state === "completed") {
+        // Slice 5 will carry the completion envelope here; for now report the terminal disposition.
+        return { handoff_id: windowId, status: "completed", state: w.state };
+      }
+      if (w.state === "cancelled" || w.state === "expired") {
+        // The window closed without a validated completion -> a wait timeout/expiry (exit 6 at the surface).
+        throw glaError(
+          "auth.expired",
+          `handoff window "${windowId}" closed (${w.state}) before completion`,
+          {
+            detail: { id: windowId, state: w.state },
+            retryable: false,
+          },
+        );
+      }
+      if (Date.now() >= deadline) {
+        // The wait timed out while the window was still open -> exit 6.
+        throw glaError("auth.expired", `handoff wait timed out for "${windowId}"`, {
+          detail: { id: windowId },
+          retryable: false,
+        });
+      }
+      await delay(POLL_MS);
+    }
+  }
+
+  /** `handoff get <id>` (docs/05): read one window's state. Throws `state.not_found` (exit 5). Read-only. */
+  handoffGet(id: string): HandoffView {
+    return this.session.handoffGet(id as HandoffView["handoff_id"]);
+  }
+
+  /** `handoff list [--session <id>]` (docs/05): list windows, optionally for a session. Read-only. */
+  handoffList(filter?: { session?: string }): HandoffView[] {
+    const f =
+      filter?.session !== undefined
+        ? { session: filter.session as SessionView["session_id"] }
+        : undefined;
+    return this.session.handoffList(f);
+  }
+
+  /** `handoff cancel <id>` (docs/05; GLA-033): close the window early (revoke grant, force-close WS, unmount route). */
+  async handoffCancel(id: string): Promise<HandoffView> {
+    return this.session.cancelHandoff(id as HandoffView["handoff_id"]);
+  }
+
   /**
    * Resolve a task's `task` capability into a verified {@link Capability} to present to admission. The
    * task cap carries a `scope` caveat `/task/<id>`, so it is verified WITH that scope path (the
@@ -486,8 +589,31 @@ export type SessionCreateResult =
       connector?: ProvisionResult["connector"];
     };
 
+/**
+ * What `handoff wait` returns when the window reaches a terminal state WITH a validated completion (Slice 5 fills
+ * `status`/`result`/`next` from the Completion envelope). Slice 4b blocks until the window leaves `open` and reports
+ * the terminal disposition; a cancel/expire/timeout throws `auth.expired` (exit 6) instead of returning.
+ */
+export interface HandoffWaitResult {
+  handoff_id: HandoffView["handoff_id"];
+  /** The completion status (Slice 5: "submitted"/"verified" from the envelope; Slice 4b: the terminal disposition). */
+  status: string;
+  /** The window state at return (`completed`). */
+  state: HandoffView["state"];
+}
+
+/** Sleep `ms` (the handoff-wait long-poll interval). Unref'd so it never keeps the process alive on its own. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    if (typeof t.unref === "function") {
+      t.unref();
+    }
+  });
+}
+
 /** Re-export the kernel error helper so the CLI can build taxonomy errors without re-importing. */
 export { glaError };
 export type { Availability, IndexedEntity, TemplateShowResult, WhoamiResult };
 export type { AuthorityProfile, MintedAuthority } from "@gla/capability";
-export type { ProvisionResult } from "@gla/session";
+export type { HandoffView, ProvisionResult } from "@gla/session";
