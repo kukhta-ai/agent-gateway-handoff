@@ -17,7 +17,8 @@
     "test": "vitest run",
     "gate": "pnpm run typecheck && biome ci . && vitest run",
     "gate:selftest": "node tools/boundary-check/selftest.mjs",
-    "gla": "node surfaces/cli/bin/gla.mjs"
+    "gla": "node surfaces/cli/bin/gla.mjs",
+    "serve": "node packages/app/bin/gla.mjs serve"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

@@ -669,4 +669,7 @@ function delay(ms: number): Promise<void> {
 export { glaError };
 export type { Availability, IndexedEntity, TemplateShowResult, WhoamiResult };
 export type { AuthorityProfile, MintedAuthority } from "@gla/capability";
-export type { HandoffView, ProvisionResult } from "@gla/session";
+export type { HandoffView, ProvisionResult, SessionView } from "@gla/session";
+// The Task/Session view shapes the bridge returns — re-exported so an edge transport (the daemon bridge
+// client, surfaces/cli) can type its forwarded results without depending on @gla/task / @gla/session directly.
+export type { TaskView } from "@gla/task";
