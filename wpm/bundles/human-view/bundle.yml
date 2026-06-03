@@ -1,0 +1,13 @@
+id: human-view
+version: 0.1.0
+summary: Install the human-view stack (Xvfb + x11vnc + websockify + noVNC) so a
+  person can watch and drive the live browser in their tab. Installs system
+  packages.
+confirmation: dangerous
+requires: { gla-core: ^0.1.0, browser-runtime: ^0.1.0 }
+payload:
+  files: []
+  templates: []
+  scripts: []
+  skills: []
+installerSkills: []

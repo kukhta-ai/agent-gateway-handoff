@@ -1,0 +1,2 @@
+# Keeps bundles/<id>/installer-skills/ present so the per-bundle scope alias (.claude/skills → installer-skills/)
+# the install creates is non-broken. Add bundle-local install-time helper skills here (doc 06/07).

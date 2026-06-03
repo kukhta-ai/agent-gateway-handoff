@@ -1,0 +1,46 @@
+---
+id: {{bundle-id}}-1
+title: Detect whether the capability is already present
+status: To Do
+assignee: []
+created_date: '2026-01-01 00:00'
+labels:
+  - 'kind:state'
+  - 'step:detect'
+dependencies: []
+ordinal: 1000
+---
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 the bundle's intent is checked against this environment by inspection, and whether it is already satisfied — and by what mechanism — is determined, never assumed
+<!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Effect verified against the task acceptance criteria (verify before record)
+- [ ] #2 Files placed or modified are recorded via --ref and their checksum journaled in the notes
+- [ ] #3 Ownership recorded in the notes: installed by us vs adopted from the user's machine
+- [ ] #4 Inverse op recorded in the notes: the uninstall step plus the condition under which it runs
+- [ ] #5 Decisions and their rationale recorded (notes, or --final for a pinned decision)
+- [ ] #6 Non-file effects recorded in the notes: services started, registrations made, artifacts built
+<!-- DOD:END -->
+
+## Description
+
+The DETECT step of this bundle's uniform loop (detect → setup → verify), and a `kind:state` task — idempotent,
+so re-running it is part of Repair. Detection is the load-bearing primitive: it is what makes re-runs safe and
+collapses install / update / repair into one workflow.
+
+1. **Read** this task's prior receipt entry (keyed by `step:detect`) — understand what a previous pass found and
+   why, not just a status flag.
+2. **Inspect** the environment for ⟨what "present" means for `{{bundle-id}}` — the tool/binary/config/registration
+   this bundle delivers⟩. Reason against the acceptance criterion; the intent may be met by a different
+   mechanism than this recipe names, or a partial prior attempt may need reconciling.
+3. If the intent is **already satisfied**, RECORD that (and how you determined it) and let `{{bundle-id}}-2`
+   skip its work. Otherwise, hand off to `{{bundle-id}}-2` to set it up.
+
+Detection records what is true *now* by looking; it never assumes the recipe's prior runs reflect current
+reality. A pure-detection pass that places nothing has no reversible effect — where that is genuinely the case
+the executor may opt this task out of the recording defaults — but if detection adopts or marks anything, record
+it. Never reach into another bundle's state.

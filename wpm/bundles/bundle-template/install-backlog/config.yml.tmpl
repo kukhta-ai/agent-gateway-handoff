@@ -1,0 +1,22 @@
+project_name: "{{bundle-id}}"
+default_status: "To Do"
+statuses: ["To Do", "In Progress", "Done"]
+date_format: yyyy-mm-dd
+# Filesystem-only: this is a shipped recipe, not a git working copy (doc 07 §enforcement).
+filesystem_only: true
+auto_commit: false
+remote_operations: false
+# Self-describing task ids ({{bundle-id}}-1, …): MUST be set before any task is created, which is why the
+# pre-initialized tasks already use it. Changing it later orphans the existing tasks (doc 08).
+task_prefix: "{{bundle-id}}"
+# The Definition of Done gates recording: a setup task cannot be marked Done until the receipt facts hold, so
+# recording the install receipt stops being optional. Each item maps one-to-one to a receipt fact (doc 07
+# §"The enforcement — Definition of Done"). It is also injected as the default DoD on each new task created in
+# this backlog; the shipped tasks below carry it explicitly so the gate applies before any `task create` runs.
+definition_of_done:
+  - "Effect verified against the task acceptance criteria (verify before record)"
+  - "Files placed or modified are recorded via --ref and their checksum journaled in the notes"
+  - "Ownership recorded in the notes: installed by us vs adopted from the user's machine"
+  - "Inverse op recorded in the notes: the uninstall step plus the condition under which it runs"
+  - "Decisions and their rationale recorded (notes, or --final for a pinned decision)"
+  - "Non-file effects recorded in the notes: services started, registrations made, artifacts built"

@@ -1,0 +1,17 @@
+id: gla-core
+version: 0.1.0
+summary: "Stand up the GLA runtime: build it, install a service that runs 'gla
+  serve' (Access Gateway on :3000 + local Agent Bridge socket), and verify it
+  answers."
+confirmation: safe
+requires: {}
+payload:
+  files: []
+  templates:
+    - gla.env.tmpl
+    - gla.service.tmpl
+  scripts: []
+  skills:
+    - name: connect-and-drive-gla
+      path: payload/agent-skills/connect-and-drive-gla/SKILL.md
+installerSkills: []
