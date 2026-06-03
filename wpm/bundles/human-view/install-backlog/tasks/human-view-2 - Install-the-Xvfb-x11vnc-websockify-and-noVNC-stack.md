@@ -16,7 +16,11 @@ ordinal: 2000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-SETUP step (kind:state, idempotent), confirmation-level dangerous because it installs system packages (apt: xvfb, x11vnc, websockify, and the noVNC assets). Surface the plan and get consent before installing anything. After setup the full stack is present so the launcher can select the full noVNC path rather than headless. Record what was installed per component with the inverse op; record any component adopted from the host as adopted so uninstall leaves it. Never touch a sibling bundle's state.
+SETUP step (kind:state, idempotent), confirmation-level dangerous because it installs system packages (the validated path is apt-installing xvfb, x11vnc, websockify, and the noVNC client assets — on Debian/Ubuntu the `novnc` package, or the upstream assets where it is unavailable). Surface the plan and get consent before installing anything. After setup the full stack is present so the launcher can select the full noVNC path rather than headless.
+
+Shared-memory caveat: Chromium rendering heavy pages can exhaust the default /dev/shm (often only 64 MB in a container), crashing tabs. Where the host or capsule runtime allows it, raise the shared-memory size (e.g. a larger --shm-size for a container, or mounting a bigger /dev/shm) so the live view stays stable under real pages; record the choice. This is a tuning decision, not a hard requirement for bring-up.
+
+Record what was installed per component with the inverse op; record any component adopted from the host as adopted so uninstall leaves it. Never touch a sibling bundle's state.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

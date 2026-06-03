@@ -2,7 +2,13 @@
 # Per-bundle metadata (version, summary, requires) lives in each bundles/<id>/bundle.yml.
 project:
   name: gla
-  version: 0.1.0 # the project's release version (distinct from per-bundle versions)
+  version: 0.2.0 # the project's release version (distinct from per-bundle versions)
+  description: "Install GLA (Gateway Live Access) — the agent-to-human handoff
+    control plane — onto a host: the gla serve runtime plus optional browser,
+    human-view, isolation, edge-proxy, and identity bundles."
+  license: MIT
+  repository: https://github.com/your-org/gla
+  author: GLA project
 
 # The agents this installer supports; each becomes a scope-alias the install creates.
 # Add with `wpm project targets add <agent>` (e.g. claude-code).

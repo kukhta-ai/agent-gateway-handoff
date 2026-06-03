@@ -16,7 +16,7 @@ ordinal: 3000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-VERIFY step (kind:state). Prove the browser is functional, not merely installed: a headless Chromium launches under Playwright/CDP and reports its version, and a trivial navigation (open a page, read its title) succeeds. The launch must work for the same OS user that runs the GLA service, so the capsule the daemon spawns can use it. Re-read and confirm the setup receipt entries. On failure return to setup; contain failure to this bundle.
+VERIFY step (kind:state). Prove the browser is functional, not merely installed: a headless Chromium launches under Playwright/CDP and reports its version, and a trivial navigation (open a page, read its title) succeeds. The launch must work for the same OS user that runs the GLA service (that user is recorded in gla-core's receipt — the dependency this bundle requires — so the capsule the daemon spawns can use the browser; a browser installed only for a different user would not be reachable by the service). Re-read and confirm the setup receipt entries. On failure return to setup; contain failure to this bundle.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
