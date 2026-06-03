@@ -452,11 +452,12 @@ export class AgentBridge {
   }
 
   /**
-   * `handoff wait <id> [--timeout]` (docs/05; GLA-032): BLOCK until the human completes the window or it expires.
-   * **Slice 4b scope:** the long-poll blocks until the window leaves `open` (cancel/expire) or the timeout elapses;
-   * on timeout/expiry it throws `auth.expired` which the wait surface maps to **exit 6** (Slice 5 makes it RETURN a
-   * completion envelope when the Completion service validates the human's done-signal). It polls the window state on
-   * an interval, so a crashed agent can re-issue the wait and re-attach. Read-only long-poll.
+   * `handoff wait <id> [--timeout]` (docs/05; GLA-032/042): BLOCK until the human completes the window or it
+   * expires. **On a validated COMPLETION (Slice 5)** it RETURNS the normalized completion envelope —
+   * `{status, result?, next?}` (the Completion service validated the human's done-signal; scenario-01 Phase 8/13).
+   * **On a cancel/expiry/timeout** it throws `auth.expired`, which the wait surface maps to **exit 6** (the window
+   * closed WITHOUT a validated completion — a non-firing detector TTL-expires, GLA-043 AC#3). It polls the window
+   * state on an interval, so a crashed agent can re-issue the wait and re-attach. Read-only long-poll.
    *
    * @param id        the handoff window id
    * @param timeoutMs the per-call deadline in ms (defaults to the window's own TTL via its `expires_at`)
@@ -478,8 +479,20 @@ export class AgentBridge {
     for (;;) {
       const w = this.session.handoffGet(windowId);
       if (w.state === "completed") {
-        // Slice 5 will carry the completion envelope here; for now report the terminal disposition.
-        return { handoff_id: windowId, status: "completed", state: w.state };
+        // RETURN the validated completion envelope (Slice 5): {status, result?, next?}. The window closed by a
+        // Completion-service-validated done-signal — the agent learns the step completed (without the secret).
+        const result: HandoffWaitResult = {
+          handoff_id: windowId,
+          status: w.completion?.status ?? "completed",
+          state: w.state,
+        };
+        if (w.completion?.result !== undefined) {
+          result.result = w.completion.result;
+        }
+        if (w.completion?.next !== undefined) {
+          result.next = w.completion.next;
+        }
+        return result;
       }
       if (w.state === "cancelled" || w.state === "expired") {
         // The window closed without a validated completion -> a wait timeout/expiry (exit 6 at the surface).
@@ -590,16 +603,21 @@ export type SessionCreateResult =
     };
 
 /**
- * What `handoff wait` returns when the window reaches a terminal state WITH a validated completion (Slice 5 fills
- * `status`/`result`/`next` from the Completion envelope). Slice 4b blocks until the window leaves `open` and reports
- * the terminal disposition; a cancel/expire/timeout throws `auth.expired` (exit 6) instead of returning.
+ * What `handoff wait` RETURNS when the window completes WITH a validated completion (Slice 5) — the normalized
+ * envelope `{status, result?, next?}` (docs/05 `handoff wait`). `status` is the stable envelope status
+ * ("submitted"/"verified"); `result` is the detector-shaped data; `next` is the optional multi-step hint. A
+ * cancel/expire/timeout throws `auth.expired` (exit 6) instead of returning.
  */
 export interface HandoffWaitResult {
   handoff_id: HandoffView["handoff_id"];
-  /** The completion status (Slice 5: "submitted"/"verified" from the envelope; Slice 4b: the terminal disposition). */
+  /** The completion status — the stable envelope status ("submitted"/"verified"), from the Completion service. */
   status: string;
   /** The window state at return (`completed`). */
   state: HandoffView["state"];
+  /** The detector-shaped completion result (validated against the contract), when the envelope carries one. */
+  result?: Record<string, unknown>;
+  /** An optional multi-step hint from the envelope (e.g. "email-verification"), when present. */
+  next?: string;
 }
 
 /** Sleep `ms` (the handoff-wait long-poll interval). Unref'd so it never keeps the process alive on its own. */

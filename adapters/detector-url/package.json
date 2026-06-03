@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "CompletionDetector: url-watcher (+ user-done) (stub).",
+  "description": "CompletionDetector: url-watcher (+ user-done) — watches the capsule's live URL over CDP and emits raw signals.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -19,5 +19,8 @@
   },
   "dependencies": {
     "@gla/kernel": "workspace:*"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.49.1"
   }
 }
