@@ -33,7 +33,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/kernel
       '@simplewebauthn/server':
-        specifier: ^13.2.2
+        specifier: ^13.3.1
         version: 13.3.1
 
   adapters/channel-cli:
@@ -59,6 +59,10 @@ importers:
       '@gla/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
+    devDependencies:
+      playwright-core:
+        specifier: ^1.49.1
+        version: 1.60.0
 
   adapters/entrypoint-novnc:
     dependencies:
