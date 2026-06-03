@@ -1,0 +1,31 @@
+{
+  "name": "gla",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "GLA — agent gateway: a modular-monolith control plane on a narrow stable core (GLA-003 skeleton).",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "vitest run",
+    "gate": "pnpm run typecheck && biome ci . && vitest run",
+    "gate:selftest": "node tools/boundary-check/selftest.mjs",
+    "gla": "node surfaces/cli/bin/gla.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@types/node": "^22.10.10",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@biomejs/biome", "esbuild"]
+  }
+}
