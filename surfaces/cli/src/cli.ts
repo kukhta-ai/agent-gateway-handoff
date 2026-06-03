@@ -17,6 +17,7 @@ import { AgentBridge } from "@gla/bridge";
 import { type OpaqueToken, exitCodeFor, glaError, isGlaError } from "@gla/kernel";
 import { ExitCode } from "./exit-codes.js";
 import type { Output, OutputMode } from "./output.js";
+import type { BridgeLike } from "./transport.js";
 
 /** The proposal shape the bridge's `sessionCreate` consumes (sans the bound `task`). */
 interface CliProposal {
@@ -222,9 +223,16 @@ function usagePayload(): Record<string, unknown> {
   };
 }
 
-/** Injectable services for the dispatcher (so tests can drive a custom Bridge). */
+/**
+ * Injectable services for the dispatcher (so tests can drive a custom Bridge). `bridge` is typed as the
+ * structural {@link BridgeLike} surface so the dispatcher runs IDENTICALLY over either an in-process
+ * {@link AgentBridge} (the default + every existing test/E2E) OR a {@link DaemonBridgeClient} that forwards
+ * each op to a running `gla serve` daemon (the `GLA_ENDPOINT`-is-set path). The output + exit-code contract
+ * is the same on both — the dispatcher already `await`s every call, so a sync in-process read and a Promise
+ * from the daemon client are interchangeable.
+ */
 export interface CliServices {
-  bridge: AgentBridge;
+  bridge: BridgeLike;
 }
 
 /** Build the default services (the in-tree reference-slice Bridge). */
@@ -280,7 +288,7 @@ export async function run(
           return usageError(out, `'whoami' takes no subcommand (got '${verb}')`);
         // Local profile: connect (anchor the authority) then resolve identity + allowed ops.
         const connected = await services.bridge.connect();
-        const who = services.bridge.whoami(connected.token as OpaqueToken);
+        const who = await services.bridge.whoami(connected.token as OpaqueToken);
         out.emit(who);
         return ExitCode.OK;
       }
@@ -292,7 +300,7 @@ export async function run(
         const kind = parsed.flags.get("kind");
         if (typeof kind === "string") filter.kind = kind;
         if (parsed.flags.get("available") === true) filter.available = true;
-        out.emit(services.bridge.catalogList(filter));
+        out.emit(await services.bridge.catalogList(filter));
         return ExitCode.OK;
       }
 
@@ -300,13 +308,13 @@ export async function run(
         if (verb === "list") {
           const available =
             parsed.flags.get("available") === true ? { available: true } : undefined;
-          out.emit(services.bridge.templateList(available));
+          out.emit(await services.bridge.templateList(available));
           return ExitCode.OK;
         }
         if (verb === "show") {
           const id = parsed.positionals[2];
           if (id === undefined) return usageError(out, "usage: gla template show <id>");
-          out.emit(services.bridge.templateShow(id));
+          out.emit(await services.bridge.templateShow(id));
           return ExitCode.OK;
         }
         return usageError(out, "usage: gla template (list | show <id>)");
@@ -315,13 +323,15 @@ export async function run(
       case "skill": {
         if (verb === "list") {
           const forT = parsed.flags.get("for");
-          out.emit(services.bridge.skillList(typeof forT === "string" ? { for: forT } : undefined));
+          out.emit(
+            await services.bridge.skillList(typeof forT === "string" ? { for: forT } : undefined),
+          );
           return ExitCode.OK;
         }
         if (verb === "show") {
           const id = parsed.positionals[2];
           if (id === undefined) return usageError(out, "usage: gla skill show <id>");
-          out.emit(services.bridge.skillShow(id));
+          out.emit(await services.bridge.skillShow(id));
           return ExitCode.OK;
         }
         return usageError(out, "usage: gla skill (list | show <id>)");
@@ -340,12 +350,14 @@ export async function run(
         if (verb === "get") {
           const id = parsed.positionals[2];
           if (id === undefined) return usageError(out, "usage: gla task get <id>");
-          out.emit(services.bridge.taskGet(id));
+          out.emit(await services.bridge.taskGet(id));
           return ExitCode.OK;
         }
         if (verb === "list") {
           const state = parsed.flags.get("state");
-          out.emit(services.bridge.taskList(typeof state === "string" ? { state } : undefined));
+          out.emit(
+            await services.bridge.taskList(typeof state === "string" ? { state } : undefined),
+          );
           return ExitCode.OK;
         }
         if (verb === "complete") {
@@ -383,7 +395,7 @@ export async function run(
         if (verb === "get") {
           const id = parsed.positionals[2];
           if (id === undefined) return usageError(out, "usage: gla session get <id>");
-          out.emit(services.bridge.sessionGet(id));
+          out.emit(await services.bridge.sessionGet(id));
           return ExitCode.OK;
         }
         if (verb === "list") {
@@ -392,7 +404,7 @@ export async function run(
           if (typeof task === "string") f.task = task;
           const state = parsed.flags.get("state");
           if (typeof state === "string") f.state = state;
-          out.emit(services.bridge.sessionList(f));
+          out.emit(await services.bridge.sessionList(f));
           return ExitCode.OK;
         }
         if (verb === "revoke") {
@@ -452,13 +464,15 @@ export async function run(
         if (verb === "get") {
           const id = parsed.positionals[2];
           if (id === undefined) return usageError(out, "usage: gla handoff get <id>");
-          out.emit(services.bridge.handoffGet(id));
+          out.emit(await services.bridge.handoffGet(id));
           return ExitCode.OK;
         }
         if (verb === "list") {
           const session = parsed.flags.get("session");
           out.emit(
-            services.bridge.handoffList(typeof session === "string" ? { session } : undefined),
+            await services.bridge.handoffList(
+              typeof session === "string" ? { session } : undefined,
+            ),
           );
           return ExitCode.OK;
         }
