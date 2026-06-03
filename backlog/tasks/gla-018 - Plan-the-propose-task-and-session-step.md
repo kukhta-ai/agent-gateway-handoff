@@ -1,9 +1,10 @@
 ---
 id: GLA-018
 title: Plan the propose-task-and-session step
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-03 03:31'
+updated_date: '2026-06-03 08:21'
 labels:
   - plan
   - architecture
@@ -27,11 +28,17 @@ Why: the agent turns intent into a concrete proposal under a durable task; this 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The Task service's part is specified: how a task (explicit or implicit) is opened as the revocation, budget, and audit root, with its lifecycle.
-- [ ] #2 The Capability service's part is specified: how a task capability is minted with the agent-authority as parent and narrower scope.
-- [ ] #3 The Agent Bridge's part is specified: how a concrete assembly proposal plus the task capability is submitted, and what id is returned.
-- [ ] #4 The operating experience is designed: how the agent composes a proposal from a template and learns of a malformed one before provisioning.
-- [ ] #5 An implementation plan for the build task exists, with how an opened task and a submitted proposal are observed.
-- [ ] #6 Dependencies are identified and classified; any non-traditional one has a wpm-installer-package task in this backlog.
-- [ ] #7 The task and proposal seams are specified at full capability so multi-session and other intents need no seam change.
+- [x] #1 The Task service's part is specified: how a task (explicit or implicit) is opened as the revocation, budget, and audit root, with its lifecycle.
+- [x] #2 The Capability service's part is specified: how a task capability is minted with the agent-authority as parent and narrower scope.
+- [x] #3 The Agent Bridge's part is specified: how a concrete assembly proposal plus the task capability is submitted, and what id is returned.
+- [x] #4 The operating experience is designed: how the agent composes a proposal from a template and learns of a malformed one before provisioning.
+- [x] #5 An implementation plan for the build task exists, with how an opened task and a submitted proposal are observed.
+- [x] #6 Dependencies are identified and classified; any non-traditional one has a wpm-installer-package task in this backlog.
+- [x] #7 The task and proposal seams are specified at full capability so multi-session and other intents need no seam change.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Design: docs/architecture/slice-2-propose-admit.md §propose. Task root as revocation/budget/audit root + lifecycle; task cap minted parent=agent-authority, narrower scope; bridge proposal submission + returned id; operating experience (compose from template, learn malformed before provisioning); build/observation plan; deps in-tree; task+proposal seams full-capability (multi-session/other intents = no seam change). Rule-3 docs-driven fallback. Implemented+tested in GLA-019.
+<!-- SECTION:NOTES:END -->

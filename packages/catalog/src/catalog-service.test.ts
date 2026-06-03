@@ -18,7 +18,7 @@ describe("CatalogService.list — system-derived availability (GLA-017 AC#3)", (
         "entrypoint-novnc",
         "connector-cdp",
         "workspace-profile",
-        "detector-url",
+        "url-watcher",
         "user-done",
       ]),
     );
