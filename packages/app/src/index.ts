@@ -39,7 +39,8 @@ import {
 } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
-import { SessionService } from "@gla/session";
+import { RouteController } from "@gla/route";
+import { type HandoffDeps, SessionService } from "@gla/session";
 import { TaskService } from "@gla/task";
 import {
   CapsuleLifecycleManager,
@@ -123,6 +124,30 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
   chromiumPath?: string;
   /** Override the CDP start timeout, ms. */
   startTimeoutMs?: number;
+  /**
+   * Wire the Slice-4b HANDOFF pipeline into the SessionService (so `handoff open/wait/get/list/cancel` work). When
+   * present, the Access Gateway + Route controller + identity step-up are wired and the session's open-window saga
+   * mints a recipient-bound grant, programs a route, and delivers the link. Requires the WebAuthn rp config (the
+   * gateway runs the step-up against the enrolled credential).
+   */
+  handoff?: {
+    /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `"localhost"`. */
+    rpID?: string;
+    /** The human-visible RP name. Default `"GLA"`. */
+    rpName?: string;
+    /** The expected page ORIGIN(s) the step-up ceremony runs on (scheme+host+port). */
+    expectedOrigin: string | string[];
+    /** The public base URL handoff links are built against, e.g. `http://localhost:3000`. */
+    publicBaseUrl: string;
+    /** Gateway bind host. Default `0.0.0.0` (hermes-1); tests pass `127.0.0.1`. */
+    host?: string;
+    /** Gateway bind port. Default `3000`; tests pass `0` for an ephemeral port. */
+    port?: number;
+    /** Where the channel writes the recipient-bound handoff link (defaults to stdout). */
+    deliverySink?: DeliverySink;
+    /** A shared identity service (so enrollment + handoff use the SAME enrolled credential store). */
+    identity?: IdentityService;
+  };
 }
 
 /** A provisioning bridge plus the worker handles a caller can use to reconcile/teardown (tests, shutdown). */
@@ -144,6 +169,12 @@ export interface ProvisioningStack {
   session: SessionService;
   /** The CDP connector adapter (so a caller can observe its secret_ref→cdpUrl binding map). */
   connector: ConnectorCdpAdapter;
+  /** The Access Gateway (Slice 4b: the sole public entry; serves the handoff step-up + proxies the WS). Present only when handoff is wired. */
+  gateway?: AccessGateway;
+  /** The Route controller (Slice 4b: programs grant-bound routes on the gateway). Present only when handoff is wired. */
+  route?: RouteController;
+  /** The identity service (Slice 4b: enrolled-credential store the gateway steps up against). Present only when handoff is wired. */
+  identity?: IdentityService;
 }
 
 /**
@@ -191,10 +222,70 @@ export function createProvisioningBridge(
   const task = new TaskService({ capability: signer });
   const connector = new ConnectorCdpAdapter();
 
-  // ── The provision-capable SessionService: inject the worker/capability/connector seams.
+  // The noVNC human entrypoint (full mode: the ws endpoint the gateway proxies in Slice 4b; headless: reports
+  // unavailable). Stood up here so the full-mode test can read it AND so the handoff saga can resolve it.
+  const entrypoint = new EntrypointNovncAdapter();
+
+  // ── Slice 4b — the HANDOFF pipeline (the Access Gateway + Route controller + identity step-up + channel),
+  //    wired into the SessionService's open-window saga when `opts.handoff` is present. The gateway is the sole
+  //    public entry (it serves the step-up + proxies the WS); the route controller programs grant-bound routes ON
+  //    the gateway; the saga mints a recipient-bound grant (attenuated from the task cap), programs the route, and
+  //    delivers the recipient-bound link.
+  let gateway: AccessGateway | undefined;
+  let route: RouteController | undefined;
+  let identity: IdentityService | undefined;
+  let handoffDeps: HandoffDeps | undefined;
+  if (opts.handoff !== undefined) {
+    const h = opts.handoff;
+    const authProvider = new AuthWebauthnProvider({
+      rpID: h.rpID ?? "localhost",
+      rpName: h.rpName ?? "GLA",
+      expectedOrigin: h.expectedOrigin,
+    });
+    identity = h.identity ?? new IdentityService({ authProvider });
+    const channel = new ChannelCli({ identity, sink: h.deliverySink ?? deliveryToStdout });
+    // The gateway is the Route controller's abstract edge AND the public step-up/WS-proxy entry. It verifies the
+    // recipient-bound grant statelessly + requires the bound identity (step-up) before forwarding to the capsule.
+    gateway = new AccessGateway({
+      sessionGrants: capability,
+      stepUp: identity,
+      host: h.host ?? "0.0.0.0",
+      port: h.port ?? 3000,
+    });
+    route = new RouteController({ gateway });
+    handoffDeps = {
+      capability: {
+        mintSessionGrant: (req) =>
+          capability
+            .mintSessionGrant(req)
+            .then((m) => ({ grantId: m.capability.id, token: m.token, scopePath: m.scopePath })),
+        revoke: (id) => capability.revoke(id),
+        // Force-close the live WS at the edge so a revoked/expired grant's surface is unreachable (GLA-039 AC#3).
+        forceCloseGrant: (grantId) => gateway?.forceCloseGrant(grantId),
+      },
+      route: {
+        program: (window, grantId, endpoint, path) => {
+          if (route === undefined) {
+            throw new Error("route controller not wired");
+          }
+          return route.program(window, grantId, endpoint, path);
+        },
+        unmount: (windowId) => (route ? route.unmount(windowId) : Promise.resolve()),
+      },
+      entrypoint,
+      channel,
+      // Build the recipient-bound handoff link from the route path + the grant token (the gateway's helper).
+      buildLink: (path, token) => AccessGateway.handoffLink(h.publicBaseUrl, path, token),
+      // The grant attenuates FROM the session's TASK capability TOKEN (so it cannot widen recipient/scope/ttl and
+      // cascades on the task cap's revoke). Resolve the task → its minted task-capability bearer token.
+      parentTokenFor: (_sessionId, taskId) => task.capabilityToken(taskId),
+    };
+  }
+
+  // ── The provision-capable SessionService: inject the worker/capability/connector seams (+ handoff when wired).
   //    `parentCapabilityRefFor` threads the session's TASK capability id down as the connector's parent
   //    (Finding #1) — so `mintConnector` produces a CHILD of the task cap, not a fresh root.
-  const session = new SessionService({
+  const sessionOpts: ConstructorParameters<typeof SessionService>[0] = {
     provision: {
       worker: lifecycle,
       capability: {
@@ -215,7 +306,11 @@ export function createProvisioningBridge(
         return t !== undefined ? (t.taskCapabilityRef as unknown as CapabilityId) : undefined;
       },
     },
-  });
+  };
+  if (handoffDeps !== undefined) {
+    sessionOpts.handoff = handoffDeps;
+  }
+  const session = new SessionService(sessionOpts);
 
   // ── The Cleanup Reconciler's TERMINAL teardown now revokes the connector cap AND unbinds its
   //    secret_ref (Finding #2) — symmetric with the saga's failure compensation, so a session that
@@ -235,11 +330,6 @@ export function createProvisioningBridge(
     },
   });
 
-  // The noVNC human entrypoint (full mode: the ws endpoint the gateway will proxy in Slice 4; headless:
-  // reports unavailable). Stood up here so the full-mode test can read it; not returned to the agent in
-  // Slice 3 (only the connector is — the entrypoint is the human side, proxied later).
-  const entrypoint = new EntrypointNovncAdapter();
-
   // Inject the SHARED signer + capability service + task service into the bridge so the agent anchor,
   // the task cap, and the connector cap are all minted/verified/revoked by the ONE signer (the lineage
   // cascade across anchor→task→connector holds, and the bridge verifies with the minting key).
@@ -255,7 +345,7 @@ export function createProvisioningBridge(
   // `attachConnector` is the worker's connector helper; the session uses the connector port directly,
   // but exposing the reference keeps the wired surface explicit (and tree-shake-safe).
   void attachConnector;
-  return {
+  const stack: ProvisioningStack = {
     bridge,
     lifecycle,
     reconciler,
@@ -266,6 +356,17 @@ export function createProvisioningBridge(
     session,
     connector,
   };
+  // Slice 4b: expose the handoff pipeline handles when wired (so a test/caller can drive the gateway/route/identity).
+  if (gateway !== undefined) {
+    stack.gateway = gateway;
+  }
+  if (route !== undefined) {
+    stack.route = route;
+  }
+  if (identity !== undefined) {
+    stack.identity = identity;
+  }
+  return stack;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

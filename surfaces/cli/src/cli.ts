@@ -44,6 +44,7 @@ const NOUNS = [
   "skill",
   "task",
   "session",
+  "handoff",
   "help",
 ] as const;
 
@@ -66,6 +67,11 @@ Nouns:
   session connector <id>      re-emit the agent-connector for a live capsule (exit 7 if none)
   session get <id>            read a Session aggregate
   session list [flags]        list Sessions
+  handoff open --session <id> open a recipient-bound window (mint grant, mount route, deliver link)
+  handoff wait <id> [--timeout <dur>]  BLOCK until the human completes or the window expires (exit 6)
+  handoff get <id>            read a window's state (open/completed/expired/cancelled)
+  handoff list [--session <id>]  list windows for a session
+  handoff cancel <id>         close the window early (revoke grant, unmount route)
   version                     print client (+ server when connected) version
   help                        print this usage
 
@@ -372,6 +378,72 @@ export async function run(
         return usageError(out, "usage: gla session (create | connector <id> | get <id> | list)");
       }
 
+      case "handoff": {
+        if (verb === "open") {
+          const session = parsed.flags.get("session");
+          if (typeof session !== "string") {
+            return usageError(
+              out,
+              "usage: gla handoff open --session <id> [--reason --recipient --ttl]",
+            );
+          }
+          const args: { session: string; reason?: string; recipient?: string; ttl?: string } = {
+            session,
+          };
+          const reason = parsed.flags.get("reason");
+          if (typeof reason === "string") args.reason = reason;
+          const recipient = parsed.flags.get("recipient");
+          if (typeof recipient === "string") args.recipient = recipient;
+          const ttl = parsed.flags.get("ttl");
+          if (typeof ttl === "string") args.ttl = ttl;
+          out.emit(await services.bridge.handoffOpen(args));
+          return ExitCode.OK;
+        }
+        if (verb === "wait") {
+          const id = parsed.positionals[2];
+          if (id === undefined)
+            return usageError(out, "usage: gla handoff wait <id> [--timeout <dur>]");
+          const timeout = parsed.flags.get("timeout");
+          const timeoutMs = typeof timeout === "string" ? parseDurationToMs(timeout) : undefined;
+          // BLOCK until completion or expiry. A timeout/expiry throws auth.expired; at the WAIT surface that is a
+          // TIMEOUT (exit 6, not the default auth exit 4) — the one documented re-label (errors.ts §5.2 note,
+          // docs/05 §5). Handle it here so the exit code is the timeout branch.
+          try {
+            out.emit(await services.bridge.handoffWait(id, timeoutMs));
+            return ExitCode.OK;
+          } catch (e) {
+            if (isGlaError(e) && e.code === "auth.expired") {
+              out.fail(e.toGlaError());
+              return ExitCode.TIMEOUT; // exit 6 — the window expired / the wait timed out
+            }
+            throw e;
+          }
+        }
+        if (verb === "get") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla handoff get <id>");
+          out.emit(services.bridge.handoffGet(id));
+          return ExitCode.OK;
+        }
+        if (verb === "list") {
+          const session = parsed.flags.get("session");
+          out.emit(
+            services.bridge.handoffList(typeof session === "string" ? { session } : undefined),
+          );
+          return ExitCode.OK;
+        }
+        if (verb === "cancel") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla handoff cancel <id>");
+          out.emit(await services.bridge.handoffCancel(id));
+          return ExitCode.OK;
+        }
+        return usageError(
+          out,
+          "usage: gla handoff (open | wait <id> | get <id> | list | cancel <id>)",
+        );
+      }
+
       default:
         return usageError(out, `unknown command: '${noun}'`);
     }
@@ -531,6 +603,18 @@ function parseMount(s: string): { host: string; target?: string; mode?: "ro" | "
     throw glaError("usage.bad_argument", `invalid mount mode "${mode}" (expected ro|rw)`);
   }
   return mount;
+}
+
+/** Parse a coarse duration ("15m"/"30s"/"1h"/"2d") into milliseconds for `handoff wait --timeout`, or undefined. */
+function parseDurationToMs(d: string): number | undefined {
+  const m = d.trim().match(/^(\d+)\s*(s|m|h|d)$/);
+  if (m === null) {
+    return undefined;
+  }
+  const n = Number(m[1]);
+  const unit = m[2];
+  const mult = unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
+  return n * mult;
 }
 
 function usageError(out: Output, message: string): number {
