@@ -5,4 +5,4 @@
 // emitted dist/. Kept as plain ESM so the published `bin` and `node surfaces/cli/bin/gla.mjs` both work.
 import { main } from "../dist/index.js";
 
-process.exitCode = main(process.argv.slice(2));
+process.exitCode = await main(process.argv.slice(2));

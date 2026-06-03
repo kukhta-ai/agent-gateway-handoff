@@ -12,6 +12,12 @@
     },
     {
       "path": "../../packages/assembly"
+    },
+    {
+      "path": "../../packages/capability"
+    },
+    {
+      "path": "../../packages/catalog"
     }
   ]
 }

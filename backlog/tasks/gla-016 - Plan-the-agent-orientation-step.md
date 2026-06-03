@@ -1,9 +1,10 @@
 ---
 id: GLA-016
 title: Plan the agent-orientation step
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-03 03:31'
+updated_date: '2026-06-03 07:16'
 labels:
   - plan
   - architecture
@@ -27,10 +28,16 @@ Why: before proposing anything the agent must discover what this install offers;
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The Agent Bridge's read surface is specified: the whoami, template-show, and skill-show operations and their stable output shapes, as the single interface the agent reads through.
-- [ ] #2 The Catalog's part is specified: how templates and skills available in this install are listed with system-derived availability, as a read contract.
-- [ ] #3 The operating experience of orientation is designed: how the agent learns the holes it must fill without guessing them.
-- [ ] #4 An implementation plan for the build task exists, with how orientation is observed end to end.
-- [ ] #5 Dependencies are identified and classified; any non-traditional one has a wpm-installer-package task in this backlog.
-- [ ] #6 The catalog read seam is specified at full capability so a new template or skill source is added with no seam change.
+- [x] #1 The Agent Bridge's read surface is specified: the whoami, template-show, and skill-show operations and their stable output shapes, as the single interface the agent reads through.
+- [x] #2 The Catalog's part is specified: how templates and skills available in this install are listed with system-derived availability, as a read contract.
+- [x] #3 The operating experience of orientation is designed: how the agent learns the holes it must fill without guessing them.
+- [x] #4 An implementation plan for the build task exists, with how orientation is observed end to end.
+- [x] #5 Dependencies are identified and classified; any non-traditional one has a wpm-installer-package task in this backlog.
+- [x] #6 The catalog read seam is specified at full capability so a new template or skill source is added with no seam change.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Design: docs/architecture/slice-1-inbound-orient.md §3-§5 (Bridge read surface whoami/template-show/skill-show + stable JSON shapes as the single read interface; Catalog read contract listing templates/skills with system-derived availability; how the agent learns the holes without guessing; new template/skill source = no seam change; orientation observed end-to-end; no non-traditional deps). Rule-3 docs-driven fallback. Implemented+tested under GLA-017.
+<!-- SECTION:NOTES:END -->

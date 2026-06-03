@@ -10,6 +10,7 @@
   "references": [
     { "path": "../../packages/kernel" },
     { "path": "../../packages/bridge" },
+    { "path": "../../packages/catalog" },
     { "path": "../../packages/assembly" }
   ]
 }
