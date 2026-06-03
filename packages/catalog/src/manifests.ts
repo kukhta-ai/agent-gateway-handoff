@@ -196,6 +196,9 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
       capability: { summary: "url-watcher completion detector (fires on a configured URL)" },
       config_schema: {
         complete_on: { type: "string", required: true, pattern: "^/" },
+        // An optional INTERMEDIATE URL (e.g. `/verify`) — the watcher emits an intermediate signal on its first
+        // match before the terminal `complete_on` (scenario-01 Phase 8: `/verify` → submitted, next email-verification).
+        intermediate: { type: "string", required: false, pattern: "^/" },
       },
       probe: "url-watcher",
     },

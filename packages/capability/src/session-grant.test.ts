@@ -37,17 +37,19 @@ async function parentTaskGrant(
 }
 
 describe("CapabilityService.mintSessionGrant — recipient-bound, short-TTL, scoped (GLA-032/033)", () => {
-  it("mints a session-class grant carrying recipient + ttl + scope + audience", async () => {
+  it("mints a session-class grant carrying recipient + ttl + scope (session-bound via the scope path)", async () => {
     const svc = new CapabilityService();
     const { capability, scopePath } = await svc.mintSessionGrant({ sessionId: SESS, recipient });
     expect(capability.cls).toBe("session");
     const kinds = capability.caveats.map((c) => c.kind).sort();
-    expect(kinds).toEqual(["audience", "recipient", "scope", "ttl"]);
+    // The grant binds the session via its `scope` path (the gateway verifies recipient + scope + class). It carries
+    // NO separate `audience` caveat — that would widen the exact-match audience dimension when the grant attenuates
+    // from the task cap (which inherits the agent-authority's identity audience).
+    expect(kinds).toEqual(["recipient", "scope", "ttl"]);
     expect(capability.caveats).toEqual(
       expect.arrayContaining([
         { kind: "recipient", recipient },
         { kind: "scope", path: `/handoff/${SESS}` },
-        { kind: "audience", id: SESS },
       ]),
     );
     expect(scopePath).toBe(`/handoff/${SESS}`);
