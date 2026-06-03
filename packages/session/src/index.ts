@@ -34,6 +34,7 @@ import {
   type ResolvedAssemblySpec,
   type Route,
   type RuntimeHandle,
+  SESSION_TERMINAL,
   type Session,
   type SessionId,
   type SessionState,
@@ -336,6 +337,31 @@ export interface CompletionDeps {
   connectorControl?: ConnectorControlPort;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The terminal-teardown seam — STOP the capsule + reap the workspace + revoke the connector (Slice 7,
+// scenario-01 Phase 15). DISTINCT from close-window (Slice 5): close-window leaves the capsule RUNNING;
+// teardown STOPS it. The actual stop+reap+revoke-connector routine is the worker's Cleanup Reconciler
+// (idempotent, restart-safe — GLA-023/065 AC#5); the session names only this seam, `app` wires the
+// reconciler behind it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The terminal-teardown wiring {@link SessionService.teardownSession} needs (Slice 7). When omitted,
+ * `teardownSession` STILL closes any open handoff window and transitions the session to its terminal
+ * state, but cannot reap the capsule (a bare bridge with no worker) — the explicit degrade.
+ */
+export interface SessionTeardownDeps {
+  /**
+   * Reconcile ONE session to torn-down: STOP the capsule (kill the process group) + REAP the workspace
+   * (wipe the ephemeral temp profile — host mounts and persisted outputs survive) + revoke the connector
+   * capability + unbind its `secret_ref` + forget the provision bookkeeping. The worker's Cleanup
+   * Reconciler (`CleanupReconciler.reconcile`) — **idempotent + restart-safe** (re-running is a clean
+   * no-op; GLA-065 AC#5), and **reconciles by STATE regardless of launcher** (any launcher tier is torn
+   * down by the same routine; GLA-064 AC#9).
+   */
+  reconcile(sessionId: SessionId): Promise<void>;
+}
+
 /** Options for {@link SessionService}. */
 export interface SessionServiceOptions {
   clock?: SessionClock;
@@ -346,6 +372,11 @@ export interface SessionServiceOptions {
   handoff?: HandoffDeps;
   /** The completion-close wiring (Slice 5). When omitted, `deliverCompletion`/`watchForCompletion` reject. */
   completion?: CompletionDeps;
+  /**
+   * The terminal-teardown wiring (Slice 7). When omitted, `teardownSession` still closes any open window
+   * and transitions the session terminal, but reaps no capsule (a bare bridge has no worker).
+   */
+  teardown?: SessionTeardownDeps;
 }
 
 /** The public handoff view the Bridge/CLI emit on `handoff open` (docs/05 §4 shape). */
@@ -433,6 +464,8 @@ export class SessionService {
   >();
   /** The completion-close wiring (Slice 5). */
   private readonly completionDeps: CompletionDeps | undefined;
+  /** The terminal-teardown wiring (Slice 7). */
+  private readonly teardownDeps: SessionTeardownDeps | undefined;
   /** Per-window VALIDATED completion envelope (set on a completion-driven close; what `handoff wait` returns). */
   private readonly completions = new Map<HandoffId, CompletionEnvelope>();
   /** Per-window detector-watch abort flag, so a window close stops its in-flight `watchForCompletion` cleanly. */
@@ -444,6 +477,7 @@ export class SessionService {
     this.provisionDeps = opts.provision;
     this.handoffDeps = opts.handoff;
     this.completionDeps = opts.completion;
+    this.teardownDeps = opts.teardown;
   }
 
   /**
@@ -1073,6 +1107,93 @@ export class SessionService {
     //    scenario-01 Phase 8/9). Best-effort + idempotent; the capsule is still running for the agent to drive.
     this.completionDeps?.connectorControl?.resume(w.sessionId);
     return SessionService.handoffToView(w, this.completions.get(windowId));
+  }
+
+  /**
+   * **TERMINAL teardown of a session** (Slice 7, scenario-01 Phase 15; GLA-065) — the closing guarantee
+   * that STOPS the capsule, distinct from close-window (Slice 5, which deliberately leaves the capsule
+   * RUNNING). Driven by `task complete`/`task revoke` for every session under the task. The ORDERED
+   * contract (session-service.md "the inverse on completion/expiry"):
+   *
+   *   1. **Cancel any open handoff window** for this session — reuse the close path (`closeHandoff`):
+   *      force-close the live WS, revoke the grant, unmount the route, abort the detector watch, drop the
+   *      TTL timer (so no live route or grant remains — GLA-065 AC#3). Idempotent on an already-closed
+   *      window. (A window's own grant descends from the task cap, so the task-cap revoke below also kills
+   *      it by lineage — but we unmount the route/force-close the WS here so NOTHING is live immediately.)
+   *   2. **STOP the capsule via the worker + REAP the workspace + revoke the connector** — the worker's
+   *      Cleanup Reconciler (`teardown.reconcile`): kill the capsule's process group (Xvfb/x11vnc/
+   *      websockify/Chromium — no leftover process), WIPE the ephemeral temp profile (the capsule's OWN
+   *      materials), revoke + unbind the agent-connector cap, and forget the provision bookkeeping. The
+   *      capsule's ephemeral state is DESTROYED; **host paths the agent mounted + persisted outputs survive
+   *      on the host** (GLA-065 AC#4 — reap removes the profile dir + its mount *symlinks*, never the link
+   *      *targets*). Idempotent + restart-safe (GLA-065 AC#5).
+   *   3. **Transition the session to its terminal state** (`completed` for a normal completion, `revoked`
+   *      for an abort — GLA-065 AC#6) and **clear the runtime handle** (no live capsule remains).
+   *
+   * Idempotent (GLA-065 AC#5): re-running on an already-terminal session is a clean no-op (step 2 reconcile
+   * is itself idempotent; the transition is skipped). Best-effort throughout — a teardown step failing must
+   * not strand the rest (the reconciler converges on a later pass). NEVER throws (so a task-level teardown
+   * over many sessions can't be stranded by one).
+   *
+   * @param sessionId    the session to tear down
+   * @param disposition  the terminal state: `"completed"` (normal) or `"revoked"` (abort). Default `"completed"`.
+   * @returns the session's terminal state (so the caller/CLI can report it)
+   */
+  async teardownSession(
+    sessionId: SessionId,
+    disposition: "completed" | "revoked" = "completed",
+  ): Promise<SessionState> {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) {
+      // Unknown session — nothing to tear down (idempotent; a task may list a session already cleaned).
+      return "completed";
+    }
+    // Already terminal → idempotent no-op: still run the reconcile (it is a clean no-op) so a crash
+    // mid-teardown converges, but do not re-transition. Report the current terminal state.
+    const alreadyTerminal = SESSION_TERMINAL.has(session.state);
+
+    // ── Step 1 — cancel any OPEN handoff window for this session (reverse-of-open: force-close WS, revoke
+    //    grant, unmount route). Reuses the Slice-5 close path; idempotent on an already-closed window.
+    for (const w of this.handoffs.values()) {
+      if (w.sessionId === sessionId && w.state === "open") {
+        await safe(() => this.closeHandoff(w.id, "cancelled").then(() => undefined));
+      }
+    }
+
+    // ── Step 2 — STOP the capsule + REAP the workspace + revoke the connector (the worker's Cleanup
+    //    Reconciler — idempotent, restart-safe, reconciles by state regardless of launcher). Best-effort.
+    if (this.teardownDeps !== undefined) {
+      await safe(() => this.teardownDeps?.reconcile(sessionId) ?? Promise.resolve());
+    }
+
+    // ── Step 3 — transition the session terminal + clear the runtime handle (no live capsule remains).
+    if (!alreadyTerminal) {
+      session.state = sessionTransition(session.state, disposition);
+      if (session.runtime !== undefined) {
+        // biome-ignore lint/performance/noDelete: clearing an optional field under exactOptionalPropertyTypes
+        delete session.runtime;
+      }
+      // Clear any residual window grant/route off the session (the window is closed; the capsule is gone).
+      if (session.grantTokenRef !== undefined) {
+        // biome-ignore lint/performance/noDelete: clearing an optional field under exactOptionalPropertyTypes
+        delete session.grantTokenRef;
+      }
+      if (session.route !== undefined) {
+        // biome-ignore lint/performance/noDelete: clearing an optional field under exactOptionalPropertyTypes
+        delete session.route;
+      }
+      session.updatedAt = this.clock.now();
+    }
+    return session.state;
+  }
+
+  /**
+   * Whether this session has a live runtime handle pinned (a live capsule). Read-only — lets a caller/test
+   * observe that teardown cleared the runtime (no live capsule remains). Distinct from the worker's
+   * `hasLive` (which tracks the worker-side record): this is the session aggregate's own view.
+   */
+  hasRuntime(id: SessionId): boolean {
+    return this.sessions.get(id)?.runtime !== undefined;
   }
 
   /**

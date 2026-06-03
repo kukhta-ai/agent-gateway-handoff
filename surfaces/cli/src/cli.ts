@@ -63,10 +63,13 @@ Nouns:
   task create [flags]         open a Task + mint its task capability (parent = agent-authority)
   task get <id>               read a Task aggregate
   task list [--state <s>]     list Tasks
+  task complete <id>          TERMINAL: tear down sessions+capsules, revoke caps (nothing live remains)
+  task revoke <id>            abort: the same teardown to a non-success terminal state
   session create [flags]      admit + provision a capsule; --dry-run = admission only
   session connector <id>      re-emit the agent-connector for a live capsule (exit 7 if none)
   session get <id>            read a Session aggregate
   session list [flags]        list Sessions
+  session revoke <id>         stop + reap this session's capsule + workspace; revoke its grants + connector
   handoff open --session <id> open a recipient-bound window (mint grant, mount route, deliver link)
   handoff wait <id> [--timeout <dur>]  BLOCK until the human completes or the window expires (exit 6)
   handoff get <id>            read a window's state (open/completed/expired/cancelled)
@@ -345,7 +348,24 @@ export async function run(
           out.emit(services.bridge.taskList(typeof state === "string" ? { state } : undefined));
           return ExitCode.OK;
         }
-        return usageError(out, "usage: gla task (create | get <id> | list)");
+        if (verb === "complete") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla task complete <id>");
+          // TERMINAL (Phase 15): tear down sessions+capsules, revoke descendant caps, task → completed.
+          out.emit(await services.bridge.taskComplete(id));
+          return ExitCode.OK;
+        }
+        if (verb === "revoke") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla task revoke <id>");
+          // ABORT: the same teardown to a non-success terminal state (task → revoked).
+          out.emit(await services.bridge.taskRevoke(id));
+          return ExitCode.OK;
+        }
+        return usageError(
+          out,
+          "usage: gla task (create | get <id> | list | complete <id> | revoke <id>)",
+        );
       }
 
       case "session": {
@@ -375,7 +395,17 @@ export async function run(
           out.emit(services.bridge.sessionList(f));
           return ExitCode.OK;
         }
-        return usageError(out, "usage: gla session (create | connector <id> | get <id> | list)");
+        if (verb === "revoke") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla session revoke <id>");
+          // TERMINAL: stop + reap this session's capsule + workspace, revoke grants + connector → revoked.
+          out.emit(await services.bridge.sessionRevoke(id));
+          return ExitCode.OK;
+        }
+        return usageError(
+          out,
+          "usage: gla session (create | connector <id> | get <id> | list | revoke <id>)",
+        );
       }
 
       case "handoff": {
