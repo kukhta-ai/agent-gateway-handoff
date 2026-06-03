@@ -1,0 +1,25 @@
+# This .gitignore ships as part of the template and becomes your project's .gitignore.
+#
+# NOTE: BMAD's install (the _bmad/ framework + .claude/skills/bmad-*) is intentionally NOT ignored. It is
+# installed at project init by scripts/setup.sh (`npx bmad-method install`) and COMMITTED to your project —
+# the same as the source project this template derives from — so the SDLC tooling lives in the repo at a
+# pinned version. BMAD's own nested _bmad/custom/.gitignore keeps personal config (_bmad/custom/*.user.toml)
+# out of git; nothing else BMAD generates is ignored.
+
+# Backlog.md transient locks (task state itself IS committed under backlog/)
+backlog/.locks/
+
+# Local orchestration / agent state (not part of the project)
+.omc/
+.remember/
+
+# ── Your language toolchain ──────────────────────────────────────────────────
+# This template is stack-agnostic. Add your project's dependency + build output here once you pick a stack:
+#   node_modules/  dist/  *.tsbuildinfo          (Node / TypeScript)
+#   __pycache__/   .venv/  *.pyc  .pytest_cache/ (Python)
+#   target/        Cargo.lock~                   (Rust)
+#   bin/  vendor/                                (Go)
+
+# ── OS / editor cruft ────────────────────────────────────────────────────────
+.DS_Store
+*.swp

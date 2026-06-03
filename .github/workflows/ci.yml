@@ -1,0 +1,68 @@
+# Continuous integration — the project quality gate.
+#
+# Runs the SAME gate a contributor runs locally and the pre-commit hook runs on staged files
+# (CONTRIBUTING.md > "Quality gate"). CI's added value is BREADTH (the support matrix), not a different or
+# stronger gate.
+#
+# This template ships a stack-AGNOSTIC skeleton. The placeholder gate steps below FAIL ON PURPOSE so an
+# unconfigured gate is loudly red rather than silently green. Replace them with your stack's real
+# build/type-check, lint/format, and test commands, set up your toolchain, and adjust the matrix — keeping
+# the three steps identical to CONTRIBUTING.md > "Quality gate".
+#
+# "A failure blocks merge": a failing run reports a red status on the push/PR. Turning that into a *required*
+# check that actually prevents merging is a GitHub branch-protection SETTING (repo admin, human-owned —
+# SDLC Phase 7); it is not configured here, by design.
+#
+# Security note: no untrusted event input (issue/PR/commit text) is used in any run: step; the only
+# expression interpolations are trusted matrix values and github.workflow/github.ref — no injection surface.
+
+name: CI
+
+on:
+  # Every push to any branch is checked (covers the working/story branches).
+  push:
+  # Every pull request targeting the integration/release branches is checked.
+  pull_request:
+    branches: [dev, main]
+
+# Cancel an in-progress run when a newer commit is pushed to the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel other cells when one fails — we want the full cross-platform picture.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        # TODO: add macos-latest / windows-latest if you support them, and a runtime-version axis, e.g.:
+        #   node: [20, 22]   (then reference ${{ matrix.node }} in a setup-node step)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # TODO: set up your language toolchain, e.g.:
+      #   - uses: actions/setup-node@v4   with: { node-version: 22, cache: npm }
+      #   - uses: actions/setup-python@v5 with: { python-version: '3.12' }
+      #   - uses: actions/setup-go@v5     with: { go-version: '1.23' }
+
+      # TODO: install dependencies (e.g. `npm ci`, `pip install -e '.[dev]'`, `go mod download`).
+
+      # The quality gate, in order, failing the job on the first non-zero exit. These MUST be the same three
+      # checks as CONTRIBUTING.md > "Quality gate". Replace the failing placeholders with your real commands.
+      - name: Build / type-check
+        run: |
+          echo "::error::Configure the build/type-check step (CONTRIBUTING.md > Quality gate)"; exit 1
+
+      - name: Lint + format check
+        run: |
+          echo "::error::Configure the lint/format step (CONTRIBUTING.md > Quality gate)"; exit 1
+
+      - name: Test
+        run: |
+          echo "::error::Configure the test step (CONTRIBUTING.md > Quality gate)"; exit 1

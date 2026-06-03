@@ -1,0 +1,41 @@
+# SDLC state tracker.
+# Authoritative position in the BMAD-based SDLC defined by AGENTS.md + docs/SDLC.md.
+# Re-read on every resume; update at every phase boundary.
+# (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
+#
+# This is the BLANK starting state shipped by the template. Step 0 (AGENTS.md) fills it in.
+
+phase: 1
+phase_name: "Analysis"
+branch: dev
+epic: null               # the epic in flight (e.g. the foundation epic), or null
+active_story: null       # the backlog task being built, or null
+review_cycle: 0
+
+# Persistent BMAD specialists: SPAWNed per-phase, RESUMEd thereafter.
+# last_skill = the BMAD skill each LAST actually invoked (AGENTS.md Rule 3 evidence).
+specialists:
+  analyst:      {spawned: false, role: "product brief / requirements",          last_skill: null}
+  pm:           {spawned: false, role: "PRD",                                   last_skill: null}
+  ux-designer:  {spawned: false, role: "UX spec (only if there is a UI)",       last_skill: null}
+  architect:    {spawned: false, role: "architecture + epics/stories",          last_skill: null}
+  tea:          {spawned: false, role: "test design / framework / ci / gate",   last_skill: null}
+  sm:           {spawned: false, role: "sprint setup + create-story",           last_skill: null}
+  worker:       {spawned: false, role: "dev-story implementation",              last_skill: null}
+  reviewer:     {spawned: false, role: "separate-lane story-automator-review",  last_skill: null}
+  investigator: {spawned: false, role: "systematic debugging at the epic gate", last_skill: null}
+  retro:        {spawned: false, role: "epic retrospective",                    last_skill: null}
+
+gates_pending: []
+
+# Pinned SDLC tooling (set by scripts/setup.sh; record exact versions for reproducibility).
+tooling:
+  backlog_md: "1.45.2"          # global npm CLI that operates backlog/
+  bmad_cli: "bmad-method@6.8.0 (run via npx)"
+  bmad_modules:
+    bmm: "6.8.0"                 # BMad Core Module + BMad Method
+    tea: "1.19.0"               # Test Architect
+    automator: "main @ 51a3cbc" # BMad Automator (external module)
+  tool_target: "claude-code"
+
+last_updated: "2026-06-03"

@@ -1,0 +1,39 @@
+installation:
+  version: 6.8.0
+  installDate: 2026-06-03T01:21:59.005Z
+  lastUpdated: 2026-06-03T01:22:17.494Z
+modules:
+  - name: core
+    version: 6.8.0
+    installDate: 2026-06-03T01:21:58.658Z
+    lastUpdated: 2026-06-03T01:22:17.488Z
+    source: built-in
+    npmPackage: null
+    repoUrl: null
+  - name: bmm
+    version: 6.8.0
+    installDate: 2026-06-03T01:21:58.731Z
+    lastUpdated: 2026-06-03T01:22:17.489Z
+    source: built-in
+    npmPackage: null
+    repoUrl: null
+  - name: tea
+    version: v1.19.0
+    installDate: 2026-06-03T01:21:58.944Z
+    lastUpdated: 2026-06-03T01:22:17.491Z
+    source: external
+    npmPackage: bmad-method-test-architecture-enterprise
+    repoUrl: https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise
+    channel: stable
+    sha: 8734d51f24071ddbcb3617390b5fcddb4128ef77
+  - name: automator
+    version: main
+    installDate: 2026-06-03T01:22:17.422Z
+    lastUpdated: 2026-06-03T01:22:17.494Z
+    source: external
+    npmPackage: bmad-story-automator
+    repoUrl: https://github.com/bmad-code-org/bmad-automator
+    channel: next
+    sha: 51a3cbce4a15ca84df7ac8ab9b9113cc185ca101
+ides:
+  - claude-code
