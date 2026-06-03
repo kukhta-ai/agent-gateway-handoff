@@ -148,6 +148,60 @@ export function handoffPageHtml(grant: string, routePath: string, recipientLabel
 </html>`;
 }
 
+/**
+ * Render the handoff REUSED-AUTH page (scenario-01 Phase 12, GLA-050/051): the recipient's prior step-up is still
+ * valid, so there is NO WebAuthn ceremony — the page opens the noVNC stream over the gateway's authorized WS upgrade
+ * DIRECTLY (the gateway already authorized this grant by reuse). It is the second window with "auth still valid, no
+ * re-prompt." The grant + path are embedded for the WS upgrade (still verified server-side). The recipient sees no
+ * prompt — the session opens straight away.
+ */
+export function handoffReusedPageHtml(
+  grant: string,
+  routePath: string,
+  recipientLabel: string,
+): string {
+  const data = JSON.stringify({ grant, path: routePath, recipient: recipientLabel });
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opening your secure session — GLA</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+  #status { margin-top: 1rem; min-height: 1.5rem; }
+  .ok { color: #137333; } .err { color: #b3261e; }
+  #screen { margin-top: 1rem; width: 100%; }
+</style>
+</head>
+<body>
+<h1>Opening your secure session</h1>
+<p>You're already verified — opening the session that was shared with you. No need to confirm again.</p>
+<div id="status" role="status" aria-live="polite">Connecting…</div>
+<canvas id="screen" width="1024" height="768" hidden></canvas>
+<script id="handoff-data" type="application/json">${data}</script>
+<script>
+(() => {
+  const cfg = JSON.parse(document.getElementById("handoff-data").textContent);
+  const status = document.getElementById("status");
+  const say = (msg, cls) => { status.textContent = msg; status.className = cls || ""; };
+  // No ceremony — auth was reused. Open the noVNC stream over the gateway's already-authorized WS upgrade directly.
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = proto + "//" + location.host + cfg.path + "?grant=" + encodeURIComponent(cfg.grant);
+  try {
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => say("✓ Connected. The secure session is now open.", "ok");
+    ws.onclose = () => say("The session was closed.", "err");
+  } catch (e) {
+    say("Could not open the session.", "err");
+  }
+})();
+</script>
+</body>
+</html>`;
+}
+
 /** A minimal refusal page (HTML) shown when the handoff grant is absent/invalid/expired/wrong-recipient/revoked. */
 export function handoffRefusalHtml(reason: string, message?: string): string {
   const msg =

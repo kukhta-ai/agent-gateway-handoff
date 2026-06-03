@@ -91,8 +91,8 @@ describe("DetectorUrlAdapter — contract + scripted URL sequence (GLA-042/043)"
   });
 
   it("each fragment fires AT MOST ONCE — a stable page does not re-emit", async () => {
-    // The URL stays on /verify for several polls, then moves to /dashboard.
-    const seq = ["/verify", "/verify", "/verify", "/dashboard"];
+    // The URL transitions INTO /verify, then stays there several polls, then moves to /dashboard.
+    const seq = ["/register", "/verify", "/verify", "/verify", "/dashboard"];
     let i = 0;
     const d = new DetectorUrlAdapter({
       pollMs: 1,
@@ -106,6 +106,27 @@ describe("DetectorUrlAdapter — contract + scripted URL sequence (GLA-042/043)"
     // Exactly ONE intermediate (despite /verify being seen 3×) + ONE complete.
     expect(signals.filter((s) => s.status === "url-intermediate")).toHaveLength(1);
     expect(signals.filter((s) => s.status === "url-complete")).toHaveLength(1);
+  });
+
+  it("the intermediate is EDGE-triggered — a window that OPENS already at the intermediate does NOT re-fire it (the second-handoff fix)", async () => {
+    // scenario-01 Phase 12/13: window 2 RE-OPENS while the capsule still shows /verify (window 1 already completed
+    // on it). The watch must NOT instantly re-complete on the stale /verify — it must wait for the human to reach
+    // /dashboard. The first observed URL is the BASELINE (no intermediate fire); only the /dashboard transition fires.
+    const seq = ["/verify", "/verify", "/dashboard"];
+    let i = 0;
+    const d = new DetectorUrlAdapter({
+      pollMs: 1,
+      readUrl: async () => `https://acme.example${seq[Math.min(i++, seq.length - 1)]}`,
+    });
+    const handle = encodeRuntimeHandle({ cdpPort: 1 });
+    const signals = await take(
+      d.watch(handle, { complete_on: "/dashboard", intermediate: "/verify" }),
+      3,
+    );
+    // NO intermediate fired (the page started at /verify — a baseline, not a transition); ONLY the complete.
+    expect(signals.filter((s) => s.status === "url-intermediate")).toHaveLength(0);
+    expect(signals.filter((s) => s.status === "url-complete")).toHaveLength(1);
+    expect(signals[0]?.status).toBe("url-complete");
   });
 
   it("a NON-FIRING reader → the watch emits NOTHING (the window then TTL-expires; GLA-043 AC#3)", async () => {

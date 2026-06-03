@@ -141,7 +141,7 @@ function startStubUpstream(): Promise<{
 
 /** Boot a handoff gateway on an ephemeral loopback port with the given stubs; returns the base URL + closer. */
 async function bootHandoffGateway(
-  grants: StubSessionGrants,
+  grants: SessionGrantPort,
   stepUp: StubStepUp,
   extra: Partial<GatewayOptions> = {},
 ): Promise<{
@@ -559,12 +559,18 @@ describe("Access Gateway — WS upgrade proxy to the capsule (GLA-038/039)", () 
     const up = await openUpgrade(host, port, ROUTE_PATH, "valid");
     expect(up.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
 
-    // Now REVOKE: force-close the grant → the live socket is severed.
+    // Now REVOKE: force-close the grant → the live socket is severed. In the real close path the grant is ALSO
+    // revoked cryptographically (closeHandoff force-closes AND revokes), so mirror that here — a revoked grant fails
+    // the stateless verify before any reuse can re-authorize it.
     gateway.forceCloseGrant(GRANT_ID);
+    grants.invalidReason = "auth.revoked";
+    grants.validToken = "REVOKED-no-token-matches"; // the grant no longer verifies (revoked)
     await up.closed; // the proxied client socket is closed by the gateway
     expect(up.socket.destroyed).toBe(true);
 
-    // And the grant is no longer authorized — a fresh upgrade is refused (unreachable).
+    // And the grant is no longer authorized — a fresh upgrade is refused (unreachable). A REVOKED grant fails the
+    // stateless verify, so even recipient-auth REUSE (GLA-050/051) cannot re-authorize it (reuse never bypasses the
+    // grant check).
     expect(gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
     const again = await openUpgrade(host, port, ROUTE_PATH, "valid");
     expect(again.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
@@ -708,5 +714,220 @@ describe("Access Gateway — WS-proxy timeouts reap a stalled upstream (no fd le
     }
     expect(gateway.liveSocketCount(GRANT_ID)).toBeGreaterThan(0);
     up.socket.destroy();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTH REUSE on a second window (GLA-050/051, scenario-01 Phase 12) — "auth still valid, no re-prompt"
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A multi-grant stub: each call resolves the bound recipient by TOKEN, so a test can model TWO distinct grants
+ * (window-1's grant-1 + window-2's grant-2) for the SAME recipient. A token not in the map fails to verify. This is
+ * what proves reuse is RECIPIENT-keyed (window-2's grant is a different token/id, yet the same recipient reuses).
+ */
+class MultiGrantStub implements SessionGrantPort {
+  // token → { grantId, recipient }. Two grants for the same recipient model the two windows.
+  readonly byToken = new Map<string, { grantId: CapabilityId; recipient: RecipientRef }>([
+    ["grant1", { grantId: "cap_grant1" as CapabilityId, recipient }],
+    ["grant2", { grantId: "cap_grant2" as CapabilityId, recipient }],
+  ]);
+  invalidReason: ErrorCode = "auth.malformed";
+  verifySessionGrantToken(
+    token: OpaqueToken,
+    _args: { scopePath: string; now?: string },
+  ): SessionGrantVerifyResult {
+    const g = this.byToken.get(String(token));
+    if (g === undefined) {
+      return { ok: false, reason: this.invalidReason };
+    }
+    return {
+      ok: true,
+      capability: { id: g.grantId, cls: "session", caveats: [] },
+      recipient: g.recipient,
+    };
+  }
+}
+
+describe("Access Gateway — auth reuse on a second window (GLA-050/051)", () => {
+  const GRANT2 = "cap_grant2" as CapabilityId;
+
+  it("a SECOND window's grant for the SAME recipient reuses the prior step-up — the WS upgrade proxies with NO fresh ceremony", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const grants = new MultiGrantStub();
+    const stepUp = new StubStepUp();
+    const { base, host, port, gateway, close } = await bootHandoffGateway(grants, stepUp);
+    closers.push(close);
+
+    // ── Window 1: mount grant-1's route + STEP UP (the one and only WebAuthn ceremony). ──
+    await gateway.mount(
+      mountReq(upstream.endpoint, { boundGrantId: "cap_grant1" as CapabilityId }),
+    );
+    const verRes = await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "grant1", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(verRes.status).toBe(200);
+    expect(stepUp.verifyCalls).toBe(1);
+    expect(gateway.isRecipientAuthValid(recipient)).toBe(true); // the recipient's auth is now recorded
+
+    // ── Window 2: a NEW grant (grant-2) for the SAME recipient, on the same route (re-opened window). ──
+    await gateway.mount(mountReq(upstream.endpoint, { boundGrantId: GRANT2 }));
+
+    // The handoff PAGE for window-2 must NOT prompt — it serves the reused-auth page (opens straight away) and
+    // authorizes grant-2 without a ceremony. (The page body proves there is no "Verify with passkey" button.)
+    const pageRes = await fetch(`${base}${ROUTE_PATH}?grant=grant2`);
+    expect(pageRes.status).toBe(200);
+    const pageHtml = await pageRes.text();
+    expect(pageHtml).toContain("already verified"); // the reused-auth page copy
+    expect(pageHtml).not.toContain("Verify with passkey"); // NO step-up prompt
+    expect(gateway.isGrantAuthorized(GRANT2)).toBe(true); // grant-2 authorized by REUSE
+
+    // And the WS upgrade with grant-2 is PROXIED to the capsule — with NO additional step-up (verifyCalls unchanged).
+    const up = await openUpgrade(host, port, ROUTE_PATH, "grant2");
+    expect(up.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+    expect(stepUp.verifyCalls).toBe(1); // STILL 1 — the second window invoked NO WebAuthn ceremony
+    up.socket.destroy();
+  });
+
+  it("a second window's WS upgrade reuses auth EVEN without first fetching the page (the upgrade itself authorizes by reuse)", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const grants = new MultiGrantStub();
+    const stepUp = new StubStepUp();
+    const { base, host, port, gateway, close } = await bootHandoffGateway(grants, stepUp);
+    closers.push(close);
+    await gateway.mount(
+      mountReq(upstream.endpoint, { boundGrantId: "cap_grant1" as CapabilityId }),
+    );
+    await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "grant1", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(stepUp.verifyCalls).toBe(1);
+
+    // Re-open with grant-2 and go STRAIGHT to the WS upgrade (no page fetch). The upgrade itself reuses the
+    // recipient's still-valid auth and proxies — without a fresh step-up.
+    await gateway.mount(mountReq(upstream.endpoint, { boundGrantId: GRANT2 }));
+    const up = await openUpgrade(host, port, ROUTE_PATH, "grant2");
+    expect(up.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+    expect(stepUp.verifyCalls).toBe(1);
+    up.socket.destroy();
+  });
+
+  it("an EXPIRED auth re-prompts (TTL-bounded) — the second window serves the step-up page, NOT the reused page", async () => {
+    const grants = new MultiGrantStub();
+    const stepUp = new StubStepUp();
+    // A 1ms reuse TTL so the recorded auth expires before the second window.
+    const { base, gateway, close } = await bootHandoffGateway(grants, stepUp, {
+      authReuseTtlMs: 1,
+    });
+    closers.push(close);
+    await gateway.mount(
+      mountReq("ws://127.0.0.1:1/", { boundGrantId: "cap_grant1" as CapabilityId }),
+    );
+    await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "grant1", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    // Wait past the 1ms TTL.
+    await new Promise((r) => {
+      const t = setTimeout(r, 25);
+      (t as { unref?: () => void }).unref?.();
+    });
+    expect(gateway.isRecipientAuthValid(recipient)).toBe(false); // expired → no reuse
+
+    // The second window's page must be the FULL step-up page (re-prompt), not the reused-auth page.
+    await gateway.mount(mountReq("ws://127.0.0.1:1/", { boundGrantId: GRANT2 }));
+    const pageRes = await fetch(`${base}${ROUTE_PATH}?grant=grant2`);
+    const pageHtml = await pageRes.text();
+    expect(pageHtml).toContain("Verify with passkey"); // RE-PROMPT (Phase 6 behaviour)
+    expect(pageHtml).not.toContain("already verified");
+    expect(gateway.isGrantAuthorized(GRANT2)).toBe(false); // NOT authorized — a step-up is required
+  });
+
+  it("reuse is RECIPIENT-CONFINED — a DIFFERENT recipient's grant does NOT reuse; it re-prompts", async () => {
+    const grants = new MultiGrantStub();
+    // grant-2 here is bound to a DIFFERENT recipient than grant-1 (who stepped up).
+    const other = "tg:user:999" as RecipientRef;
+    grants.byToken.set("grant2", { grantId: GRANT2, recipient: other });
+    const stepUp = new StubStepUp();
+    stepUp.enrolled.add(other); // the other recipient is enrolled (so the page is reached, not a not-enrolled refusal)
+    const { base, gateway, close } = await bootHandoffGateway(grants, stepUp);
+    closers.push(close);
+    await gateway.mount(
+      mountReq("ws://127.0.0.1:1/", { boundGrantId: "cap_grant1" as CapabilityId }),
+    );
+    // recipient (user:123) steps up.
+    await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "grant1", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(gateway.isRecipientAuthValid(recipient)).toBe(true);
+    expect(gateway.isRecipientAuthValid(other)).toBe(false); // the OTHER recipient never authenticated
+
+    // grant-2 is bound to `other` — the page must RE-PROMPT (no reuse leaks across recipients).
+    await gateway.mount(mountReq("ws://127.0.0.1:1/", { boundGrantId: GRANT2 }));
+    const pageRes = await fetch(`${base}${ROUTE_PATH}?grant=grant2`);
+    const pageHtml = await pageRes.text();
+    expect(pageHtml).toContain("Verify with passkey"); // a different recipient must step up
+    expect(pageHtml).not.toContain("already verified");
+    expect(gateway.isGrantAuthorized(GRANT2)).toBe(false);
+  });
+
+  it("reuse NEVER bypasses the grant check — an INVALID/forged grant for an already-authenticated recipient is refused", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const grants = new MultiGrantStub();
+    const stepUp = new StubStepUp();
+    const { base, host, port, gateway, close } = await bootHandoffGateway(grants, stepUp);
+    closers.push(close);
+    await gateway.mount(
+      mountReq(upstream.endpoint, { boundGrantId: "cap_grant1" as CapabilityId }),
+    );
+    await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "grant1", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(gateway.isRecipientAuthValid(recipient)).toBe(true);
+
+    // A FORGED grant (not in the stub's token map → fails verify) cannot ride the recipient's valid auth: the WS
+    // upgrade is refused BEFORE any reuse, because the grant itself does not verify (reuse is gated on a verified
+    // grant whose SIGNED recipient is the one with valid auth).
+    const up = await openUpgrade(host, port, ROUTE_PATH, "forged-token");
+    expect(up.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+    // And the page for a forged grant is the refusal page (not the reused-auth page).
+    const pageRes = await fetch(`${base}${ROUTE_PATH}?grant=forged-token`);
+    expect(pageRes.status).toBe(403);
+  });
+
+  it("reuse DISABLED (authReuseTtlMs=0) always re-prompts — even the same recipient's second window steps up again", async () => {
+    const grants = new MultiGrantStub();
+    const stepUp = new StubStepUp();
+    const { base, gateway, close } = await bootHandoffGateway(grants, stepUp, {
+      authReuseTtlMs: 0,
+    });
+    closers.push(close);
+    await gateway.mount(
+      mountReq("ws://127.0.0.1:1/", { boundGrantId: "cap_grant1" as CapabilityId }),
+    );
+    await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "grant1", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(gateway.isRecipientAuthValid(recipient)).toBe(false); // reuse disabled → nothing recorded
+
+    await gateway.mount(mountReq("ws://127.0.0.1:1/", { boundGrantId: GRANT2 }));
+    const pageRes = await fetch(`${base}${ROUTE_PATH}?grant=grant2`);
+    const pageHtml = await pageRes.text();
+    expect(pageHtml).toContain("Verify with passkey"); // always re-prompt when reuse is off
+    expect(gateway.isGrantAuthorized(GRANT2)).toBe(false);
   });
 });
