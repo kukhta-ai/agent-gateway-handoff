@@ -502,7 +502,14 @@ class FakeHandoffBridge extends AgentBridge {
     if (this.waitBehavior === "timeout") {
       throw glaError("auth.expired", `handoff wait timed out for "${id}"`, { retryable: false });
     }
-    return { handoff_id: id as `hand_${string}`, status: "completed", state: "completed" as const };
+    // Slice 5: a completion RETURNS the normalized envelope {status, result, next?}.
+    return {
+      handoff_id: id as `hand_${string}`,
+      status: "submitted",
+      state: "completed" as const,
+      result: { url: "https://acme.example/verify", match: "/verify" },
+      next: "email-verification",
+    };
   }
   override handoffGet(id: string) {
     return {
@@ -559,13 +566,17 @@ describe("gla handoff verbs (Slice 4b)", () => {
     );
   });
 
-  it("`handoff wait <id>` returns the completion envelope (exit 0)", async () => {
+  it("`handoff wait <id>` returns the normalized completion envelope {status, result, next} (exit 0)", async () => {
     const c = capture(false);
     const bridge = new FakeHandoffBridge();
     bridge.waitBehavior = "complete";
     const code = await run(["handoff", "wait", "hand_1"], c.out, services(bridge));
     expect(code).toBe(ExitCode.OK);
-    expect(JSON.parse(c.stdout()).status).toBe("completed");
+    const out = JSON.parse(c.stdout());
+    // The CLI passes the envelope through verbatim (the JSON contract): status + result + the next hint.
+    expect(out.status).toBe("submitted");
+    expect(out.result).toEqual({ url: "https://acme.example/verify", match: "/verify" });
+    expect(out.next).toBe("email-verification");
   });
 
   it("`handoff wait <id>` on a timeout/expiry exits 6 (TIMEOUT), not 4 (auth)", async () => {

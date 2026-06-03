@@ -24,8 +24,9 @@ import {
   type DeliverySink,
   deliveryToStdout,
 } from "@gla/channel-cli";
+import { CompletionService, type DetectorContract } from "@gla/completion";
 import { CONNECTOR_CDP_MODULE, ConnectorCdpAdapter } from "@gla/connector-cdp";
-import { DETECTOR_URL_MODULE } from "@gla/detector-url";
+import { DETECTOR_URL_MODULE, DETECTOR_URL_NAME, DetectorUrlAdapter } from "@gla/detector-url";
 import { EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
 import { AccessGateway } from "@gla/gateway";
 import { IdentityService } from "@gla/identity";
@@ -40,7 +41,7 @@ import {
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
 import { RouteController } from "@gla/route";
-import { type HandoffDeps, SessionService } from "@gla/session";
+import { type CompletionDeps, type HandoffDeps, SessionService } from "@gla/session";
 import { TaskService } from "@gla/task";
 import {
   CapsuleLifecycleManager,
@@ -147,6 +148,41 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
     deliverySink?: DeliverySink;
     /** A shared identity service (so enrollment + handoff use the SAME enrolled credential store). */
     identity?: IdentityService;
+    /**
+     * Override the human-entrypoint resolver the open-window saga proxies to (the capsule's noVNC address). Defaults
+     * to the real noVNC adapter (full mode only — headless dev has no X stack). Tests inject a stub returning a stub
+     * WS upstream so the handoff path runs end-to-end in headless dev (the same posture as the Slice-4b test); the
+     * REAL noVNC proxy is gated for hermes-1.
+     */
+    entrypoint?: {
+      open(handle: import("@gla/kernel").RuntimeHandle): Promise<{ internalEndpoint: string }>;
+    };
+    /**
+     * Wire the Slice-5 COMPLETION-CLOSE pipeline (so a validated done-signal RETURNS to `handoff wait` and CLOSES
+     * the window — scenario-01 Phase 8/13). When present, the url-watcher detector watches each open window's live
+     * URL over CDP; a match is validated by the Completion service against the declared detector contract and
+     * normalized to an envelope; the session runs the close-window step (reverse-of-open) and returns to `active`
+     * with the capsule running. The agent connector is SUSPENDED while a window is open (S-2 agent-blind) and
+     * RESUMED on close. When absent, the Slice-4b behaviour holds (the window TTL-expires; `handoff wait` exit 6).
+     */
+    completion?: {
+      /**
+       * The url-watcher → envelope status map (the detector/template author's declaration, like a `config_schema`).
+       * Defaults to the scenario-01 mapping: an `intermediate` (`/verify`) match → `{status:"submitted",
+       * next:"email-verification"}`; a `complete_on` (`/dashboard`) match → `{status:"verified"}`.
+       */
+      statusMap?: {
+        intermediate?: { status: string; next?: string };
+        complete: { status: string; next?: string };
+      };
+      /**
+       * A custom URL reader for the detector (tests inject a scripted `/register`→`/verify`→`/dashboard` sequence);
+       * the default reads the capsule's CDP `/json` active-target URL. A non-firing reader → the window TTL-expires.
+       */
+      readUrl?: (handle: import("@gla/kernel").RuntimeHandle) => Promise<string | undefined>;
+      /** The detector poll interval (ms). Default 200. */
+      pollMs?: number;
+    };
   };
 }
 
@@ -235,6 +271,10 @@ export function createProvisioningBridge(
   let route: RouteController | undefined;
   let identity: IdentityService | undefined;
   let handoffDeps: HandoffDeps | undefined;
+  let completionDeps: CompletionDeps | undefined;
+  // A holder so the completion deps' closures (resolved only when a window opens/closes — after this) can reference
+  // the SessionService built below (assigned into `.svc` once constructed). Avoids a forward `let`.
+  const sessionRef: { svc?: SessionService } = {};
   if (opts.handoff !== undefined) {
     const h = opts.handoff;
     const authProvider = new AuthWebauthnProvider({
@@ -255,6 +295,8 @@ export function createProvisioningBridge(
     route = new RouteController({ gateway });
     handoffDeps = {
       capability: {
+        // Thread the session-computed `scopePath` (nested under the task scope `/task/<taskId>/…` when the grant
+        // attenuates from the task cap) straight through, so the grant's scope is ⊆ the parent task scope.
         mintSessionGrant: (req) =>
           capability
             .mintSessionGrant(req)
@@ -272,7 +314,9 @@ export function createProvisioningBridge(
         },
         unmount: (windowId) => (route ? route.unmount(windowId) : Promise.resolve()),
       },
-      entrypoint,
+      // The human entrypoint the route proxies to — the real noVNC adapter, or a test-injected stub (headless dev
+      // has no X stack; the REAL noVNC proxy is gated for hermes-1).
+      entrypoint: h.entrypoint ?? entrypoint,
       channel,
       // Build the recipient-bound handoff link from the route path + the grant token (the gateway's helper).
       buildLink: (path, token) => AccessGateway.handoffLink(h.publicBaseUrl, path, token),
@@ -280,6 +324,56 @@ export function createProvisioningBridge(
       // cascades on the task cap's revoke). Resolve the task → its minted task-capability bearer token.
       parentTokenFor: (_sessionId, taskId) => task.capabilityToken(taskId),
     };
+
+    // ── Slice 5 — the COMPLETION-CLOSE pipeline (the Completion service + the url-watcher detector + the
+    //    connector severance), wired into the SessionService when `opts.handoff.completion` is present. The
+    //    url-watcher watches each open window's live URL over CDP; a match is validated by the Completion service
+    //    against the declared detector contract + normalized to an envelope; the session closes the window
+    //    (reverse-of-open) and returns to `active` with the capsule running. The agent's brokered CDP socket is
+    //    SEVERED while a window is open (S-2 agent-blind — its live connection is destroyed) and re-allowed on close.
+    if (h.completion !== undefined) {
+      const c = h.completion;
+      const completionSvc = new CompletionService();
+      const urlDetector = new DetectorUrlAdapter({
+        ...(c.readUrl !== undefined ? { readUrl: c.readUrl } : {}),
+        ...(c.pollMs !== undefined ? { pollMs: c.pollMs } : {}),
+      });
+      // The url-watcher → envelope status map (the detector/template author's declaration). Default: the
+      // scenario-01 mapping (intermediate `/verify` → submitted+next; complete `/dashboard` → verified).
+      const statusMap = c.statusMap ?? {
+        intermediate: { status: "submitted", next: "email-verification" },
+        complete: { status: "verified" },
+      };
+      completionDeps = {
+        completion: completionSvc,
+        // Build the DECLARED detector contract for a session's window from its assembly's url-watcher params: the
+        // admitted raw statuses → their normalization. The CONTRACT is what an out-of-contract signal is rejected
+        // against (S-8). Its `resultSchema` reuses the url-watcher's own typed contract so a malformed result is
+        // also rejected.
+        // These closures run only when a window opens/closes — AFTER `sessionRef.svc` is assigned below.
+        contractFor: (sessionId) => buildUrlWatcherContract(sessionRef.svc, sessionId, statusMap),
+        detector: urlDetector,
+        // The params the url-watcher watches with — the session's declared `complete_on`/`intermediate`.
+        detectorParamsFor: (sessionId) => urlWatcherParams(sessionRef.svc, sessionId),
+        // S-2 agent-blind: SEVER/resume the agent connector by the session's brokered capsule CDP url. `suspend`
+        // destroys the agent's live socket at the broker (not a flag — its existing CDP connection is cut), so the
+        // agent has NO channel onto the capsule while a recipient-bound window is open; `resume` re-allows it.
+        connectorControl: {
+          suspend: (sessionId) => {
+            const url = sessionRef.svc?.connectorTeardownInfo(sessionId)?.cdpUrl;
+            if (url !== undefined && url.length > 0) {
+              connector.suspendByCdpUrl(url);
+            }
+          },
+          resume: (sessionId) => {
+            const url = sessionRef.svc?.connectorTeardownInfo(sessionId)?.cdpUrl;
+            if (url !== undefined && url.length > 0) {
+              connector.resumeByCdpUrl(url);
+            }
+          },
+        },
+      };
+    }
   }
 
   // ── The provision-capable SessionService: inject the worker/capability/connector seams (+ handoff when wired).
@@ -310,7 +404,12 @@ export function createProvisioningBridge(
   if (handoffDeps !== undefined) {
     sessionOpts.handoff = handoffDeps;
   }
+  if (completionDeps !== undefined) {
+    sessionOpts.completion = completionDeps;
+  }
   const session = new SessionService(sessionOpts);
+  // Publish the session into the holder the completion deps' closures read (they run only on a later open/close).
+  sessionRef.svc = session;
 
   // ── The Cleanup Reconciler's TERMINAL teardown now revokes the connector cap AND unbinds its
   //    secret_ref (Finding #2) — symmetric with the saga's failure compensation, so a session that
@@ -468,6 +567,60 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
       // The channel-delegation token would gate a richer channel; the CLI fallback records it but does not enforce.
       await channel.deliver(recipient, link, minted.token);
       return { link, grant: minted.token, nonce: minted.nonce };
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 5 — url-watcher contract + params helpers (derive them from the session's assembly)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The `{use:"url-watcher", params:{…}}` detector params a session's assembly declared, or `{}` if none. */
+function urlWatcherParams(
+  session: SessionService | undefined,
+  sessionId: import("@gla/kernel").SessionId,
+): Record<string, unknown> {
+  if (session === undefined) {
+    return {};
+  }
+  try {
+    const spec = session.get(sessionId).spec;
+    const detector = spec.spec.detectors?.find((d) => d.use === DETECTOR_URL_NAME);
+    return (detector?.params as Record<string, unknown> | undefined) ?? {};
+  } catch {
+    // Unknown session (shouldn't happen on a live window) → no params (the watch then emits nothing).
+    return {};
+  }
+}
+
+/**
+ * Build the DECLARED url-watcher detector contract for a session's window (what the Completion service validates a
+ * raw signal against — S-8). It admits exactly the two mechanical statuses the url-watcher emits — `url-intermediate`
+ * and `url-complete` — and maps each to its caller-facing envelope status (the `statusMap`). The `resultSchema`
+ * reuses the url-watcher's own typed contract (`{url, match}`), so a malformed result is also rejected. Any OTHER
+ * raw status (a spoofed "done") is out-of-contract → rejected (the window does not complete).
+ */
+function buildUrlWatcherContract(
+  _session: SessionService | undefined,
+  _sessionId: import("@gla/kernel").SessionId,
+  statusMap: {
+    intermediate?: { status: string; next?: string };
+    complete: { status: string; next?: string };
+  },
+): DetectorContract {
+  const statuses: DetectorContract["statuses"] = {
+    "url-complete": statusMap.complete,
+  };
+  if (statusMap.intermediate !== undefined) {
+    statuses["url-intermediate"] = statusMap.intermediate;
+  }
+  // The url-watcher's `result` shape is `{url, match}` — validate against a permissive subset of its own contract.
+  return {
+    detector: DETECTOR_URL_NAME,
+    statuses,
+    resultSchema: {
+      url: { type: "string", required: true },
+      match: { type: "string", required: false },
     },
   };
 }

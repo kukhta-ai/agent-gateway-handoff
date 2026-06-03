@@ -285,9 +285,13 @@ export class CapabilityService {
     const caveats: Caveat[] = [
       { kind: "recipient", recipient: req.recipient },
       { kind: "ttl", notAfter: expiry },
+      // The grant is bound to exactly this session's capsule via the `scope` path (the route the gateway exposes,
+      // nested under the task scope when attenuated — `/task/<taskId>/handoff/<sessionId>`). The scope alone binds
+      // the session; we deliberately do NOT add a separate `audience: sessionId` caveat — when the grant ATTENUATES
+      // from the task cap (which inherits the agent-authority's identity `audience`), a second, different `audience`
+      // would WIDEN that exact-match dimension (a child cannot carry an audience the parent does not). The scope
+      // nesting is the session bind; the gateway verifies the grant by recipient + scope + class, never `audience`.
       { kind: "scope", path: scopePath },
-      // The grant is bound to exactly this session's capsule (it authorizes nothing else).
-      { kind: "audience", id: req.sessionId },
     ];
     if (req.parentToken !== undefined) {
       // ATTENUATE from the session/task capability — child ⊆ parent. `attenuate` REJECTS (throws
