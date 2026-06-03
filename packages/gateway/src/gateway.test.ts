@@ -83,7 +83,9 @@ class StubIdentity {
       const err = Object.assign(new Error("attestation rejected"), { code: "auth.insufficient" });
       throw err;
     }
-    return { credentialId: "cred-1" };
+    // Return a faithful EnrollmentRecord shape (the real IdentityService always includes authStrength) so the
+    // /enroll/verify response echoes the recorded fact, not the fail-closed default.
+    return { credentialId: "cred-1", authStrength: "webauthn" };
   }
 }
 
