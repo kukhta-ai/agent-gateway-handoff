@@ -2,31 +2,51 @@
 # Authoritative position in the BMAD-based SDLC defined by AGENTS.md + docs/SDLC.md.
 # Re-read on every resume; update at every phase boundary.
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
-#
-# This is the BLANK starting state shipped by the template. Step 0 (AGENTS.md) fills it in.
 
-phase: 1
-phase_name: "Analysis"
-branch: dev
-epic: null               # the epic in flight (e.g. the foundation epic), or null
-active_story: null       # the backlog task being built, or null
+phase: 3
+phase_name: "Solutioning + test architecture"
+branch: feature/scenario-01
+epic: scenario-01            # the whole MVP = deliver scenario-01 end to end
+active_story: [GLA-002, GLA-003, GLA-005]   # wave 1: kernel contracts + scaffold + dependency strategy
 review_cycle: 0
+done: [GLA-001]              # GLA-001 architecture baseline -> docs/architecture/baseline.md
+
+# Spec-exists project: Phases 1-2 are CONFORMANCE — the committed docs/ ARE the brief/PRD/UX.
+# Phase 3 concretizes what the docs leave open: the stack, the scaffold, the quality gate, test arch.
+conformance:
+  phase_1_analysis: "design set docs/00-product-overview.md + actors-and-personas.md ARE the product brief (conformed)"
+  phase_2_planning: "design set docs/01..05 + components/ ARE the PRD/architecture (conformed); product has a UI (capsule surfaces)"
 
 # Persistent BMAD specialists: SPAWNed per-phase, RESUMEd thereafter.
 # last_skill = the BMAD skill each LAST actually invoked (AGENTS.md Rule 3 evidence).
 specialists:
-  analyst:      {spawned: false, role: "product brief / requirements",          last_skill: null}
-  pm:           {spawned: false, role: "PRD",                                   last_skill: null}
-  ux-designer:  {spawned: false, role: "UX spec (only if there is a UI)",       last_skill: null}
-  architect:    {spawned: false, role: "architecture + epics/stories",          last_skill: null}
-  tea:          {spawned: false, role: "test design / framework / ci / gate",   last_skill: null}
-  sm:           {spawned: false, role: "sprint setup + create-story",           last_skill: null}
-  worker:       {spawned: false, role: "dev-story implementation",              last_skill: null}
-  reviewer:     {spawned: false, role: "separate-lane story-automator-review",  last_skill: null}
-  investigator: {spawned: false, role: "systematic debugging at the epic gate", last_skill: null}
-  retro:        {spawned: false, role: "epic retrospective",                    last_skill: null}
+  analyst:      {spawned: false, role: "product brief / requirements (conformed from docs)", last_skill: null}
+  pm:           {spawned: false, role: "PRD (conformed from docs)",                          last_skill: null}
+  ux-designer:  {spawned: false, role: "UX spec (capsule surfaces, conformed from docs)",     last_skill: null}
+  architect:    {spawned: true, id: "a8822e198c36c2519", role: "architecture baseline + epics/stories + readiness", last_skill: "bmad-create-architecture (interactive->docs-driven fallback, recorded)"}
+  tea:          {spawned: false, role: "test design / framework / ci / gate",                 last_skill: null}
+  sm:           {spawned: false, role: "sprint setup + create-story",                         last_skill: null}
+  worker:       {spawned: false, role: "dev-story implementation",                            last_skill: null}
+  reviewer:     {spawned: false, role: "separate-lane story-automator-review",                last_skill: null}
+  investigator: {spawned: false, role: "systematic debugging at the epic gate",               last_skill: null}
+  retro:        {spawned: false, role: "epic retrospective",                                  last_skill: null}
 
 gates_pending: []
+
+# Load-bearing decisions made at orientation (see memory: gla-stack-and-build-decisions,
+# gla-deployment-target, wpm-installer-authoring). Architecture/realization are "open to
+# refinement" per AGENTS.md; goals/user-problems/style are fixed.
+decisions:
+  stack: "TypeScript/Node 22; workspaces modular monolith; Biome (lint/format+import-boundary), Vitest, tsc, Playwright"
+  capsule_launcher_default: "local-process tier (T2); Docker (T4) registered alternative (nested-docker storage broken in hermes-1)"
+  auth_provider_default: "in-tree WebAuthn (@simplewebauthn/server); authentik = managed alternative"
+  channel_default: "Telegram bot adapter + local/CLI channel fallback for testing"
+  deploy_target: "hermes-1 LXD container, GLA listens :3000, fronted by host Caddy at https://57.131.31.126/"
+
+# User directive (this session): drive the whole MVP autonomously toward a working, installable
+# scenario-01 in the Hermes env. Phase gates are surfaced as checkpoints, not hard stops, EXCEPT
+# outward/irreversible actions (push, PR, merge to dev/main, deploying to the real public VPS),
+# which are confirmed first. Local work + local rehearsal container are driven autonomously.
 
 # Pinned SDLC tooling (set by scripts/setup.sh; record exact versions for reproducibility).
 tooling:
@@ -36,6 +56,7 @@ tooling:
     bmm: "6.8.0"                 # BMad Core Module + BMad Method
     tea: "1.19.0"               # Test Architect
     automator: "main @ 51a3cbc" # BMad Automator (external module)
+  wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "claude-code"
 
 last_updated: "2026-06-03"
