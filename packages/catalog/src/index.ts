@@ -378,3 +378,140 @@ export class CatalogService implements CatalogPort {
 }
 
 export type { BindingStatus };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admission-facing view — the catalog facts admission's mutate→validate needs
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Admission (packages/admission) defines an `AdmissionCatalogPort` it depends on; this is the
+// catalog's adapter to it. The shape is declared HERE (structurally identical to admission's port) so
+// neither package imports the other — `app`/the CLI passes the value across the seam. Keeping the
+// shape duplicated (3 small methods) is the price of zero cross-coupling between two core-adjacent
+// packages; the structural-typing test in admission proves they stay compatible.
+
+/** The template defaults (parts + ttl) admission injects in its mutate step. Plain data. */
+export interface CatalogTemplateDefaults {
+  template: string;
+  launcher?: { use: string; params?: Record<string, unknown> };
+  entrypoints?: Array<{ use: string; params?: Record<string, unknown> }>;
+  connector?: { use: string; params?: Record<string, unknown> };
+  workspace?: { use: string; params?: Record<string, unknown> };
+  detectors?: Array<{ use: string; params?: Record<string, unknown> }>;
+  ttl?: string;
+  /** Part-roles the agent MAY override (docs/04 §5); a role not listed is template-FIXED. */
+  openParts?: string[];
+  /** Per open part-role, the compatible provider `use` names (`relations.compatibleWith`). */
+  compatibleProviders?: Record<string, string[]>;
+}
+
+/** A provider's facts admission reads (availability + its typed config_schema). */
+export interface CatalogProviderInfo {
+  name: string;
+  available: boolean;
+  config_schema?: ConfigSchema;
+}
+
+/** A launcher's declared mount capability (kernel `MountCapability`-shaped). */
+export interface CatalogLauncherMountCapability {
+  file: boolean;
+  directory: boolean;
+  modes: Array<"ro" | "rw">;
+}
+
+/** The catalog facts admission needs (structurally === admission's `AdmissionCatalogPort`). */
+export interface CatalogAdmissionView {
+  templateDefaults(id: string): CatalogTemplateDefaults | undefined;
+  provider(use: string): CatalogProviderInfo | undefined;
+  launcherMountCapability(launcher: string): CatalogLauncherMountCapability | undefined;
+}
+
+/** Read a launcher manifest's declared mount capability from its `capability.mounts` (docs/02 §3). */
+function mountCapabilityOf(
+  m: ProviderManifest | undefined,
+): CatalogLauncherMountCapability | undefined {
+  if (m === undefined) {
+    return undefined;
+  }
+  const mounts = (m.spec.capability as { mounts?: unknown }).mounts as
+    | { host_paths?: string[]; modes?: Array<"ro" | "rw"> }
+    | undefined;
+  if (mounts === undefined) {
+    // A launcher with no declared mounts shares no host (mount.unsupported downstream).
+    return { file: false, directory: false, modes: [] };
+  }
+  const hostPaths = mounts.host_paths ?? [];
+  return {
+    file: hostPaths.includes("file"),
+    directory: hostPaths.includes("directory"),
+    modes: mounts.modes ?? [],
+  };
+}
+
+/**
+ * Adapt a {@link CatalogService} (+ its Store content) into the {@link CatalogAdmissionView} admission
+ * consumes. `templateDefaults` derives the structural defaults from the template's `requiredParts`
+ * map (role → provider name) so the resolver fills the holes; `provider` exposes availability + the
+ * provider's `config_schema`; `launcherMountCapability` reads the launcher manifest's declared mounts.
+ * All reads are over the already-ingested index (system-derived availability); nothing is mutated.
+ */
+export function toAdmissionCatalog(
+  service: CatalogService,
+  store: StoreContent = defaultStoreContent(),
+): CatalogAdmissionView {
+  const providersByName = new Map<string, ProviderManifest>();
+  for (const p of store.providers) {
+    providersByName.set(p.metadata.name, p);
+  }
+  const templatesByName = new Map<string, TemplateManifest>();
+  for (const t of store.templates) {
+    templatesByName.set(t.metadata.name, t);
+  }
+
+  return {
+    templateDefaults(id: string): CatalogTemplateDefaults | undefined {
+      const t = templatesByName.get(id);
+      if (t === undefined) {
+        return undefined;
+      }
+      const parts = t.spec.requiredParts;
+      const out: CatalogTemplateDefaults = { template: id };
+      if (parts.launcher) {
+        out.launcher = { use: parts.launcher };
+      }
+      if (parts.entrypoint) {
+        out.entrypoints = [{ use: parts.entrypoint }];
+      }
+      if (parts.connector) {
+        out.connector = { use: parts.connector };
+      }
+      if (parts.workspace) {
+        out.workspace = { use: parts.workspace };
+      }
+      if (parts.detector) {
+        out.detectors = [{ use: parts.detector }];
+      }
+      if (t.spec.openParts !== undefined) {
+        out.openParts = [...t.spec.openParts];
+      }
+      if (t.spec.compatibleProviders !== undefined) {
+        out.compatibleProviders = structuredClone(t.spec.compatibleProviders);
+      }
+      return out;
+    },
+    provider(use: string): CatalogProviderInfo | undefined {
+      const entity = service.show(use);
+      if (entity === undefined) {
+        return undefined;
+      }
+      const manifest = providersByName.get(use);
+      const info: CatalogProviderInfo = { name: use, available: entity.available };
+      if (manifest?.spec.config_schema !== undefined) {
+        info.config_schema = manifest.spec.config_schema;
+      }
+      return info;
+    },
+    launcherMountCapability(launcher: string): CatalogLauncherMountCapability | undefined {
+      return mountCapabilityOf(providersByName.get(launcher));
+    },
+  };
+}

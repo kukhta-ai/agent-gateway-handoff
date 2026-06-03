@@ -12,16 +12,40 @@
 // Design: `run()` returns a Promise<exit code> and writes through an injected `Output` + an injected
 // (or default) Agent Bridge, so it is unit-testable without spawning a process or hitting a network.
 
+import { readFileSync } from "node:fs";
 import { AgentBridge } from "@gla/bridge";
-import { type OpaqueToken, exitCodeFor, isGlaError } from "@gla/kernel";
+import { type OpaqueToken, exitCodeFor, glaError, isGlaError } from "@gla/kernel";
 import { ExitCode } from "./exit-codes.js";
 import type { Output, OutputMode } from "./output.js";
+
+/** The proposal shape the bridge's `sessionCreate` consumes (sans the bound `task`). */
+interface CliProposal {
+  intent: string;
+  template: string;
+  recipient: string;
+  ttl?: string;
+  launcher?: { use: string };
+  entrypoints?: Array<{ use: string }>;
+  connector?: { use: string };
+  workspace?: { use: string };
+  detectors?: Array<{ use: string }>;
+  mounts?: Array<{ host: string; target?: string; mode?: "ro" | "rw" }>;
+}
 
 /** Client version of the `gla` surface. Kept in lockstep with the package version. */
 export const CLI_VERSION = "0.1.0" as const;
 
-/** The nouns the Slice-1 CLI exposes (the orient read surface + version/help). */
-const NOUNS = ["whoami", "version", "catalog", "template", "skill", "help"] as const;
+/** The nouns the CLI exposes (Slice 1 orient + Slice 2 task/session + version/help). */
+const NOUNS = [
+  "whoami",
+  "version",
+  "catalog",
+  "template",
+  "skill",
+  "task",
+  "session",
+  "help",
+] as const;
 
 const USAGE = `gla — agent gateway control interface
 
@@ -35,6 +59,12 @@ Nouns:
   template show <id>          required parts + each backing dependency's binding status
   skill list [--for <t>]      procedural knowledge the agent can load
   skill show <id>             emit the SKILL.md body to stdout
+  task create [flags]         open a Task + mint its task capability (parent = agent-authority)
+  task get <id>               read a Task aggregate
+  task list [--state <s>]     list Tasks
+  session create [flags]      admit an assembly (mutate→validate); --dry-run = admission only
+  session get <id>            read a Session aggregate
+  session list [flags]        list Sessions
   version                     print client (+ server when connected) version
   help                        print this usage
 
@@ -42,6 +72,12 @@ Command flags:
   catalog list --kind <k>     filter by entity kind/family
   catalog list --available    only entities whose dependencies are bound (system-derived)
   skill list --for <id>       only skills relevant to a template
+  task create --intent <s> --recipient <ref>
+  session create -f <spec>    a full assembly spec file (JSON), OR compose with:
+                 --template <id> [--launcher <l>] [--entrypoint <e> …] [--connector <c>]
+                 [--workspace <w>] [--detector <d> …] [--recipient <ref>] [--ttl <dur>]
+                 [--task <id>] [--mount <host>:<target>:<ro|rw> …] [--dry-run]
+  session list --task <id> --state <s>
 
 Global flags:
   -o, --output <fmt>  json | text   (default: json; text auto-selected only at a TTY)
@@ -61,11 +97,16 @@ interface ParsedArgs {
   help: boolean;
   /** positionals after global flags are stripped */
   positionals: string[];
-  /** command-scoped flags collected verbatim (e.g. --kind, --available, --for) */
+  /** command-scoped flags collected verbatim (e.g. --kind, --available, --for); last value wins */
   flags: Map<string, string | true>;
+  /** repeatable command flags collected in order (e.g. --mount, --detector, --entrypoint) */
+  repeated: Map<string, string[]>;
   /** an unknown/invalid global flag, if any (→ usage error) */
   badFlag?: string;
 }
+
+/** Flags that may be repeated (collected into {@link ParsedArgs.repeated}, not overwritten). */
+const REPEATABLE_FLAGS = new Set(["mount", "detector", "entrypoint"]);
 
 /** Global flags consume a following value; command flags are parsed loosely and validated per-command. */
 function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -75,6 +116,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     help: false,
     positionals: [],
     flags: new Map(),
+    repeated: new Map(),
   };
   let optsEnded = false;
   for (let i = 0; i < argv.length; i++) {
@@ -108,12 +150,32 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         }
         break;
       }
+      case "-f":
+      case "--file": {
+        // The assembly spec file for `session create -f <spec>` (a short flag taking a value).
+        const val = argv[++i];
+        if (val !== undefined && !val.startsWith("-")) {
+          out.flags.set("file", val);
+        } else {
+          out.badFlag = `${arg} ${val ?? ""}`.trim();
+        }
+        break;
+      }
       default:
         if (arg.startsWith("--")) {
           // A command-scoped flag: `--name value` or a boolean `--name`.
           const name = arg.slice(2);
           const next = argv[i + 1];
-          if (next !== undefined && !next.startsWith("-")) {
+          const takesValue = next !== undefined && !next.startsWith("-");
+          if (REPEATABLE_FLAGS.has(name)) {
+            // Repeatable: collect each occurrence's value in order (e.g. --mount a --mount b).
+            const list = out.repeated.get(name) ?? [];
+            if (takesValue) {
+              list.push(next);
+              i++;
+            }
+            out.repeated.set(name, list);
+          } else if (takesValue) {
             out.flags.set(name, next);
             i++;
           } else {
@@ -255,6 +317,52 @@ export async function run(
         return usageError(out, "usage: gla skill (list | show <id>)");
       }
 
+      case "task": {
+        if (verb === "create") {
+          const input: { intent?: string; recipient?: string } = {};
+          const intent = parsed.flags.get("intent");
+          if (typeof intent === "string") input.intent = intent;
+          const recipient = parsed.flags.get("recipient");
+          if (typeof recipient === "string") input.recipient = recipient;
+          out.emit(await services.bridge.taskCreate(input));
+          return ExitCode.OK;
+        }
+        if (verb === "get") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla task get <id>");
+          out.emit(services.bridge.taskGet(id));
+          return ExitCode.OK;
+        }
+        if (verb === "list") {
+          const state = parsed.flags.get("state");
+          out.emit(services.bridge.taskList(typeof state === "string" ? { state } : undefined));
+          return ExitCode.OK;
+        }
+        return usageError(out, "usage: gla task (create | get <id> | list)");
+      }
+
+      case "session": {
+        if (verb === "create") {
+          return await sessionCreate(parsed, out, services);
+        }
+        if (verb === "get") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla session get <id>");
+          out.emit(services.bridge.sessionGet(id));
+          return ExitCode.OK;
+        }
+        if (verb === "list") {
+          const f: { task?: string; state?: string } = {};
+          const task = parsed.flags.get("task");
+          if (typeof task === "string") f.task = task;
+          const state = parsed.flags.get("state");
+          if (typeof state === "string") f.state = state;
+          out.emit(services.bridge.sessionList(f));
+          return ExitCode.OK;
+        }
+        return usageError(out, "usage: gla session (create | get <id> | list)");
+      }
+
       default:
         return usageError(out, `unknown command: '${noun}'`);
     }
@@ -274,6 +382,146 @@ export async function run(
     });
     return ExitCode.INTERNAL;
   }
+}
+
+/**
+ * `session create` (docs/05; GLA-020/021). Build the proposal from `-f <spec>` OR `--template <id>` +
+ * part flags + `--mount`, then call the bridge's `sessionCreate` (which admits and, unless --dry-run,
+ * dispatches a Session in `issued`). On reject the bridge throws a typed GlaError → the outer catch
+ * maps `.code` → its exit code (3/4/5/7/8). `--dry-run` prints accept/reject and provisions nothing.
+ */
+async function sessionCreate(
+  parsed: ParsedArgs,
+  out: Output,
+  services: CliServices,
+): Promise<number> {
+  let proposal: CliProposal;
+  try {
+    proposal = buildProposal(parsed);
+  } catch (e) {
+    // A malformed -f/flag combination is a usage error (exit 2), distinct from an admission reject.
+    if (isGlaError(e) && e.code.startsWith("usage.")) {
+      out.fail(e.toGlaError());
+      return ExitCode.USAGE;
+    }
+    throw e;
+  }
+
+  const args: { proposal: CliProposal; task?: string; dryRun?: boolean } = { proposal };
+  const task = parsed.flags.get("task");
+  if (typeof task === "string") args.task = task;
+  if (parsed.flags.get("dry-run") === true) args.dryRun = true;
+
+  // `CliProposal` is structurally the bridge's `CliAssemblyProposal` (plain-string recipient); the
+  // bridge does the brand cast. No `any` needed at this boundary.
+  const result = await services.bridge.sessionCreate(args);
+  out.emit(result);
+  return ExitCode.OK;
+}
+
+/** Build the session-create proposal from `-f <spec>` (a full AssemblySpec) or the part flags. */
+function buildProposal(parsed: ParsedArgs): CliProposal {
+  const file = parsed.flags.get("file");
+  if (typeof file === "string") {
+    return proposalFromFile(file);
+  }
+  return proposalFromFlags(parsed);
+}
+
+/** Read an assembly spec file (JSON) and project it to the proposal the bridge consumes. */
+function proposalFromFile(path: string): CliProposal {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    throw glaError("usage.bad_argument", `cannot read assembly file "${path}": ${String(e)}`);
+  }
+  let doc: unknown;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    throw glaError("usage.bad_argument", `assembly file "${path}" is not valid JSON`);
+  }
+  if (typeof doc !== "object" || doc === null) {
+    throw glaError("usage.bad_argument", `assembly file "${path}" must be a JSON object`);
+  }
+  const d = doc as {
+    metadata?: { intent?: unknown; task?: unknown };
+    spec?: Record<string, unknown>;
+  };
+  const spec = d.spec ?? {};
+  const intent = typeof d.metadata?.intent === "string" ? d.metadata.intent : "";
+  const out: CliProposal = {
+    intent,
+    template: typeof spec.template === "string" ? spec.template : "",
+    recipient: typeof spec.recipient === "string" ? spec.recipient : "",
+  };
+  // Carry the optional parts/ttl/mounts through verbatim (admission re-validates them structurally).
+  if (typeof spec.ttl === "string") out.ttl = spec.ttl;
+  if (spec.launcher !== undefined)
+    out.launcher = spec.launcher as NonNullable<CliProposal["launcher"]>;
+  if (spec.entrypoints !== undefined)
+    out.entrypoints = spec.entrypoints as NonNullable<CliProposal["entrypoints"]>;
+  if (spec.connector !== undefined)
+    out.connector = spec.connector as NonNullable<CliProposal["connector"]>;
+  if (spec.workspace !== undefined)
+    out.workspace = spec.workspace as NonNullable<CliProposal["workspace"]>;
+  if (spec.detectors !== undefined)
+    out.detectors = spec.detectors as NonNullable<CliProposal["detectors"]>;
+  if (spec.mounts !== undefined) out.mounts = spec.mounts as NonNullable<CliProposal["mounts"]>;
+  return out;
+}
+
+/** Build the proposal from `--template <id>` + part flags + `--mount` (the imperative compose form). */
+function proposalFromFlags(parsed: ParsedArgs): CliProposal {
+  const template = parsed.flags.get("template");
+  if (typeof template !== "string") {
+    throw glaError("usage.bad_argument", "session create needs -f <spec> or --template <id>");
+  }
+  const recipient = parsed.flags.get("recipient");
+  const intent = parsed.flags.get("intent");
+  const out: CliProposal = {
+    intent: typeof intent === "string" ? intent : "",
+    template,
+    recipient: typeof recipient === "string" ? recipient : "",
+  };
+  const ttl = parsed.flags.get("ttl");
+  if (typeof ttl === "string") out.ttl = ttl;
+  const launcher = parsed.flags.get("launcher");
+  if (typeof launcher === "string") out.launcher = { use: launcher };
+  const connector = parsed.flags.get("connector");
+  if (typeof connector === "string") out.connector = { use: connector };
+  const workspace = parsed.flags.get("workspace");
+  if (typeof workspace === "string") out.workspace = { use: workspace };
+  const entrypoints = parsed.repeated.get("entrypoint");
+  if (entrypoints && entrypoints.length > 0) out.entrypoints = entrypoints.map((use) => ({ use }));
+  const detectors = parsed.repeated.get("detector");
+  if (detectors && detectors.length > 0) out.detectors = detectors.map((use) => ({ use }));
+  const mounts = parsed.repeated.get("mount");
+  if (mounts && mounts.length > 0) out.mounts = mounts.map(parseMount);
+  return out;
+}
+
+/** Parse one `--mount <host>:<target>:<ro|rw>` (target/mode optional; mode defaults handled downstream). */
+function parseMount(s: string): { host: string; target?: string; mode?: "ro" | "rw" } {
+  const parts = s.split(":");
+  const host = parts[0] ?? "";
+  if (host.length === 0) {
+    throw glaError(
+      "usage.bad_argument",
+      `invalid --mount "${s}" (expected <host>[:<target>[:<mode>]])`,
+    );
+  }
+  const mount: { host: string; target?: string; mode?: "ro" | "rw" } = { host };
+  const target = parts[1];
+  if (target !== undefined && target.length > 0) mount.target = target;
+  const mode = parts[2];
+  if (mode === "ro" || mode === "rw") {
+    mount.mode = mode;
+  } else if (mode !== undefined && mode.length > 0) {
+    throw glaError("usage.bad_argument", `invalid mount mode "${mode}" (expected ro|rw)`);
+  }
+  return mount;
 }
 
 function usageError(out: Output, message: string): number {
