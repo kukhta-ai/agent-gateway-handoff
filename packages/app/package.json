@@ -25,6 +25,7 @@
     "@gla/admission": "workspace:*",
     "@gla/assembly": "workspace:*",
     "@gla/audit": "workspace:*",
+    "@gla/auth-authentik": "workspace:*",
     "@gla/auth-webauthn": "workspace:*",
     "@gla/bridge": "workspace:*",
     "@gla/capability": "workspace:*",
