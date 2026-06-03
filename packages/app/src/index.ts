@@ -14,16 +14,29 @@
 
 // Concrete adapters (the outward side) — importable ONLY from this composition root:
 import { AdmissionService } from "@gla/admission";
-import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
+import { AUTH_WEBAUTHN_MODULE, AuthWebauthnProvider } from "@gla/auth-webauthn";
 import { AgentBridge } from "@gla/bridge";
 import { CapabilityService } from "@gla/capability";
 import { CatalogService, toAdmissionCatalog } from "@gla/catalog";
-import { CHANNEL_CLI_MODULE } from "@gla/channel-cli";
+import {
+  CHANNEL_CLI_MODULE,
+  ChannelCli,
+  type DeliverySink,
+  deliveryToStdout,
+} from "@gla/channel-cli";
 import { CONNECTOR_CDP_MODULE, ConnectorCdpAdapter } from "@gla/connector-cdp";
 import { DETECTOR_URL_MODULE } from "@gla/detector-url";
 import { EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
+import { AccessGateway } from "@gla/gateway";
+import { IdentityService } from "@gla/identity";
 // Core / core-adjacent ports (the inward side of the seam):
-import { type CapabilityId, HmacCapabilitySigner, KERNEL_MODULE } from "@gla/kernel";
+import {
+  type CapabilityId,
+  HmacCapabilitySigner,
+  KERNEL_MODULE,
+  type OpaqueToken,
+  type RecipientRef,
+} from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
 import { SessionService } from "@gla/session";
@@ -252,6 +265,109 @@ export function createProvisioningBridge(
     task,
     session,
     connector,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 4a — recipient enrollment (scenario-01 Phase E)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Options for {@link createEnrollmentStack}. */
+export interface CreateEnrollmentStackOptions {
+  /**
+   * The Relying-Party ID — the registrable host the passkey is bound to (no scheme/port). hermes-1: the gateway's
+   * host; the loopback test: `"localhost"`. MUST match the page origin host. Default `"localhost"`.
+   */
+  rpID?: string;
+  /** The human-visible RP name in the OS passkey UI. Default `"GLA"`. */
+  rpName?: string;
+  /**
+   * The expected page ORIGIN(s) the WebAuthn ceremony runs on (scheme+host+port), e.g. `http://localhost:3000`.
+   * Required so the attestation/assertion is verified against the right origin. A single string or a list.
+   */
+  expectedOrigin: string | string[];
+  /** The public base URL enrollment invite links are built against, e.g. `http://localhost:3000`. */
+  publicBaseUrl: string;
+  /** Gateway bind host. Default `0.0.0.0` (hermes-1); tests pass `127.0.0.1`. */
+  host?: string;
+  /** Gateway bind port. Default `3000`; tests pass `0` for an ephemeral port. */
+  port?: number;
+  /** Where the channel writes the enrollment invite link (defaults to stdout). */
+  deliverySink?: DeliverySink;
+}
+
+/**
+ * The composed enrollment stack (Slice 4a): the wired Access Gateway + the operator's `enrollInvite` action + the
+ * handles a caller/test needs to observe enrolled-vs-not from outside.
+ */
+export interface EnrollmentStack {
+  /** The Access Gateway HTTP server (sole public entry; serves the grant-verified enrollment flow). */
+  gateway: AccessGateway;
+  /** The capability service (mints the operator-discharge grant; owns the single-use spent-set). */
+  capability: CapabilityService;
+  /** The identity service (owns the enrollment fact + auth_strength; wired with the WebAuthn provider). */
+  identity: IdentityService;
+  /** The in-tree WebAuthn auth provider (the AuthProviderPort; only `app` imports it). */
+  authProvider: AuthWebauthnProvider;
+  /** The channel adapter the invite is delivered through (recipient-bound). */
+  channel: ChannelCli;
+  /**
+   * The OPERATOR enrollment action (docs/05 §3: NOT on the agent surface). Mint a single-use operator-discharge
+   * grant bound to the recipient, then deliver the enrollment invite link (carrying the grant) to exactly that
+   * recipient via the channel. Returns the invite link + the grant token + its nonce (for observation/teardown).
+   */
+  enrollInvite(
+    recipient: RecipientRef,
+  ): Promise<{ link: string; grant: OpaqueToken; nonce: string }>;
+}
+
+/**
+ * Compose the Slice-4a enrollment stack. This is the single place the real WebAuthn provider meets the kernel
+ * `AuthProviderPort` and is injected into the Identity service; the Access Gateway is wired with the capability +
+ * identity seams (it imports neither adapter). After this, `enrollInvite(recipient)` mints+delivers an invite, and
+ * the gateway serves the grant-verified enrollment flow on `host:port`.
+ *
+ * Wiring (the ports→adapter seams):
+ *   - AuthWebauthnProvider (AuthProviderPort) ← rpID + expectedOrigin
+ *   - IdentityService ← the WebAuthn provider (the swap-IdP boundary: identity depends on the PORT)
+ *   - CapabilityService.mintEnrollmentGrant / verifyEnrollmentGrant(Token) / markSpent — the single-use grant
+ *   - AccessGateway ← the capability grant seam + the identity enroll seam (no adapter import)
+ *   - ChannelCli ← delivers the recipient-bound invite link
+ */
+export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): EnrollmentStack {
+  const authProvider = new AuthWebauthnProvider({
+    rpID: opts.rpID ?? "localhost",
+    rpName: opts.rpName ?? "GLA",
+    expectedOrigin: opts.expectedOrigin,
+  });
+  const identity = new IdentityService({ authProvider });
+  const capability = new CapabilityService();
+  const channel = new ChannelCli({
+    identity,
+    sink: opts.deliverySink ?? deliveryToStdout,
+  });
+  const gateway = new AccessGateway({
+    grants: capability,
+    identity,
+    host: opts.host ?? "0.0.0.0",
+    port: opts.port ?? 3000,
+  });
+
+  return {
+    gateway,
+    capability,
+    identity,
+    authProvider,
+    channel,
+    async enrollInvite(recipient) {
+      // 1) Mint the single-use operator-discharge grant bound to this recipient (distinct from a handoff grant).
+      const minted = await capability.mintEnrollmentGrant(recipient);
+      // 2) Build the enrollment invite link carrying the grant, and deliver it to EXACTLY the bound recipient.
+      const link = AccessGateway.enrollLink(opts.publicBaseUrl, minted.token);
+      // The channel-delegation token would gate a richer channel; the CLI fallback records it but does not enforce.
+      await channel.deliver(recipient, link, minted.token);
+      return { link, grant: minted.token, nonce: minted.nonce };
+    },
   };
 }
 

@@ -12,16 +12,20 @@
 // The service holds the revocation snapshot and is constructed with any CapabilityPort, so the
 // HMAC reference signer or a later macaroon adapter both work unchanged.
 
+import { randomBytes } from "node:crypto";
 import {
   type Capability,
   type CapabilityId,
   type CapabilityPort,
   type Caveat,
+  type ErrorCode,
   HmacCapabilitySigner,
   type Iso8601,
   type OpaqueToken,
+  type RecipientRef,
   type Ref,
   type RevocationSnapshot,
+  type VerifyContext,
   glaError,
 } from "@gla/kernel";
 
@@ -79,6 +83,31 @@ export interface MintedConnector {
 }
 
 /**
+ * What `mintEnrollmentGrant` hands back (GLA-012 AC#3, GLA-013): the minted single-use `operator-discharge`
+ * enrollment grant + its bearer token (the invite link carries this) + the single-use `nonce` (the spent-set
+ * key). The grant is **distinct from a handoff grant**: it is class `operator-discharge` carrying
+ * `recipient` + `purpose=enroll` + `single-use(nonce)` + `ttl` — never a `session`-class grant.
+ */
+export interface MintedEnrollmentGrant {
+  capability: Capability;
+  /** The bearer token the enrollment invite link carries (`/enroll?grant=<token>`). */
+  token: OpaqueToken;
+  /** The single-use nonce — the spent-set key; consumed (marked spent) after one successful enrollment. */
+  nonce: string;
+}
+
+/**
+ * The result of {@link CapabilityService.verifyEnrollmentGrant} — a `VerifyResult`-shaped fact the gateway
+ * branches on. On success the verified {@link Capability} + the recipient it is bound to + its single-use nonce
+ * (so the caller can mark it spent after a successful enrollment). On failure a stable {@link ErrorCode}
+ * (`auth.expired` | `auth.recipient_mismatch` | `auth.revoked` (reused/spent) | `auth.malformed` |
+ * `auth.insufficient` (wrong class/purpose)).
+ */
+export type EnrollmentGrantVerifyResult =
+  | { ok: true; capability: Capability; recipient: RecipientRef; nonce: string }
+  | { ok: false; reason: ErrorCode };
+
+/**
  * Pull the single caveat of a kind out of a verified capability's caveat set, or undefined.
  * Used to read identity/profile/ops back from the *signed* chain — never from unsigned token bytes.
  */
@@ -98,6 +127,14 @@ function caveatOfKind<K extends Caveat["kind"]>(
  */
 export class CapabilityService {
   private readonly port: CapabilityPort;
+  /**
+   * The single-use SPENT-SET for `operator-discharge` enrollment grants (GLA-013 AC#2 — a reused grant is
+   * refused). The kernel's HMAC `verify()` deliberately carries `single-use`/`purpose` in the signed chain but
+   * does NOT interpret them at the edge ("the services that care enforce them" — capability.ts); this service is
+   * that service. A consumed nonce lands here after a successful enrollment; `verifyEnrollmentGrant` rejects any
+   * grant whose nonce is already present. In-memory (process-local), mirroring the revocation cache's shape.
+   */
+  private readonly spentNonces = new Set<string>();
 
   /** @param port The kernel capability port; defaults to the reference HMAC signer. */
   constructor(port: CapabilityPort = new HmacCapabilitySigner()) {
@@ -206,6 +243,188 @@ export class CapabilityService {
       );
     }
     return { identity, authority_profile: profile, allowed_ops: [...ops] };
+  }
+
+  /**
+   * Mint the **single-use `operator-discharge` enrollment grant** (GLA-012 AC#3, GLA-013) — the one-time
+   * authorization for a recipient enrollment, minted **out-of-band by the operator** (`enrollInvite`). It is
+   * **distinct from a handoff grant** (`kernel-contracts.md §2.1`): class `operator-discharge`, carrying four
+   * caveats —
+   *   - `recipient`   — bound to EXACTLY this recipient (a forwarded invite is useless in another's hands);
+   *   - `purpose=enroll` — the discharge authorizes enrollment, nothing else;
+   *   - `single-use(nonce)` — a fresh random nonce; consumed (spent) after one successful enrollment;
+   *   - `ttl`         — a short window (default 1h) after which the grant is dead.
+   * The returned `token` is what the enrollment invite link carries (`/enroll?grant=<token>`). The gateway
+   * verifies it via {@link verifyEnrollmentGrant} on every enrollment request; a successful enrollment calls
+   * {@link markSpent} so the grant cannot be reused.
+   *
+   * @param recipient  the recipient the grant is bound to (the `recipient` caveat)
+   * @param notAfter   the grant's expiry as an ISO-8601 instant; defaults to now + 1h
+   */
+  async mintEnrollmentGrant(
+    recipient: RecipientRef,
+    notAfter?: Iso8601,
+  ): Promise<MintedEnrollmentGrant> {
+    const nonce = randomBytes(16).toString("hex");
+    const expiry = notAfter ?? (new Date(Date.now() + 60 * 60 * 1000).toISOString() as Iso8601);
+    const caveats: Caveat[] = [
+      { kind: "recipient", recipient },
+      { kind: "purpose", value: "enroll" },
+      { kind: "single-use", nonce },
+      { kind: "ttl", notAfter: expiry },
+    ];
+    const minted = await this.port.mint({ cls: "operator-discharge", caveats });
+    return { capability: minted.capability, token: minted.token, nonce };
+  }
+
+  /**
+   * Verify a presented **enrollment grant** at the gateway (GLA-012 AC#2, GLA-013 AC#2). One call, one fact:
+   * it runs the kernel's stateless `verify()` (signature, `recipient` caveat vs the presenter, `ttl`) AND the
+   * three enrollment-specific checks the kernel leaves to this service —
+   *   - the capability class is `operator-discharge` (not some other class presented as an enrollment grant);
+   *   - it carries `purpose=enroll`;
+   *   - its single-use `nonce` is **not already spent** (a reused grant ⇒ `auth.revoked`).
+   * Returns the verified capability + the bound recipient + the nonce on success (so the caller marks it spent
+   * after a successful enrollment), or a stable {@link ErrorCode} on any failure. The verification is otherwise
+   * **stateless** (no DB round-trip) — the only mutable edge state is the spent-set, consulted like the
+   * revocation cache.
+   *
+   * @param token      the presented grant bearer token (from `/enroll?grant=…` or the POST body)
+   * @param recipient  the recipient the presenter claims to be (the gateway supplies it for the recipient caveat)
+   * @param now        the wall-clock instant to evaluate the `ttl` caveat against (defaults to current)
+   */
+  verifyEnrollmentGrant(
+    token: OpaqueToken,
+    recipient: RecipientRef,
+    now: string = new Date().toISOString(),
+  ): EnrollmentGrantVerifyResult {
+    return this.verifyEnrollmentGrantInner(token, recipient, now);
+  }
+
+  /**
+   * Verify a presented **enrollment grant when the caller has only the token** (the gateway's `GET /enroll?grant=…`
+   * and the enrollment POSTs carry just the token). It reads the bound recipient **out of the verified, signature-
+   * authenticated grant** (via `bindRecipientFromCapability` — a tampered recipient breaks the HMAC and fails
+   * verification first), so the gateway never trusts an unsigned recipient. Otherwise identical to
+   * {@link verifyEnrollmentGrant}: ONE `port.verify` checks signature/TTL/revocation + class=`operator-discharge`
+   * + `purpose=enroll` + single-use-not-spent, and returns the bound recipient + nonce on success.
+   *
+   * @param token  the presented grant bearer token
+   * @param now    the wall-clock instant to evaluate the `ttl` caveat against (defaults to current)
+   */
+  verifyEnrollmentGrantToken(
+    token: OpaqueToken,
+    now: string = new Date().toISOString(),
+  ): EnrollmentGrantVerifyResult {
+    // `undefined` presenter ⇒ read the recipient FROM the signature-authenticated grant (a single verify).
+    return this.verifyEnrollmentGrantInner(token, undefined, now);
+  }
+
+  /**
+   * **Atomically verify-and-consume** an enrollment grant (the gateway's `POST /enroll/verify` path). Verifies the
+   * grant (token-only, recipient read from the signed grant) AND — in the **same synchronous step**, with NO
+   * `await` between the not-spent check and the consume — marks its single-use nonce spent. This closes the
+   * single-use TOCTOU window (GLA-013 AC#2's "one grant = one ceremony"): two concurrent verifies of the same
+   * still-valid grant cannot both pass, because the second observes the nonce already in the spent-set.
+   *
+   * The grant is consumed **optimistically** (before the WebAuthn ceremony) so the consume is atomic; if the
+   * subsequent ceremony then fails, the caller MUST call {@link unspend} to roll the nonce back so a genuine
+   * failure stays retryable (a no-op for the success path). On any verification failure the spent-set is left
+   * untouched.
+   *
+   * @param token  the presented grant bearer token
+   * @param now    the wall-clock instant to evaluate the `ttl` caveat against (defaults to current)
+   */
+  tryConsumeEnrollmentGrantToken(
+    token: OpaqueToken,
+    now: string = new Date().toISOString(),
+  ): EnrollmentGrantVerifyResult {
+    const verified = this.verifyEnrollmentGrantInner(token, undefined, now);
+    if (!verified.ok) {
+      return verified;
+    }
+    // ATOMIC consume: this synchronous block runs to completion before any other turn (JS is single-threaded
+    // and there is no `await` here), so the check-and-add cannot interleave with a concurrent consume. A losing
+    // racer finds the nonce already present and is refused — exactly one ceremony per grant.
+    if (this.spentNonces.has(verified.nonce)) {
+      return { ok: false, reason: "auth.revoked" };
+    }
+    this.spentNonces.add(verified.nonce);
+    return verified;
+  }
+
+  /**
+   * Roll back an optimistic consume (un-spend a nonce) when the WebAuthn ceremony that followed
+   * {@link tryConsumeEnrollmentGrantToken} failed — so a genuine ceremony failure leaves the grant retryable.
+   * Idempotent; a no-op if the nonce was never spent.
+   */
+  unspend(nonce: string): void {
+    this.spentNonces.delete(nonce);
+  }
+
+  /** Mark an enrollment grant's single-use nonce as **spent** (consumed after one successful enrollment). */
+  markSpent(nonce: string): void {
+    this.spentNonces.add(nonce);
+  }
+
+  /** Is this enrollment grant's nonce already spent? (A reused grant fails {@link verifyEnrollmentGrant}.) */
+  isSpent(nonce: string): boolean {
+    return this.spentNonces.has(nonce);
+  }
+
+  /**
+   * The single verify-and-assert core for an enrollment grant (no double-verify). ONE `port.verify` — with a
+   * presenter (the explicit-recipient path) or with `bindRecipientFromCapability` (the token-only path, where the
+   * recipient is read from the signature-authenticated grant) — then the class/purpose/single-use-not-spent
+   * assertions. Returns the bound recipient + nonce on success.
+   *
+   * @param token     the presented grant bearer token
+   * @param presenter the recipient to compare against the `recipient` caveat, or `undefined` to READ it from the
+   *                  verified grant (a tampered recipient breaks the HMAC, so this read is safe)
+   * @param now       the `ttl` evaluation instant
+   */
+  private verifyEnrollmentGrantInner(
+    token: OpaqueToken,
+    presenter: RecipientRef | undefined,
+    now: string,
+  ): EnrollmentGrantVerifyResult {
+    const ctx: VerifyContext = {
+      now: now as Iso8601,
+      revocations: this.port.revocationSnapshot(),
+    };
+    if (presenter !== undefined) {
+      ctx.recipient = presenter;
+    } else {
+      // Authenticate the recipient caveat by signature, then READ it from the grant (no presenter to compare).
+      ctx.bindRecipientFromCapability = true;
+    }
+    const result = this.port.verify(token, ctx);
+    if (!result.ok) {
+      // signature/recipient/ttl/revocation failures come back already-typed.
+      return { ok: false, reason: result.reason };
+    }
+    const cap = result.capability;
+    if (cap.cls !== "operator-discharge") {
+      return { ok: false, reason: "auth.insufficient" };
+    }
+    if (caveatOfKind(cap.caveats, "purpose")?.value !== "enroll") {
+      return { ok: false, reason: "auth.insufficient" };
+    }
+    const recipient = presenter ?? caveatOfKind(cap.caveats, "recipient")?.recipient;
+    if (recipient === undefined) {
+      // A well-formed enrollment grant is always recipient-bound; its absence is a malformed grant.
+      return { ok: false, reason: "auth.malformed" };
+    }
+    const nonce = caveatOfKind(cap.caveats, "single-use")?.nonce;
+    if (nonce === undefined) {
+      // A well-formed enrollment grant always carries a single-use nonce; its absence is a malformed grant.
+      return { ok: false, reason: "auth.malformed" };
+    }
+    if (this.spentNonces.has(nonce)) {
+      // SINGLE-USE: this grant was already consumed by a prior successful enrollment — refuse the reuse.
+      return { ok: false, reason: "auth.revoked" };
+    }
+    return { ok: true, capability: cap, recipient, nonce };
   }
 
   /**

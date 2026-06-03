@@ -264,8 +264,15 @@ export class HmacCapabilitySigner implements CapabilityPort {
         case "recipient": {
           // RECIPIENT-BINDING, FAIL-CLOSED: a recipient-bound cap verifies ONLY for its bound
           // recipient. No presenter, or a different presenter ⇒ reject.
-          if (ctx.recipient === undefined || ctx.recipient !== cav.recipient) {
-            return { ok: false, reason: "auth.recipient_mismatch" };
+          // EXCEPTION — `bindRecipientFromCapability` (the enrollment path): skip the presenter
+          // equality check. The caveat is STILL authenticated by the HMAC chain above (a tampered
+          // recipient breaks the tag and we never reach here), so the caller may safely read the
+          // bound recipient out of the returned capability. Used only by the enrollment GET, where
+          // the token is the only thing presented and the recipient comes from the signed grant.
+          if (ctx.bindRecipientFromCapability !== true) {
+            if (ctx.recipient === undefined || ctx.recipient !== cav.recipient) {
+              return { ok: false, reason: "auth.recipient_mismatch" };
+            }
           }
           break;
         }
