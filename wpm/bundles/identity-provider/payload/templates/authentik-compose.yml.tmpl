@@ -1,0 +1,107 @@
+# authentik docker-compose — parameterized template (identity-provider · authentik branch, GLA-074).
+#
+# USE ONLY for the Managed / host-level standup case (authentik-service-standup.md §1): stand authentik up
+# where Docker genuinely works — at the VPS HOST level for the hermes-1 reference (beside Caddy), NOT inside the
+# GLA container (its nested-Docker storage driver is broken — a Compose stack will fail at `overlayfs`). For
+# Remote-External (authentik already off-box) you do not use this at all — you configure connection-only.
+#
+# GLA reaches authentik over the network via OIDC and needs ONLY the server's endpoints
+# (/application/o/authorize|token, /application/o/<app>/jwks/, /.well-known/openid-configuration). server +
+# worker + PostgreSQL [+ Redis on older versions] are authentik-internal; GLA never dials them directly.
+#
+# VERSION BRANCH — Redis (§2 A4, §8.3): authentik >= 2025.10 REMOVED Redis (cache/tasks/WebSocket moved to
+# PostgreSQL). Include the `redis` service + the AUTHENTIK_REDIS__HOST env ONLY for versions < 2025.10. The
+# {{#REDIS}}…{{/REDIS}} blocks below are stripped by the installer for >= 2025.10. Pin {{AUTHENTIK_TAG}} to the
+# target version so the composition matches it.
+#
+# Placeholders the installer fills (none are secrets in this file — the real secrets live in an .env / secret
+# seam alongside, NEVER inline here): {{AUTHENTIK_TAG}}, {{PG_DB}}, {{PG_USER}}, {{AUTHENTIK_HOST_PORT}},
+# {{AUTHENTIK_HOST_PORT_HTTPS}}. Secret-bearing values (PG password, AUTHENTIK_SECRET_KEY) are referenced from
+# the environment / a secret store, not written into this template.
+
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - database:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS:?set PG_PASS in the environment / secret store — do not inline}
+      POSTGRES_USER: "{{PG_USER}}"
+      POSTGRES_DB: "{{PG_DB}}"
+
+{{#REDIS}}
+  # Redis — ONLY for authentik < 2025.10 (removed in 2025.10; omit this whole block on newer versions).
+  redis:
+    image: docker.io/library/redis:7-alpine
+    command: --save 60 1 --loglevel warning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - redis:/data
+{{/REDIS}}
+
+  server:
+    image: ghcr.io/goauthentik/server:{{AUTHENTIK_TAG}}
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in the environment / secret store}
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: "{{PG_USER}}"
+      AUTHENTIK_POSTGRESQL__NAME: "{{PG_DB}}"
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?set PG_PASS in the environment / secret store}
+{{#REDIS}}
+      AUTHENTIK_REDIS__HOST: redis
+{{/REDIS}}
+    ports:
+      - "{{AUTHENTIK_HOST_PORT}}:9000"
+      - "{{AUTHENTIK_HOST_PORT_HTTPS}}:9443"
+    depends_on:
+      postgresql:
+        condition: service_healthy
+{{#REDIS}}
+      redis:
+        condition: service_healthy
+{{/REDIS}}
+
+  worker:
+    image: ghcr.io/goauthentik/server:{{AUTHENTIK_TAG}}
+    restart: unless-stopped
+    command: worker
+    # The worker runs migrations + background tasks; same image as the server. Not reachable by GLA.
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in the environment / secret store}
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: "{{PG_USER}}"
+      AUTHENTIK_POSTGRESQL__NAME: "{{PG_DB}}"
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?set PG_PASS in the environment / secret store}
+{{#REDIS}}
+      AUTHENTIK_REDIS__HOST: redis
+{{/REDIS}}
+    depends_on:
+      postgresql:
+        condition: service_healthy
+{{#REDIS}}
+      redis:
+        condition: service_healthy
+{{/REDIS}}
+
+volumes:
+  database:
+    driver: local
+{{#REDIS}}
+  redis:
+    driver: local
+{{/REDIS}}
