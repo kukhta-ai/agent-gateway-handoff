@@ -577,8 +577,9 @@ export class AccessGateway {
       );
       return;
     }
+    let record: unknown;
     try {
-      await identity.enrollComplete(verified.recipient, body.attestation);
+      record = await identity.enrollComplete(verified.recipient, body.attestation);
     } catch (e) {
       // A failed/abandoned ceremony: refuse, store NOTHING, and ROLL BACK the consume so the still-valid grant is
       // retryable (no half-bound — GLA-013 AC#4). The error code is the typed one identity threw when present.
@@ -587,9 +588,11 @@ export class AccessGateway {
       this.sendJson(res, 403, this.errBody(code, "enrollment attestation did not verify"));
       return;
     }
-    // Success: the credential is stored bound to the recipient with auth_strength=webauthn; the grant is already
-    // consumed (single-use) so it can never be reused (GLA-013 AC#2).
-    this.sendJson(res, 200, { enrolled: true, auth_strength: "webauthn" });
+    // Success: the credential is stored bound to the recipient; the grant is already consumed (single-use) so it can
+    // never be reused (GLA-013 AC#2). ECHO the strength the identity service actually recorded (provider-agnostic —
+    // `"webauthn"` for a passkey enrollment, `"password"` for a password-grade delegated one), matching the handoff
+    // verify response's `auth_strength: factResult.authStrength` echo (no hardcoded strength, no provider special-case).
+    this.sendJson(res, 200, { enrolled: true, auth_strength: this.readEnrolledStrength(record) });
   }
 
   // ── Handoff at the edge (Slice 4b, scenario-01 Phases 6/12) ───────────────────────────────────────────
@@ -877,6 +880,26 @@ export class AccessGateway {
   private strengthSufficient(strength: AuthStrength): boolean {
     const rank: Record<AuthStrength, number> = { none: 0, password: 1, webauthn: 2 };
     return rank[strength] >= rank[this.requiredAuthStrength];
+  }
+
+  /**
+   * Read the recorded `auth_strength` off whatever the identity service returned from `enrollComplete` (an opaque
+   * `unknown` at this seam — the gateway is provider-agnostic and never names a provider). The identity service
+   * returns its `EnrollmentRecord` (`{ authStrength, … }`); we echo that recorded fact so the enroll-verify response
+   * is TRUTHFUL under either provider (`"webauthn"` for a passkey enrollment, `"password"` for a password-grade
+   * delegated one). If the value is missing/out-of-shape (a custom seam that returns nothing), fail to the WEAKEST
+   * strength `"none"` — an auth-fact default must never OVER-report (a defensive default on an auth surface fails
+   * closed, not open). NO provider knowledge — just the fact. (In the real composition the identity service always
+   * returns a well-formed record, so this fallback is unreachable; it is belt-and-suspenders for a custom seam.)
+   */
+  private readEnrolledStrength(record: unknown): AuthStrength {
+    if (typeof record === "object" && record !== null) {
+      const s = (record as { authStrength?: unknown }).authStrength;
+      if (s === "none" || s === "password" || s === "webauthn") {
+        return s;
+      }
+    }
+    return "none";
   }
 
   /**
