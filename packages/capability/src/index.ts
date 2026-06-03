@@ -108,6 +108,60 @@ export type EnrollmentGrantVerifyResult =
   | { ok: false; reason: ErrorCode };
 
 /**
+ * The request to mint a **recipient-bound handoff (session) grant** (GLA-032/033) — a short-TTL,
+ * single-recipient `session`-class capability scoped to one session/capsule, **attenuated from the
+ * session/task capability** (child ⊆ parent — never widened by the request). The parent token is the
+ * authority the grant descends from (its `recipient`/scope/ttl can only be tightened); the gateway
+ * verifies the minted grant statelessly on every request and WS upgrade.
+ */
+export interface MintSessionGrantRequest {
+  /** The session this grant exposes a window onto (the `scope`/`audience` are derived from it). */
+  sessionId: string;
+  /** The recipient the grant is bound to — the single-recipient caveat (a forwarded link is useless). */
+  recipient: RecipientRef;
+  /**
+   * The parent capability token the grant attenuates FROM (the session's task/session capability). The
+   * resulting grant is reject-or-narrowed against it — its recipient/scope/ttl can only be tightened,
+   * never widened by the request (GLA-032 AC#…, kernel invariant 3). When omitted, the grant is minted
+   * as a fresh `session` root (the degraded path when no parent capability is threaded) — still
+   * recipient-bound + short-TTL, but with no lineage cascade.
+   */
+  parentToken?: OpaqueToken;
+  /** The grant's expiry as an ISO-8601 instant. Defaults to now + the short default TTL (15m). */
+  notAfter?: Iso8601;
+  /**
+   * The public path the grant authorizes (the `scope` caveat). Defaults to `/handoff/<sessionId>` — the
+   * route the gateway mounts. The grant cannot widen its parent's scope (if the parent is scope-bound).
+   */
+  scopePath?: string;
+}
+
+/** What {@link CapabilityService.mintSessionGrant} hands back: the minted grant + its bearer token + its path. */
+export interface MintedSessionGrant {
+  /** The minted `session`-class capability (recipient-bound, short-TTL, scoped). */
+  capability: Capability;
+  /** The bearer token the handoff link carries / the gateway verifies (never raw signing material). */
+  token: OpaqueToken;
+  /** The scope path the grant authorizes (the route's public path). */
+  scopePath: string;
+}
+
+/**
+ * The result of {@link CapabilityService.verifySessionGrant} — a `VerifyResult`-shaped fact the **gateway**
+ * branches on at the edge (GLA-035). On success the verified `session`-class {@link Capability} + the recipient
+ * it is bound to (read from the signed grant). On failure a stable {@link ErrorCode}
+ * (`auth.recipient_mismatch` | `auth.expired` | `auth.revoked` | `auth.malformed` | `auth.insufficient`
+ * (wrong class) | `auth.scope_required`). Only the **bound recipient** passes; absent/wrong-recipient/
+ * expired/revoked all refuse.
+ */
+export type SessionGrantVerifyResult =
+  | { ok: true; capability: Capability; recipient: RecipientRef }
+  | { ok: false; reason: ErrorCode };
+
+/** The short default TTL for a handoff grant (kernel-contracts §2.1: a recipient-bound window is short-lived). */
+const DEFAULT_HANDOFF_GRANT_TTL_MS = 15 * 60 * 1000;
+
+/**
  * Pull the single caveat of a kind out of a verified capability's caveat set, or undefined.
  * Used to read identity/profile/ops back from the *signed* chain — never from unsigned token bytes.
  */
@@ -202,6 +256,127 @@ export class CapabilityService {
       // The agent-blind reference: the capability id as an opaque secret-ref handle. NEVER the token.
       secretRef: minted.capability.id as unknown as Ref<"secret-ref">,
     };
+  }
+
+  /**
+   * Mint a **recipient-bound handoff (session) grant** (GLA-032/033) — the short-TTL, single-recipient
+   * `session`-class capability the gateway verifies on every request and WS upgrade to admit exactly one
+   * recipient onto one capsule's window. It is **attenuated from the session/task capability** (kernel
+   * `attenuate`, reject-or-narrow): the added caveats (`recipient`, `ttl`, `scope`) can only TIGHTEN the
+   * parent — a request can never widen the recipient, extend the TTL past the parent, or widen the scope
+   * (kernel invariant 3; `attenuate` throws `auth.attenuation_widened` if it would). The grant descends by
+   * lineage, so revoking the parent (the session/task cap) CASCADES to the grant at the next `verify()`.
+   *
+   * The grant carries:
+   *   - `recipient`  — bound to EXACTLY this recipient (a forwarded link is useless in another's hands);
+   *   - `ttl`        — a short window (default 15m), never past the parent's expiry;
+   *   - `scope`      — narrowed to the session/capsule path (`/handoff/<sessionId>` by default).
+   *
+   * When `parentToken` is omitted (the degraded path where no parent cap is threaded), the grant is minted
+   * as a fresh `session` root — still recipient-bound + short-TTL + scoped, but without the lineage cascade.
+   *
+   * @throws GlaErrorException (`auth.attenuation_widened`) if the requested caveats would widen the parent.
+   */
+  async mintSessionGrant(req: MintSessionGrantRequest): Promise<MintedSessionGrant> {
+    const scopePath = req.scopePath ?? `/handoff/${req.sessionId}`;
+    const expiry =
+      req.notAfter ??
+      (new Date(Date.now() + DEFAULT_HANDOFF_GRANT_TTL_MS).toISOString() as Iso8601);
+    const caveats: Caveat[] = [
+      { kind: "recipient", recipient: req.recipient },
+      { kind: "ttl", notAfter: expiry },
+      { kind: "scope", path: scopePath },
+      // The grant is bound to exactly this session's capsule (it authorizes nothing else).
+      { kind: "audience", id: req.sessionId },
+    ];
+    if (req.parentToken !== undefined) {
+      // ATTENUATE from the session/task capability — child ⊆ parent. `attenuate` REJECTS (throws
+      // auth.attenuation_widened) if the request would widen the recipient/scope/ttl beyond the parent,
+      // so the request can never widen the grant. The grant descends by lineage (revoke-parent cascade).
+      const minted = await this.port.attenuate(req.parentToken, caveats);
+      return { capability: minted.capability, token: minted.token, scopePath };
+    }
+    // Degraded path: no parent threaded → mint a fresh session-class root (still recipient-bound + short TTL).
+    const minted = await this.port.mint({ cls: "session", caveats });
+    return { capability: minted.capability, token: minted.token, scopePath };
+  }
+
+  /**
+   * Verify a presented **handoff (session) grant** at the gateway edge (GLA-035) — the stateless check the
+   * Access Gateway runs on every request and WS upgrade. One call, one fact: it runs the kernel's pure
+   * `verify()` (signature, `recipient` caveat vs the presenter, `ttl`, `scope` vs the path, and the
+   * revocation SNAPSHOT for self AND every ancestor — no DB round-trip) AND asserts the capability class is
+   * `session` (a `task`/`agent-authority`/`operator-discharge` token presented as a handoff grant is
+   * refused). Only the **bound recipient** passes; an absent/wrong recipient → `auth.recipient_mismatch`,
+   * an expired grant → `auth.expired`, a revoked grant (or a revoked ancestor) → `auth.revoked`. The bound
+   * recipient is read from the *signed* grant on success (a tampered recipient breaks the HMAC first).
+   *
+   * @param token       the presented grant bearer token (from the handoff link / the WS upgrade)
+   * @param recipient   the recipient the presenter authenticated as; compared to the `recipient` caveat
+   * @param scopePath   the public path being accessed, checked against the grant's `scope` caveat
+   * @param now         the wall-clock instant to evaluate the `ttl` caveat against (defaults to current)
+   */
+  verifySessionGrant(
+    token: OpaqueToken,
+    args: { recipient: RecipientRef; scopePath: string; now?: string },
+  ): SessionGrantVerifyResult {
+    const ctx: VerifyContext = {
+      now: (args.now ?? new Date().toISOString()) as Iso8601,
+      recipient: args.recipient,
+      scopePath: args.scopePath,
+      revocations: this.port.revocationSnapshot(),
+    };
+    return this.verifySessionGrantWith(token, ctx);
+  }
+
+  /**
+   * Verify a presented **handoff (session) grant when the caller has only the token** (the gateway's
+   * `GET /handoff/<id>?grant=…` and the WS upgrade carry just the token — there is no separate presenter to
+   * compare against). It reads the bound recipient **out of the verified, signature-authenticated grant** (via
+   * `bindRecipientFromCapability` — a tampered recipient breaks the HMAC and fails verification first), so the
+   * gateway never trusts an unsigned recipient. Otherwise identical to {@link verifySessionGrant}: ONE `port.verify`
+   * checks signature/TTL/scope/revocation, asserts class=`session`, and returns the bound recipient on success.
+   *
+   * The recipient binding is then enforced at STEP-UP: the WebAuthn assertion is verified against the credential of
+   * the recipient READ FROM THE GRANT — so a grant minted for recipient A can only be satisfied by A's passkey (a
+   * grant for a different recipient than the one who authenticates cannot pass).
+   *
+   * @param token      the presented grant bearer token
+   * @param scopePath  the path being accessed (checked against the grant's `scope` caveat)
+   * @param now        the wall-clock instant to evaluate the `ttl` caveat against (defaults to current)
+   */
+  verifySessionGrantToken(
+    token: OpaqueToken,
+    args: { scopePath: string; now?: string },
+  ): SessionGrantVerifyResult {
+    const ctx: VerifyContext = {
+      now: (args.now ?? new Date().toISOString()) as Iso8601,
+      scopePath: args.scopePath,
+      // Authenticate the recipient caveat by signature, then READ it from the grant (no presenter to compare).
+      bindRecipientFromCapability: true,
+      revocations: this.port.revocationSnapshot(),
+    };
+    return this.verifySessionGrantWith(token, ctx);
+  }
+
+  /** The single verify-and-assert core for a handoff grant: ONE `port.verify`, then the class + recipient read. */
+  private verifySessionGrantWith(token: OpaqueToken, ctx: VerifyContext): SessionGrantVerifyResult {
+    const result = this.port.verify(token, ctx);
+    if (!result.ok) {
+      // signature/recipient/ttl/scope/revocation failures come back already-typed.
+      return { ok: false, reason: result.reason };
+    }
+    const cap = result.capability;
+    if (cap.cls !== "session") {
+      // Not a handoff grant (e.g. a task or operator-discharge token presented at the edge) — refuse.
+      return { ok: false, reason: "auth.insufficient" };
+    }
+    const bound = caveatOfKind(cap.caveats, "recipient")?.recipient;
+    if (bound === undefined) {
+      // A well-formed handoff grant is always recipient-bound; its absence is a malformed grant.
+      return { ok: false, reason: "auth.malformed" };
+    }
+    return { ok: true, capability: cap, recipient: bound };
   }
 
   /**
