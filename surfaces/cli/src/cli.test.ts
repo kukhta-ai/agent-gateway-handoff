@@ -628,3 +628,97 @@ describe("gla handoff verbs (Slice 4b)", () => {
     );
   });
 });
+
+/** A fake bridge that records the teardown verbs the CLI routes (Slice 7). */
+class FakeTeardownBridge extends AgentBridge {
+  completed: string[] = [];
+  revokedTasks: string[] = [];
+  revokedSessions: string[] = [];
+  conflictOn: string | undefined;
+  override async taskComplete(id: string) {
+    if (this.conflictOn === id) {
+      throw glaError("state.conflict", `task "${id}" is already terminal`, { retryable: false });
+    }
+    this.completed.push(id);
+    return {
+      task_id: id as `task_${string}`,
+      state: "completed" as const,
+      sessions: [],
+      implicit: false,
+      created_at: "2026-06-03T00:00:00.000Z" as never,
+      updated_at: "2026-06-03T00:00:01.000Z" as never,
+    };
+  }
+  override async taskRevoke(id: string) {
+    this.revokedTasks.push(id);
+    return {
+      task_id: id as `task_${string}`,
+      state: "revoked" as const,
+      sessions: [],
+      implicit: false,
+      created_at: "2026-06-03T00:00:00.000Z" as never,
+      updated_at: "2026-06-03T00:00:01.000Z" as never,
+    };
+  }
+  override async sessionRevoke(id: string) {
+    this.revokedSessions.push(id);
+    return {
+      session_id: id as `sess_${string}`,
+      task_id: "task_1" as `task_${string}`,
+      state: "revoked" as const,
+      template: "browser-handoff",
+    };
+  }
+}
+
+describe("gla teardown verbs (Slice 7 — task complete/revoke, session revoke)", () => {
+  it("`task complete <id>` drives the terminal teardown and prints {state:completed} (exit 0)", async () => {
+    const bridge = new FakeTeardownBridge();
+    const c = capture(false);
+    const code = await run(["task", "complete", "task_1"], c.out, { bridge });
+    expect(code).toBe(ExitCode.OK);
+    expect(bridge.completed).toEqual(["task_1"]);
+    expect(JSON.parse(c.stdout()).state).toBe("completed");
+  });
+
+  it("`task revoke <id>` aborts to a non-success terminal state {state:revoked} (exit 0)", async () => {
+    const bridge = new FakeTeardownBridge();
+    const c = capture(false);
+    const code = await run(["task", "revoke", "task_1"], c.out, { bridge });
+    expect(code).toBe(ExitCode.OK);
+    expect(bridge.revokedTasks).toEqual(["task_1"]);
+    expect(JSON.parse(c.stdout()).state).toBe("revoked");
+  });
+
+  it("`session revoke <id>` tears down one session and prints {state:revoked} (exit 0)", async () => {
+    const bridge = new FakeTeardownBridge();
+    const c = capture(false);
+    const code = await run(["session", "revoke", "sess_1"], c.out, { bridge });
+    expect(code).toBe(ExitCode.OK);
+    expect(bridge.revokedSessions).toEqual(["sess_1"]);
+    expect(JSON.parse(c.stdout()).state).toBe("revoked");
+  });
+
+  it("`task complete` with no id is a usage error (exit 2)", async () => {
+    const c = capture(false);
+    expect(await run(["task", "complete"], c.out, services(new FakeTeardownBridge()))).toBe(
+      ExitCode.USAGE,
+    );
+  });
+
+  it("`task complete` on an already-terminal task maps state.conflict → exit 7", async () => {
+    const bridge = new FakeTeardownBridge();
+    bridge.conflictOn = "task_done";
+    const c = capture(false);
+    const code = await run(["task", "complete", "task_done"], c.out, { bridge });
+    expect(code).toBe(ExitCode.CONFLICT); // 7
+    expect(JSON.parse(c.stderr()).error.code).toBe("state.conflict");
+  });
+
+  it("`session revoke` with no id is a usage error (exit 2)", async () => {
+    const c = capture(false);
+    expect(await run(["session", "revoke"], c.out, services(new FakeTeardownBridge()))).toBe(
+      ExitCode.USAGE,
+    );
+  });
+});
