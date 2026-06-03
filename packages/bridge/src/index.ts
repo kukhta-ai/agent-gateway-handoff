@@ -42,7 +42,7 @@ import {
   type TaskId,
   glaError,
 } from "@gla/kernel";
-import { SessionService, type SessionView } from "@gla/session";
+import { type ProvisionResult, SessionService, type SessionView } from "@gla/session";
 import { type CreateTaskInput, TaskService, type TaskView } from "@gla/task";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
@@ -82,7 +82,14 @@ export interface ConnectResult {
 export interface AgentBridgeOptions {
   /** The catalog read service (defaults to the in-tree reference-slice catalog). */
   catalog?: CatalogService;
-  /** The capability service that mints/verifies the anchor (defaults to a fresh one). */
+  /**
+   * The shared capability SIGNER underpinning the agent-authority anchor, the task cap, and (in the
+   * provisioning composition) the connector cap. Inject it when the `capability` + `task` services were
+   * built with this same signer, so the bridge VERIFIES presented caps with the key that minted them
+   * (and the lineage cascade across all three holds). Defaults to a fresh signer wired to the defaults.
+   */
+  signer?: HmacCapabilitySigner;
+  /** The capability service that mints/verifies the anchor (defaults to a fresh one over {@link signer}). */
   capability?: CapabilityService;
   /** The local AuthorityProfile the anchor is minted from (local single-operator default). */
   profile?: AuthorityProfile;
@@ -92,6 +99,13 @@ export interface AgentBridgeOptions {
   task?: TaskService;
   /** The Session service (Slice 2; defaults to a fresh one). */
   session?: SessionService;
+  /**
+   * Whether the injected SessionService is wired to PROVISION (Slice 3): `app` passes `true` when it
+   * injects a SessionService with the real worker/connector deps, so `session create` runs the spawn
+   * saga and returns `{capsule, connector}`. Default `false` — a bare bridge dispatches a Session in
+   * `issued` (no spawn), the Slice-2 behaviour.
+   */
+  provisioning?: boolean;
   /**
    * The Admission service (Slice 2). `app` injects one wired with the **real Cedar** PolicyPort
    * (the bridge/CLI never import `@gla/policy-cedar` — boundary). When omitted, the bridge builds a
@@ -145,21 +159,25 @@ export class AgentBridge {
   private readonly task: TaskService;
   private readonly session: SessionService;
   private readonly admission: AdmissionService;
+  /** Whether the SessionService is wired to provision (Slice 3) — set by `app`. */
+  private readonly provisioningWired: boolean;
   /** The shared capability signer (so the task cap attenuates from the SAME-signed agent anchor). */
   private readonly signer: HmacCapabilitySigner;
 
   constructor(opts: AgentBridgeOptions = {}) {
     // A single shared signer underpins the capability service AND the task service, so a `task`
     // capability genuinely attenuates from the agent-authority token this bridge mints (verify works
-    // across both). When a CapabilityService is injected without a matching task service the caller is
-    // responsible for sharing a signer; the default path here wires them together.
-    this.signer = new HmacCapabilitySigner();
+    // across both). `app` may INJECT that signer (when it also injects `capability`/`task` built with
+    // it) so the bridge verifies presented caps with the same key that minted them — and the connector
+    // cap's lineage cascade across anchor→task→connector holds. Else a fresh signer wires the defaults.
+    this.signer = opts.signer ?? new HmacCapabilitySigner();
     this.catalog = opts.catalog ?? new CatalogService();
     this.capability = opts.capability ?? new CapabilityService(this.signer);
     this.profile = opts.profile ?? DEFAULT_LOCAL_PROFILE;
     this.state = opts.state ?? EMPTY_STATE;
     this.task = opts.task ?? new TaskService({ capability: this.signer });
     this.session = opts.session ?? new SessionService();
+    this.provisioningWired = opts.provisioning ?? false;
     this.admission =
       opts.admission ??
       new AdmissionService({
@@ -348,13 +366,40 @@ export class AgentBridge {
     }
     const session = this.session.createFromAdmitted(taskId, result.resolved);
     this.task.attachSession(taskId, session.id);
+
+    // 6) PROVISION (Slice 3, GLA-022/023/024/025): run the reversible create-saga — spawn the capsule
+    //    and mint the agent-blind connector, moving the session `issued → active`. On a provision
+    //    failure the saga compensates (no orphan) and the session is `failed`; the typed error is
+    //    re-thrown for the CLI to map to its exit code (3..8). When provisioning is not wired (a bare
+    //    bridge with no worker), fall back to the Slice-2 `issued` dispatch result (no spawn).
+    if (!this.provisioningWired) {
+      return {
+        decision: "accept",
+        dry_run: false,
+        session_id: session.id,
+        state: session.state,
+        task_id: taskId,
+      };
+    }
+    const provisioned = await this.session.provision(session.id);
     return {
       decision: "accept",
       dry_run: false,
-      session_id: session.id,
-      state: session.state,
+      session_id: provisioned.session_id,
+      state: provisioned.state,
       task_id: taskId,
+      capsule: provisioned.capsule,
+      connector: provisioned.connector,
     };
+  }
+
+  /**
+   * `session connector <id>` (docs/05; GLA-025): re-emit the agent-connector for a LIVE capsule so a
+   * crashed agent re-attaches its CDP client. Prints a `secret_ref`, never a raw secret. A session with
+   * no live capsule throws `state.conflict` (→ exit 7), NOT a crash (GLA-025 AC#4). Read-only.
+   */
+  async sessionConnector(id: string): Promise<ProvisionResult> {
+    return this.session.connector(id as SessionView["session_id"]);
   }
 
   /** `session get <id>` (docs/05): read one Session. Throws `state.not_found` (→ exit 5). */
@@ -435,9 +480,14 @@ export type SessionCreateResult =
       session_id: string;
       state: string;
       task_id: TaskId;
+      // PROVISIONED (Slice 3): the live capsule + the agent-blind connector, present when the bridge is
+      // wired to provision (`app` injects the worker). Absent on a bare bridge (Slice-2 `issued` dispatch).
+      capsule?: ProvisionResult["capsule"];
+      connector?: ProvisionResult["connector"];
     };
 
 /** Re-export the kernel error helper so the CLI can build taxonomy errors without re-importing. */
 export { glaError };
 export type { Availability, IndexedEntity, TemplateShowResult, WhoamiResult };
 export type { AuthorityProfile, MintedAuthority } from "@gla/capability";
+export type { ProvisionResult } from "@gla/session";

@@ -43,5 +43,8 @@
     "@gla/task": "workspace:*",
     "@gla/worker": "workspace:*",
     "@gla/workspace-profile": "workspace:*"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.49.1"
   }
 }

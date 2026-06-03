@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AgentConnector: CDP via Playwright (stub).",
+  "description": "AgentConnector: CDP (raw webSocketDebuggerUrl) — agent-blind secret_ref.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

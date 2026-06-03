@@ -92,6 +92,16 @@ export type {
   TaskState,
 } from "./entities.js";
 
+// ── K6 · RuntimeHandle structured-payload codec + spawn-context side-channel ──────────────────────
+// (shared across worker/launcher/connector/entrypoint; neither adapter imports another — boundary lint)
+export {
+  decodeRuntimeHandle,
+  encodeRuntimeHandle,
+  getSpawnContext,
+  setSpawnContext,
+} from "./runtime-handle.js";
+export type { RuntimeDescriptor, SpawnContext, WorkspaceHandleRef } from "./runtime-handle.js";
+
 // ── K7 · module ports + identity/enrollment types ─────────────────────────────
 export type {
   AgentConnector,
