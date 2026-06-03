@@ -7,8 +7,10 @@ phase: 5
 phase_name: "Autonomous build — scenario-01 vertical slices"
 branch: feature/scenario-01
 epic: scenario-01            # the whole MVP = deliver scenario-01 end to end
-active_story: [GLA-064, GLA-065]   # Slice 7: tear down the session and revoke everything — Phase 15
+active_story: GLA-066   # Slice 8a: the cold E2E capstone — full scenario-01 Phases E,0-15 + all S-1..S-10 invariants
 review_cycle: 0
+# Slice 7 done: teardown (Phase 15) verified vs real capsule (pid gone, caps revoked cascade, host file survives, idempotent, no orphan). RUNTIME COMPLETE Phases E,0-15. 407 tests.
+# GLA-066 = the single cold capstone E2E composing all phases + asserting the 10 security invariants (test-strategy §3). Then: wpm bundles GLA-007..011 + deploy to hermes-1 (gla on :3000 behind host Caddy at https://57.131.31.126/).
 # Slice 6 done + reviewed clean: second handoff Phases 9-14 work (auth reuse, agent-blind both windows, re-open same capsule, 2nd completion /dashboard=verified). 384 tests. Runtime works Phases E,0-14.
 # Slice 7 = teardown: gla task complete -> complete task -> complete sessions -> stop+reap capsule + wipe workspace -> revoke grant/connector/task caps -> reconciler confirms NO orphan (much of the machinery exists: Slice 3 cleanup reconciler + Slice 5 close-window). Phase 15.
 # THEN: GLA-066 cold E2E capstone (full scenario-01 Phases E,0-15 in one suite, all S-1..S-10 invariants) + wpm bundles GLA-007..011 (gla-core/browser-runtime/human-view/isolation/edge-proxy/identity) + deploy to hermes-1 (listen :3000, behind host Caddy).
@@ -30,7 +32,7 @@ review_cycle: 0
 # -> test CDP/agent path for real, gate noVNC real-spawn test on Xvfb availability (runs in hermes-1 / wpm human-view bundle).
 # Phase-3 test architecture produced: docs/architecture/test-strategy.md (tea, docs-driven fallback) —
 # pyramid (unit/contract/E2E), scenario-01 E2E harness (virtual WebAuthn authenticator + channel-cli + stub acme site + process-tier launcher), 10 security invariants gating GLA-066.
-done: [GLA-001..006, GLA-012..063]   # foundation + Slices 1-6; 384 tests; scenario-01 RUNTIME works Phases E,0-14 (enroll -> orient -> propose/admit -> provision real capsule -> drive CDP -> handoff1 verify+step-up+proxy -> agent-blind work -> completion -> close -> inspect -> handoff2 auth-reused -> code agent-blind -> verified -> configure). REMAINING: 007-011 (wpm), 064/065 (teardown), 066 (E2E).
+done: [GLA-001..006, GLA-012..065]   # foundation + Slices 1-7; 407 tests; scenario-01 RUNTIME COMPLETE Phases E,0-15 (enroll->orient->propose/admit->provision real capsule->drive->handoff1 verify+step-up+proxy->agent-blind->completion->close->inspect->handoff2 auth-reused->code agent-blind->verified->configure->teardown no-orphan). REMAINING: 007-011 (wpm bundles), 066 (cold E2E capstone).
 # Foundation artifacts: docs/architecture/{baseline,kernel-contracts,dependency-strategy}.md + the building pnpm
 # workspace skeleton (15 packages + 11 adapters + 2 surfaces). Quality gate `pnpm gate` verified green.
 # Note: backlog has a global definitionOfDone but no per-task DoD checkboxes -> DoD enforced via pnpm gate/CI, not --check-dod.
