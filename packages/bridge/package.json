@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Agent Bridge core: routes ops → admission/task/session (placeholder).",
+  "description": "Agent Bridge core: routes ops → admission/task/session; serves read-models.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -18,9 +18,12 @@
     "clean": "tsc -b --clean"
   },
   "dependencies": {
-    "@gla/kernel": "workspace:*",
+    "@gla/admission": "workspace:*",
     "@gla/assembly": "workspace:*",
     "@gla/capability": "workspace:*",
-    "@gla/catalog": "workspace:*"
+    "@gla/catalog": "workspace:*",
+    "@gla/kernel": "workspace:*",
+    "@gla/session": "workspace:*",
+    "@gla/task": "workspace:*"
   }
 }

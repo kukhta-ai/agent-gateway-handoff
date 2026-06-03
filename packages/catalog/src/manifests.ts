@@ -5,7 +5,7 @@
 // so a real Store that reads YAML files plugs in behind the same Ingester later with no API change.
 //
 // Seeds the browser-handoff CapsuleTemplate + the six provider manifests it requires
-// (launcher-process, entrypoint-novnc, connector-cdp, workspace-profile, detector-url, user-done),
+// (launcher-process, entrypoint-novnc, connector-cdp, workspace-profile, url-watcher, user-done),
 // each with a DependencyBinding status, plus a browser-handoff Skill (a short SKILL.md body).
 
 import type { ConfigSchema } from "@gla/kernel";
@@ -89,6 +89,19 @@ export interface TemplateManifest {
     capability: { summary: string };
     /** Required part-roles → the provider name (an entry in {@link PROVIDER_MANIFESTS}) backing it. */
     requiredParts: Record<string, string>;
+    /**
+     * The part-roles the agent MAY override (docs/04 §5 the fixed/open line). A role NOT listed here
+     * is **template-FIXED** (the isolation tier / launcher native base / security-bearing wiring) —
+     * an agent override of a fixed part is a REJECT, not a silent override (docs/04 §4/§5). When
+     * absent, NO part is overridable (fail-closed: only what the template explicitly opens).
+     */
+    openParts?: string[];
+    /**
+     * For each OPEN part-role, the set of provider `use` names the agent may choose
+     * (`relations.compatibleWith`, docs/04 §4 "only with providers the template/catalog mark
+     * compatible"). An override with a provider not in this set is a REJECT even if it is available.
+     */
+    compatibleProviders?: Record<string, string[]>;
     /** The agent-parameterizable surface of the template itself (open params). */
     openParams?: ConfigSchema;
     probe?: string;
@@ -170,18 +183,21 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     },
   },
 
-  // docs/03 §9 — CompletionDetector, url-watcher.
-  "detector-url": {
+  // docs/03 §9 — CompletionDetector, url-watcher. The agent-facing `use` name is `url-watcher`
+  // (docs/04 §1, docs/05 §6, and the GLA-066 scenario calls); the in-tree adapter package is
+  // `@gla/detector-url`, but the catalog registers the provider under the capability name the agent
+  // composes with, so `{ "use": "url-watcher" }` resolves.
+  "url-watcher": {
     apiVersion: "gla.dev/v1",
     kind: "CompletionDetector",
-    metadata: { name: "detector-url", version: "0.1.0" },
+    metadata: { name: "url-watcher", version: "0.1.0" },
     spec: {
       family: "detector",
       capability: { summary: "url-watcher completion detector (fires on a configured URL)" },
       config_schema: {
         complete_on: { type: "string", required: true, pattern: "^/" },
       },
-      probe: "detector-url",
+      probe: "url-watcher",
     },
   },
 
@@ -215,7 +231,18 @@ export const BROWSER_HANDOFF_TEMPLATE: TemplateManifest = {
       entrypoint: "entrypoint-novnc",
       connector: "connector-cdp",
       workspace: "workspace-profile",
-      detector: "detector-url",
+      detector: "url-watcher",
+    },
+    // docs/04 §5 fixed/open line: the launcher (isolation tier / native base) and the workspace are
+    // FIXED — an agent override of either is a reject. The agent MAY override the entrypoint, the
+    // connector, and the detector(s), but only with a compatible provider (below).
+    openParts: ["entrypoint", "connector", "detector"],
+    compatibleProviders: {
+      // From the launcher's relations.compatibleWith (docs/02 §3) — the entrypoint/connector the T2
+      // launcher can drive — plus the detectors this template recognizes.
+      entrypoint: ["entrypoint-novnc"],
+      connector: ["connector-cdp"],
+      detector: ["url-watcher", "user-done"],
     },
     openParams: {
       recipient: { type: "string", required: true },

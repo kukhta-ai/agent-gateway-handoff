@@ -1,19 +1,25 @@
 // @gla/bridge — edge ring (baseline §1).
 // The Agent Bridge core (components/agent-bridge.md): the agent's single door to GLA — a trust
 // boundary, a protocol adapter, and a read/delivery surface, holding NO cognition and enforcing
-// nothing on its own (it is a thin transport over the control plane). Slice 1 implements the
-// orientation read surface (scenario-01 Phase 1) + connect (the agent-authority anchor):
+// nothing on its own (it is a thin transport over the control plane).
+// Slice 1 — orientation read surface (scenario-01 Phase 1) + connect (the agent-authority anchor):
 //   connect()         → trigger→admit→anchor: issue the agent-authority anchor (capability svc)
 //   whoami()          → identity + allowed ops, by VERIFYING the anchor (never trusting bytes)
 //   templateList/Show → the assemblable menu + each part's backing dependency binding status
-//   skillList/Show    → procedural knowledge
-//   catalogList       → only entities available in this install (system-derived)
-// All reads are side-effect-free (GLA-017 AC#4): the Bridge mutates no task/session state.
+//   skillList/Show    → procedural knowledge ; catalogList → only available entities (system-derived)
+// Slice 2 — propose + admit (scenario-01 Phase 2; GLA-018/019/020/021):
+//   taskCreate/Get/List → open a Task + mint its `task` capability (attenuated from agent-authority)
+//   sessionCreate       → resolve task → ADMIT (mutate→validate) → dry-run accept/reject OR dispatch a
+//                         Session in `issued` (no spawn — Slice 3) ; sessionGet/List
+// Reads are side-effect-free; the Bridge enforces NOTHING itself — admission/policy/capability are
+// server-side (docs/05 §1). It routes ops to the injected Task/Session/Admission services.
 //
-// Boundary: `bridge` is edge — it imports CORE GLA packages (@gla/capability, @gla/catalog) and
-// @gla/kernel, NEVER an adapter (the channel/identity adapters are injected at `app`). The
-// import-boundary lint proves the core/bridge never names @gla/channel-cli.
+// Boundary: `bridge` is edge — it imports CORE/CORE-ADJACENT GLA packages (@gla/capability,
+// @gla/catalog, @gla/task, @gla/session, @gla/admission) + @gla/kernel, NEVER an adapter. In
+// particular it NEVER imports @gla/policy-cedar: `app` injects the Cedar PolicyPort into the
+// AdmissionService it hands the bridge (the import-boundary lint proves this).
 
+import { AdmissionService, type AdmitResult, type AssemblyProposal } from "@gla/admission";
 import {
   type AuthorityProfile,
   CapabilityService,
@@ -25,8 +31,19 @@ import {
   CatalogService,
   type IndexedEntity,
   type TemplateShowResult,
+  toAdmissionCatalog,
 } from "@gla/catalog";
-import { type OpaqueToken, glaError } from "@gla/kernel";
+import {
+  type Capability,
+  HmacCapabilitySigner,
+  type Iso8601,
+  type OpaqueToken,
+  type RecipientRef,
+  type TaskId,
+  glaError,
+} from "@gla/kernel";
+import { SessionService, type SessionView } from "@gla/session";
+import { type CreateTaskInput, TaskService, type TaskView } from "@gla/task";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
 export const BRIDGE_MODULE = "@gla/bridge" as const;
@@ -71,7 +88,29 @@ export interface AgentBridgeOptions {
   profile?: AuthorityProfile;
   /** The task/session state stores (read-only here); defaults to empty. */
   state?: StateStores;
+  /** The Task service (Slice 2; defaults to one sharing the capability signer). */
+  task?: TaskService;
+  /** The Session service (Slice 2; defaults to a fresh one). */
+  session?: SessionService;
+  /**
+   * The Admission service (Slice 2). `app` injects one wired with the **real Cedar** PolicyPort
+   * (the bridge/CLI never import `@gla/policy-cedar` — boundary). When omitted, the bridge builds a
+   * default admission over a permissive ALLOW-ALL PolicyPort (so a standalone bridge supports orient
+   * + the permit path); the structural checks (catalog/config/mount) still hold. The catastrophic
+   * mount denylist also still holds. A deny *policy* outcome requires the Cedar-wired admission.
+   */
+  admission?: AdmissionService;
 }
+
+/**
+ * The bridge's DEFAULT permissive PolicyPort — allow-all (the local operator's own agent may propose;
+ * baseline §5). This is NOT Cedar: it is a tiny inline stub so a standalone bridge has a working
+ * policy seam without importing an adapter (the boundary lint forbids the edge from importing
+ * `@gla/policy-cedar`). `app` injects the real Cedar adapter behind the same `PolicyPort`.
+ */
+const ALLOW_ALL_POLICY = {
+  evaluate: () => ({ decision: "permit" as const, reasons: [] }),
+};
 
 /** The default local single-operator AuthorityProfile (baseline §5: agent auth deferred). */
 export const DEFAULT_LOCAL_PROFILE: AuthorityProfile = {
@@ -103,12 +142,30 @@ export class AgentBridge {
   private readonly capability: CapabilityService;
   private readonly profile: AuthorityProfile;
   private readonly state: StateStores;
+  private readonly task: TaskService;
+  private readonly session: SessionService;
+  private readonly admission: AdmissionService;
+  /** The shared capability signer (so the task cap attenuates from the SAME-signed agent anchor). */
+  private readonly signer: HmacCapabilitySigner;
 
   constructor(opts: AgentBridgeOptions = {}) {
+    // A single shared signer underpins the capability service AND the task service, so a `task`
+    // capability genuinely attenuates from the agent-authority token this bridge mints (verify works
+    // across both). When a CapabilityService is injected without a matching task service the caller is
+    // responsible for sharing a signer; the default path here wires them together.
+    this.signer = new HmacCapabilitySigner();
     this.catalog = opts.catalog ?? new CatalogService();
-    this.capability = opts.capability ?? new CapabilityService();
+    this.capability = opts.capability ?? new CapabilityService(this.signer);
     this.profile = opts.profile ?? DEFAULT_LOCAL_PROFILE;
     this.state = opts.state ?? EMPTY_STATE;
+    this.task = opts.task ?? new TaskService({ capability: this.signer });
+    this.session = opts.session ?? new SessionService();
+    this.admission =
+      opts.admission ??
+      new AdmissionService({
+        policy: ALLOW_ALL_POLICY,
+        catalog: toAdmissionCatalog(this.catalog),
+      });
   }
 
   /**
@@ -181,7 +238,204 @@ export class AgentBridge {
   stateSnapshot(): { tasks: unknown[]; sessions: unknown[] } {
     return this.state.snapshot();
   }
+
+  // ── Propose + admit (Slice 2, docs/05 §3 task/session) ─────────────────────────────────────────
+
+  /**
+   * `task create [--intent --recipient]` (docs/05; GLA-018/019): open a Task and mint its `task`
+   * capability (parent = agent-authority, attenuated). Connects to anchor the agent-authority, then
+   * delegates to the Task service. Accepts plain CLI strings (the `recipient` brand cast is this
+   * boundary). Returns the public task view `{task_id, state:active, …}`.
+   */
+  async taskCreate(input: { intent?: string; recipient?: string }): Promise<TaskView> {
+    const connected = await this.connect();
+    const createInput: CreateTaskInput = {};
+    if (input.intent !== undefined) {
+      createInput.intent = input.intent;
+    }
+    if (input.recipient !== undefined) {
+      createInput.recipient = input.recipient as RecipientRef;
+    }
+    const { task } = await this.task.create(createInput, connected.token);
+    return TaskService.toView(task);
+  }
+
+  /** `task get <id>` (docs/05): read one Task aggregate. Throws `state.not_found` (→ exit 5). */
+  taskGet(id: string): TaskView {
+    return TaskService.toView(this.task.get(id as TaskId));
+  }
+
+  /** `task list [--state]` (docs/05): list Tasks visible to this authority. Read-only. */
+  taskList(filter?: { state?: string }): TaskView[] {
+    const f =
+      filter?.state !== undefined ? { state: filter.state as TaskView["state"] } : undefined;
+    return this.task.list(f).map(TaskService.toView);
+  }
+
+  /**
+   * `session create ( -f <spec> | --template <id> [parts…] ) [--task <id>] [--mount …] [--dry-run]`
+   * (docs/05; GLA-020/021). The propose→admit flow:
+   *   1. resolve the presented capability + the proposal's task binding:
+   *        - `--task <id>`: present that task's (scoped) capability and bind the proposal to it;
+   *        - no `--task`: present the agent-authority (unscoped) and DO NOT create a task yet — an
+   *          implicit task is opened ONLY on a real-run accept (so a reject/dry-run leaks no orphan
+   *          task or capability — the §5 fix);
+   *   2. ADMIT (mutate→validate) — mints/runs nothing;
+   *   3. on REJECT → throw the typed error (the CLI maps `.code` → its exit code); nothing persisted;
+   *   4. on a DRY-RUN accept → return `{decision:"accept", …}` (nothing provisioned, no task created);
+   *   5. on a REAL accept → for the implicit case, open the task NOW; then DISPATCH: create the Session
+   *      under the task in `issued` (no spawn — Slice 3), return `{session_id, state:"issued", task_id}`.
+   * Dry-run and a real run share the identical admit pipeline (GLA-021 AC#4).
+   */
+  async sessionCreate(args: {
+    proposal: CliAssemblyProposal;
+    task?: string;
+    dryRun?: boolean;
+  }): Promise<SessionCreateResult> {
+    // The CLI hands a plain-string proposal; the `recipient` brand cast is this single boundary.
+    const recipient = args.proposal.recipient as RecipientRef;
+    const dryRun = args.dryRun ?? false;
+
+    // 1) Resolve the presented capability + the proposal's task binding.
+    //    EXPLICIT task: present its scoped cap and bind metadata.task.
+    //    IMPLICIT task: present the agent-authority (unscoped) and leave the proposal UNBOUND — the
+    //    task is created only on a real-run accept (no orphan on reject/dry-run).
+    let explicitTaskId: TaskId | undefined;
+    let presented: Capability;
+    const proposalBase: AssemblyProposal = { ...args.proposal, recipient };
+    if (args.task !== undefined) {
+      const t = this.task.get(args.task as TaskId); // throws state.not_found (→ exit 5) if unknown
+      explicitTaskId = t.id;
+      presented = this.presentTaskCapability(t.id);
+      proposalBase.task = t.id;
+    } else {
+      // Present the agent-authority anchor (unscoped → no /task scope to violate). No task minted yet.
+      const connected = await this.connect();
+      presented = this.resolveAuthority(connected.token);
+    }
+
+    // 2) ADMIT (mutate→validate). Mints/runs nothing.
+    const result: AdmitResult = this.admission.admit(proposalBase, presented, { dryRun });
+
+    // 3) Reject → throw the typed error (the CLI maps the code → exit 3/4/5/7/8). Nothing persisted.
+    if (result.decision === "reject") {
+      throw glaError(result.error.code, result.error.message, {
+        ...(result.error.detail !== undefined ? { detail: result.error.detail } : {}),
+        retryable: result.error.retryable,
+      });
+    }
+
+    // 4) Dry-run accept → report acceptance; provision NOTHING and create NO task. `task_id` is
+    //    included only when an EXPLICIT task was given (no implicit task is opened on a dry-run).
+    if (dryRun) {
+      return explicitTaskId !== undefined
+        ? { decision: "accept", dry_run: true, task_id: explicitTaskId }
+        : { decision: "accept", dry_run: true };
+    }
+
+    // 5) Real accept → ensure a task (open the implicit one NOW, only on accept), then DISPATCH.
+    let taskId: TaskId;
+    if (explicitTaskId !== undefined) {
+      taskId = explicitTaskId;
+    } else {
+      const connected = await this.connect();
+      const created = await this.task.createImplicit(
+        recipient,
+        connected.token,
+        args.proposal.intent,
+      );
+      taskId = created.task.id;
+    }
+    const session = this.session.createFromAdmitted(taskId, result.resolved);
+    this.task.attachSession(taskId, session.id);
+    return {
+      decision: "accept",
+      dry_run: false,
+      session_id: session.id,
+      state: session.state,
+      task_id: taskId,
+    };
+  }
+
+  /** `session get <id>` (docs/05): read one Session. Throws `state.not_found` (→ exit 5). */
+  sessionGet(id: string): SessionView {
+    return SessionService.toView(this.session.get(id as SessionView["session_id"]));
+  }
+
+  /** `session list [--task --state]` (docs/05): list sessions. Read-only. Accepts plain CLI strings. */
+  sessionList(filter?: { task?: string; state?: string }): SessionView[] {
+    const f: { task?: TaskId; state?: SessionView["state"] } = {};
+    if (filter?.task !== undefined) {
+      f.task = filter.task as TaskId;
+    }
+    if (filter?.state !== undefined) {
+      f.state = filter.state as SessionView["state"];
+    }
+    return this.session.list(f).map(SessionService.toView);
+  }
+
+  /**
+   * Resolve a task's `task` capability into a verified {@link Capability} to present to admission. The
+   * task cap carries a `scope` caveat `/task/<id>`, so it is verified WITH that scope path (the
+   * presenter exercising its own task path). A task with no stored token (shouldn't happen in this
+   * flow) yields a minimal agent-authority-less capability that fails the scope check closed.
+   */
+  private presentTaskCapability(taskId: TaskId): Capability {
+    const token = this.task.capabilityToken(taskId);
+    if (token === undefined) {
+      throw glaError("auth.insufficient", `no task capability for "${taskId}"`);
+    }
+    const verified = this.signer.verify(token, {
+      now: new Date().toISOString() as Iso8601,
+      revocations: this.signer.revocationSnapshot(),
+      scopePath: `/task/${taskId}`,
+    });
+    if (!verified.ok) {
+      throw glaError(verified.reason, `task capability rejected: ${verified.reason}`);
+    }
+    return verified.capability;
+  }
+
+  /**
+   * Resolve the agent-authority anchor token into a verified {@link Capability} to present to
+   * admission for the IMPLICIT-task path. The anchor is unscoped (no `/task` scope caveat), so the
+   * capability-scope check has nothing to violate (the agent is authorized to open a new implicit
+   * task). Verified through the kernel `verify()` (never trusting unsigned bytes).
+   */
+  private resolveAuthority(token: OpaqueToken): Capability {
+    const verified = this.signer.verify(token, {
+      now: new Date().toISOString() as Iso8601,
+      revocations: this.signer.revocationSnapshot(),
+    });
+    if (!verified.ok) {
+      throw glaError(verified.reason, `agent-authority rejected: ${verified.reason}`);
+    }
+    return verified.capability;
+  }
 }
+
+/**
+ * The CLI-friendly assembly proposal (plain `recipient: string`; the bridge brand-casts it). It is
+ * the {@link AssemblyProposal} minus the bound `task` (the bridge sets that) and with a plain-string
+ * recipient — so the CLI never has to handle the kernel's branded types.
+ */
+export interface CliAssemblyProposal extends Omit<AssemblyProposal, "task" | "recipient"> {
+  recipient: string;
+}
+
+/** The result of `session create` (docs/05 §4): a dry-run accept, a real accept (with the session), or — */
+/** on reject — the bridge throws the typed GlaError instead (the CLI maps `.code` → its exit code). */
+export type SessionCreateResult =
+  // Dry-run accept: nothing provisioned and NO task created — so `task_id` is present only when an
+  // EXPLICIT `--task` was given (the implicit task is opened only on a real-run accept; the §5 fix).
+  | { decision: "accept"; dry_run: true; task_id?: TaskId }
+  | {
+      decision: "accept";
+      dry_run: false;
+      session_id: string;
+      state: string;
+      task_id: TaskId;
+    };
 
 /** Re-export the kernel error helper so the CLI can build taxonomy errors without re-importing. */
 export { glaError };

@@ -77,6 +77,9 @@ importers:
 
   adapters/policy-cedar:
     dependencies:
+      '@cedar-policy/cedar-wasm':
+        specifier: ^4.11.0
+        version: 4.11.0
       '@gla/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
@@ -89,6 +92,9 @@ importers:
 
   packages/admission:
     dependencies:
+      '@gla/assembly':
+        specifier: workspace:*
+        version: link:../assembly
       '@gla/kernel':
         specifier: workspace:*
         version: link:../kernel
@@ -185,6 +191,9 @@ importers:
 
   packages/bridge:
     dependencies:
+      '@gla/admission':
+        specifier: workspace:*
+        version: link:../admission
       '@gla/assembly':
         specifier: workspace:*
         version: link:../assembly
@@ -197,6 +206,12 @@ importers:
       '@gla/kernel':
         specifier: workspace:*
         version: link:../kernel
+      '@gla/session':
+        specifier: workspace:*
+        version: link:../session
+      '@gla/task':
+        specifier: workspace:*
+        version: link:../task
 
   packages/capability:
     dependencies:
@@ -338,6 +353,9 @@ packages:
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [win32]
+
+  '@cedar-policy/cedar-wasm@4.11.0':
+    resolution: {integrity: sha512-jIpMGPXKu6spe9PMXdSUqFMK5nJmAyTxRKRA2eegxQhGRRjDrbPuQB2C0+ARGs2OjqhoexgGODf8Y/rPACQI7A==}
 
   '@esbuild/aix-ppc64@0.27.7':
     resolution: {integrity: sha512-EKX3Qwmhz1eMdEJokhALr0YiD0lhQNwDqkPYyPhiSwKrh7/4KRjQc04sZ8db+5DVVnZ1LmbNDI1uAMPEUBnQPg==}
@@ -935,6 +953,8 @@ snapshots:
 
   '@biomejs/cli-win32-x64@1.9.4':
     optional: true
+
+  '@cedar-policy/cedar-wasm@4.11.0': {}
 
   '@esbuild/aix-ppc64@0.27.7':
     optional: true
