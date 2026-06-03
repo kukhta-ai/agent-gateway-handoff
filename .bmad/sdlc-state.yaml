@@ -7,8 +7,10 @@ phase: 5
 phase_name: "Autonomous build — scenario-01 vertical slices"
 branch: feature/scenario-01
 epic: scenario-01            # the whole MVP = deliver scenario-01 end to end
-active_story: [GLA-012, GLA-013]   # Slice 4a: recipient enrollment (Phase E) — gateway foundation + identity enroll + auth-webauthn
+active_story: [GLA-032, GLA-033, GLA-034, GLA-035, GLA-038, GLA-039]   # Slice 4b: handoff open + verify-at-edge + reach capsule — Phases 5-6
 review_cycle: 0
+# Slice 4a done + reviewed clean: gateway HTTP server (sole public entry) + real WebAuthn enrollment (single-use grant, atomic consume). 280 tests.
+# Slice 4b builds: route controller, grant mint, channel deliver (handoff open); gateway grant-verify + WebAuthn step-up (reuse 4a credential) at edge; gateway proxy authorized WS -> capsule noVNC entrypoint (reach). gla handoff open + wait (wait RETURNS in Slice 5 via completion). Real noVNC proxy gated to hermes-1; verify+step-up testable in dev (virtual authenticator).
 # Slice 3 done + reviewed clean: connector cap descends from task cap via ONE shared signer (cascade revoke), teardown revokes+unbinds. 240 tests.
 # Slice 4 split: 4a = enrollment (GLA-012/013) builds Access Gateway HTTP server (:3000) + identity enrollment (operator-discharge) + auth-webauthn (@simplewebauthn) WebAuthn registration.
 # 4b = handoff/verify/reach (GLA-032/033/034/035/038/039): route ctrl, grant, channel deliver, gateway grant-verify + WebAuthn step-up + proxy to noVNC (Phases 5-6).
@@ -20,7 +22,7 @@ review_cycle: 0
 # -> test CDP/agent path for real, gate noVNC real-spawn test on Xvfb availability (runs in hermes-1 / wpm human-view bundle).
 # Phase-3 test architecture produced: docs/architecture/test-strategy.md (tea, docs-driven fallback) —
 # pyramid (unit/contract/E2E), scenario-01 E2E harness (virtual WebAuthn authenticator + channel-cli + stub acme site + process-tier launcher), 10 security invariants gating GLA-066.
-done: [GLA-001, GLA-002, GLA-003, GLA-004, GLA-005, GLA-006, GLA-014, GLA-015, GLA-016, GLA-017, GLA-018, GLA-019, GLA-020, GLA-021, GLA-022, GLA-023, GLA-024, GLA-025]   # foundation + Slices 1-3 (orient, propose/admit/Cedar, provision+connector); 240 tests; gla session create provisions a REAL Chromium capsule + CDP connector
+done: [GLA-001, GLA-002, GLA-003, GLA-004, GLA-005, GLA-006, GLA-012, GLA-013, GLA-014, GLA-015, GLA-016, GLA-017, GLA-018, GLA-019, GLA-020, GLA-021, GLA-022, GLA-023, GLA-024, GLA-025]   # foundation + Slices 1-3 + 4a (enrollment); 280 tests; Phases E,0-4 work end-to-end (enroll, orient, propose/admit, provision real capsule, drive via CDP)
 # Foundation artifacts: docs/architecture/{baseline,kernel-contracts,dependency-strategy}.md + the building pnpm
 # workspace skeleton (15 packages + 11 adapters + 2 surfaces). Quality gate `pnpm gate` verified green.
 # Note: backlog has a global definitionOfDone but no per-task DoD checkboxes -> DoD enforced via pnpm gate/CI, not --check-dod.

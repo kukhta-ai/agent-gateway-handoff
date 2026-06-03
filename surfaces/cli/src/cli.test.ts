@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentBridge } from "@gla/bridge";
 import { CatalogService, defaultStoreContent } from "@gla/catalog";
+import { glaError } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import { CLI_VERSION, type CliServices, run } from "./cli.js";
 import { ExitCode } from "./exit-codes.js";
@@ -472,5 +473,147 @@ describe("gla session create — real run (dispatch a Session in `issued`, no sp
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Handoff verbs (Slice 4b) — dispatch + exit-code contract over a FAKE bridge ─────────────────────────
+// A minimal AgentBridge subclass returning canned handoff results, so the CLI dispatch (flags, JSON output,
+// the exit-6 timeout re-label) is tested without the full provision/gateway stack.
+class FakeHandoffBridge extends AgentBridge {
+  waitBehavior: "complete" | "timeout" = "complete";
+  lastOpenArgs: unknown;
+  override async handoffOpen(args: {
+    session: string;
+    reason?: string;
+    recipient?: string;
+    ttl?: string;
+  }) {
+    this.lastOpenArgs = args;
+    return {
+      handoff_id: "hand_1" as `hand_${string}`,
+      link: `http://gw.local/handoff/${args.session}?grant=tok`,
+      recipient: (args.recipient ?? "tg:user:123") as never,
+      expires_at: "2999-01-01T00:00:00.000Z" as never,
+      state: "open" as const,
+      session_id: args.session as `sess_${string}`,
+    };
+  }
+  override async handoffWait(id: string, _timeoutMs?: number) {
+    if (this.waitBehavior === "timeout") {
+      throw glaError("auth.expired", `handoff wait timed out for "${id}"`, { retryable: false });
+    }
+    return { handoff_id: id as `hand_${string}`, status: "completed", state: "completed" as const };
+  }
+  override handoffGet(id: string) {
+    return {
+      handoff_id: id as `hand_${string}`,
+      link: "http://gw.local/handoff/sess_1?grant=tok",
+      recipient: "tg:user:123" as never,
+      expires_at: "2999-01-01T00:00:00.000Z" as never,
+      state: "open" as const,
+      session_id: "sess_1" as `sess_${string}`,
+    };
+  }
+  override handoffList(_filter?: { session?: string }) {
+    return [];
+  }
+  override async handoffCancel(id: string) {
+    return {
+      handoff_id: id as `hand_${string}`,
+      link: "http://gw.local/handoff/sess_1?grant=tok",
+      recipient: "tg:user:123" as never,
+      expires_at: "2999-01-01T00:00:00.000Z" as never,
+      state: "cancelled" as const,
+      session_id: "sess_1" as `sess_${string}`,
+    };
+  }
+}
+
+describe("gla handoff verbs (Slice 4b)", () => {
+  it("`handoff open --session S --reason r` prints {handoff_id, link, recipient, expires_at} (exit 0)", async () => {
+    const c = capture(false);
+    const bridge = new FakeHandoffBridge();
+    const code = await run(
+      ["handoff", "open", "--session", "sess_1", "--reason", "complete form", "--ttl", "15m"],
+      c.out,
+      services(bridge),
+    );
+    expect(code).toBe(ExitCode.OK);
+    const out = JSON.parse(c.stdout());
+    expect(out.handoff_id).toBe("hand_1");
+    expect(out.link).toContain("grant=");
+    expect(out.recipient).toBe("tg:user:123");
+    expect(out.expires_at).toBeTruthy();
+    // The CLI passed the flags through to the bridge.
+    expect(bridge.lastOpenArgs).toMatchObject({
+      session: "sess_1",
+      reason: "complete form",
+      ttl: "15m",
+    });
+  });
+
+  it("`handoff open` without --session is a usage error (exit 2)", async () => {
+    const c = capture(false);
+    expect(await run(["handoff", "open"], c.out, services(new FakeHandoffBridge()))).toBe(
+      ExitCode.USAGE,
+    );
+  });
+
+  it("`handoff wait <id>` returns the completion envelope (exit 0)", async () => {
+    const c = capture(false);
+    const bridge = new FakeHandoffBridge();
+    bridge.waitBehavior = "complete";
+    const code = await run(["handoff", "wait", "hand_1"], c.out, services(bridge));
+    expect(code).toBe(ExitCode.OK);
+    expect(JSON.parse(c.stdout()).status).toBe("completed");
+  });
+
+  it("`handoff wait <id>` on a timeout/expiry exits 6 (TIMEOUT), not 4 (auth)", async () => {
+    const c = capture(false);
+    const bridge = new FakeHandoffBridge();
+    bridge.waitBehavior = "timeout";
+    const code = await run(
+      ["handoff", "wait", "hand_1", "--timeout", "1s"],
+      c.out,
+      services(bridge),
+    );
+    expect(code).toBe(ExitCode.TIMEOUT); // exit 6 — the documented wait re-label of auth.expired
+    expect(JSON.parse(c.stderr()).error.code).toBe("auth.expired");
+  });
+
+  it("`handoff get <id>` reads the window state (exit 0)", async () => {
+    const c = capture(false);
+    const code = await run(["handoff", "get", "hand_1"], c.out, services(new FakeHandoffBridge()));
+    expect(code).toBe(ExitCode.OK);
+    expect(JSON.parse(c.stdout()).state).toBe("open");
+  });
+
+  it("`handoff cancel <id>` closes the window (exit 0)", async () => {
+    const c = capture(false);
+    const code = await run(
+      ["handoff", "cancel", "hand_1"],
+      c.out,
+      services(new FakeHandoffBridge()),
+    );
+    expect(code).toBe(ExitCode.OK);
+    expect(JSON.parse(c.stdout()).state).toBe("cancelled");
+  });
+
+  it("`handoff list` returns an array (exit 0)", async () => {
+    const c = capture(false);
+    const code = await run(
+      ["handoff", "list", "--session", "sess_1"],
+      c.out,
+      services(new FakeHandoffBridge()),
+    );
+    expect(code).toBe(ExitCode.OK);
+    expect(Array.isArray(JSON.parse(c.stdout()))).toBe(true);
+  });
+
+  it("`handoff frobnicate` is a usage error (exit 2)", async () => {
+    const c = capture(false);
+    expect(await run(["handoff", "frobnicate"], c.out, services(new FakeHandoffBridge()))).toBe(
+      ExitCode.USAGE,
+    );
   });
 });

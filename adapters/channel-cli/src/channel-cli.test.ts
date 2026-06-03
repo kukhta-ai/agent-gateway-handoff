@@ -104,6 +104,21 @@ describe("channel-cli deliver() writes the link to the sink (the human polls it)
       link: "https://gla.local/h/hand_1",
     });
   });
+
+  it("delivers a recipient-bound HANDOFF link to EXACTLY the bound recipient (GLA-033 channel delivery)", async () => {
+    // The handoff link the saga built (carrying the grant) is delivered to ONLY the bound recipient — the line the
+    // recipient (the E2E "human") polls carries that recipient + that link, never a different recipient.
+    const written: string[] = [];
+    const sink: DeliverySink = { write: (l) => written.push(l) };
+    const ch = new ChannelCli({ identity: fakeIdentity, sink });
+    const handoffLink = "http://gw.local/handoff/sess_abc1?grant=eyJ...";
+    await ch.deliver("tg:user:123" as RecipientRef, handoffLink, "grant-tok" as OpaqueToken);
+    const line = JSON.parse(written[0] as string) as { recipient: string; link: string };
+    expect(line.recipient).toBe("tg:user:123");
+    expect(line.link).toBe(handoffLink);
+    // The adapter never widens the binding: the delivered recipient is exactly the one passed (not derived/broadened).
+    expect(line.recipient).not.toBe("tg:user:999");
+  });
 });
 
 describe("a second channel fits the same ChannelPort (GLA-015 AC#4)", () => {
