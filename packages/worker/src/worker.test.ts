@@ -268,6 +268,46 @@ describe("CleanupReconciler — idempotent terminal teardown + orphan scan (GLA-
     expect(l.stopped.length).toBe(1);
   });
 
+  it("reconciles a capsule launched by a NEW launcher TIER by STATE — same reconciler, no per-tier code (GLA-064 AC#9)", async () => {
+    // A brand-new launcher tier (a `remote-worker`-tier stub the worker has never seen) — the cleanup
+    // path must tear it down identically, routing by the TRACKED RECORD's launcher name, never by a
+    // per-tier branch. This is the "reconcile by state regardless of launcher" guarantee (Slice 7).
+    class NewTierLauncher implements LauncherPort {
+      readonly tier = "remote-worker" as const;
+      readonly mountCapability: MountCapability = { file: false, directory: false, modes: [] };
+      stopped: RuntimeHandle[] = [];
+      async spawn(): Promise<RuntimeHandle> {
+        return JSON.stringify({ cdpWebSocketUrl: "ws://127.0.0.1:9/x", tier: "new" }) as never;
+      }
+      async health(): Promise<"up" | "down"> {
+        return "up";
+      }
+      async stop(h: RuntimeHandle): Promise<void> {
+        this.stopped.push(h);
+      }
+    }
+    const reg = new SpawnerRegistry();
+    const newTier = new NewTierLauncher();
+    reg.register("launcher-remote", newTier, { default: true });
+    const ws = new StubWorkspace();
+    const life = new CapsuleLifecycleManager({
+      registry: reg,
+      workspace: new WorkspaceManager(ws),
+    });
+    const rec = new CleanupReconciler({ lifecycle: life });
+
+    // The SAME reconciler tears down a capsule on the NEW tier — by state, via the tracked launcher name.
+    await life.spawn("sess_new", resolved("launcher-remote"));
+    expect(life.hasLive("sess_new")).toBe(true);
+    await rec.reconcile("sess_new");
+    expect(newTier.stopped.length).toBe(1); // the new-tier launcher's stop ran (routed by record state)
+    expect(ws.reaped.length).toBe(1); // and the workspace was reaped
+    expect(life.hasLive("sess_new")).toBe(false); // no orphan remains
+    // Idempotent on the new tier too.
+    await rec.reconcile("sess_new");
+    expect(newTier.stopped.length).toBe(1);
+  });
+
   it("reconcileOrphans tears down a live capsule whose session is NOT in the live set", async () => {
     const reg = new SpawnerRegistry();
     const l = new StubLauncher();

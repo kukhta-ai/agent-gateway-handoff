@@ -277,8 +277,23 @@ export function createProvisioningBridge(
   //    separate signers would break both the lineage tag and the shared revocation snapshot.
   const signer = new HmacCapabilitySigner();
   const capability = new CapabilityService(signer);
-  const task = new TaskService({ capability: signer });
   const connector = new ConnectorCdpAdapter();
+  // A holder so the Task service's TEARDOWN dep (Slice 7) can call the SessionService's terminal
+  // `teardownSession` — the SessionService is constructed later (it needs the handoff/completion deps),
+  // so the closure reads it from `.svc` (assigned once built). Avoids a forward `let` / construction cycle.
+  const sessionRef: { svc?: SessionService } = {};
+  // ── Slice 7 — the Task service is built with its TERMINAL-teardown wiring: `task complete`/`task revoke`
+  //    tear down every session under the task (via the SessionService's `teardownSession`) and revoke the
+  //    task capability (which, by lineage, stops every descendant cap — the session grants + the connector —
+  //    verifying; kernel-contracts.md §2). The session teardown is delegated; the cap revoke is the Task
+  //    service's own job via the shared signer it already holds.
+  const task = new TaskService({
+    capability: signer,
+    teardown: {
+      teardownSession: (sessionId, disposition) =>
+        sessionRef.svc?.teardownSession(sessionId, disposition) ?? Promise.resolve(),
+    },
+  });
 
   // The noVNC human entrypoint (full mode: the ws endpoint the gateway proxies in Slice 4b; headless: reports
   // unavailable). Stood up here so the full-mode test can read it AND so the handoff saga can resolve it.
@@ -299,9 +314,8 @@ export function createProvisioningBridge(
     | ((recipient: RecipientRef) => Promise<{ link: string; grant: OpaqueToken; nonce: string }>)
     | undefined;
   let publicBaseUrl: string | undefined;
-  // A holder so the completion deps' closures (resolved only when a window opens/closes — after this) can reference
-  // the SessionService built below (assigned into `.svc` once constructed). Avoids a forward `let`.
-  const sessionRef: { svc?: SessionService } = {};
+  // (`sessionRef` is declared above with the Task-service teardown wiring — the completion deps' closures
+  //  resolved only when a window opens/closes read the SessionService back from `.svc` once it is built.)
   if (opts.handoff !== undefined) {
     const h = opts.handoff;
     const authProvider = new AuthWebauthnProvider({
@@ -454,6 +468,16 @@ export function createProvisioningBridge(
   if (completionDeps !== undefined) {
     sessionOpts.completion = completionDeps;
   }
+  // ── Slice 7 — the SessionService's TERMINAL-teardown seam (`teardownSession`'s STOP-the-capsule step):
+  //    `reconcile(sessionId)` is the worker's Cleanup Reconciler (built just below), which stops the capsule
+  //    (kills the process group), reaps the workspace (wipes the ephemeral temp profile — host mounts
+  //    survive), revokes the connector cap, and forgets the bookkeeping — idempotent + restart-safe, and
+  //    reconciling by STATE regardless of launcher. The reconciler is constructed after the session (it
+  //    reads the session for the connector-teardown info), so the seam reads it from the holder.
+  const reconcilerRef: { rec?: CleanupReconciler } = {};
+  sessionOpts.teardown = {
+    reconcile: (sessionId) => reconcilerRef.rec?.reconcile(sessionId) ?? Promise.resolve(),
+  };
   const session = new SessionService(sessionOpts);
   // Publish the session into the holder the completion deps' closures read (they run only on a later open/close).
   sessionRef.svc = session;
@@ -475,6 +499,9 @@ export function createProvisioningBridge(
       session.clearProvisioned(sessionId as never);
     },
   });
+  // Publish the reconciler into the holder the SessionService's teardown seam reads (Slice 7) — so
+  // `teardownSession`/`task complete` stop+reap the capsule via the SAME idempotent reconciler.
+  reconcilerRef.rec = reconciler;
 
   // Inject the SHARED signer + capability service + task service into the bridge so the agent anchor,
   // the task cap, and the connector cap are all minted/verified/revoked by the ONE signer (the lineage
