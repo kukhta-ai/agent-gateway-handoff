@@ -18,6 +18,7 @@
     "clean": "tsc -b --clean"
   },
   "dependencies": {
-    "@gla/kernel": "workspace:*"
+    "@gla/kernel": "workspace:*",
+    "jose": "^6.2.3"
   }
 }

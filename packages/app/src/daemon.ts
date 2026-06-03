@@ -25,7 +25,7 @@ import type { AgentBridge } from "@gla/bridge";
 import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
 import type { OpaqueToken, RecipientRef } from "@gla/kernel";
-import { createProvisioningBridge } from "./index.js";
+import { type AuthentikConfig, createProvisioningBridge } from "./index.js";
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
 export interface ServeOptions {
@@ -44,9 +44,25 @@ export interface ServeOptions {
    * when absent (a dev convenience), but a real deploy MUST set it to the Caddy URL.
    */
   publicBaseUrl?: string;
-  /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `localhost`. */
+  /**
+   * The auth provider to wire behind the kernel `AuthProviderPort` (authentik-integration.md §7). Default
+   * `"webauthn"` (the in-tree default — the default boot path is byte-for-byte unchanged). Set `"authentik"`
+   * to opt into the delegated OIDC provider; then the `authentik*` OIDC config below is required.
+   */
+  authProvider?: "webauthn" | "authentik";
+  /** The authentik OIDC issuer (only when `authProvider=authentik`), e.g. `https://idp.example/application/o/gla/`. */
+  authentikIssuerUrl?: string;
+  /** The authentik OIDC client/application id (the id_token audience). */
+  authentikClientId?: string;
+  /** The authentik confidential-client secret (`sensitive` — never logged). */
+  authentikClientSecret?: string;
+  /** The adapter callback URL (the OIDC `redirect_uri`), fronted by the same host Caddy. */
+  authentikRedirectUri?: string;
+  /** Optional OIDC scopes (space-separated). Default `openid profile`. */
+  authentikScopes?: string;
+  /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `localhost`. (WebAuthn path.) */
   rpID?: string;
-  /** The human-visible RP name in the passkey UI. Default `GLA`. */
+  /** The human-visible RP name in the passkey UI. Default `GLA`. (WebAuthn path.) */
   rpName?: string;
   /**
    * The expected page ORIGIN(s) the WebAuthn ceremony runs on (scheme+host+port). Defaults to the public base
@@ -143,12 +159,20 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     );
   }
 
+  // ── Provider selection (authentik-integration.md §7): the default is the in-tree WebAuthn provider; setting
+  //    `GLA_AUTH_PROVIDER=authentik` opts into the delegated OIDC adapter, which needs its OIDC config. Build
+  //    the authentik config object only when selected (its secret is `sensitive` — passed inward, never logged).
+  const authentikConfig =
+    opts.authProvider === "authentik" ? buildAuthentikConfig(opts) : undefined;
+
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
   const stack = createProvisioningBridge({
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
     handoff: {
+      ...(opts.authProvider !== undefined ? { authProvider: opts.authProvider } : {}),
+      ...(authentikConfig !== undefined ? { authentik: authentikConfig } : {}),
       rpID: opts.rpID ?? "localhost",
       rpName: opts.rpName ?? "GLA",
       expectedOrigin,
@@ -198,6 +222,11 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     `  gateway (PUBLIC) : http://${bound.host}:${bound.port}  (front with Caddy → ${publicBaseUrl})`,
   );
   log(`  bridge  (LOCAL)  : ${bridgeEndpoint}`);
+  log(
+    `  auth provider    : ${stack.authModule}${
+      authentikConfig !== undefined ? `  (issuer ${authentikConfig.issuerUrl})` : ""
+    }`,
+  );
   log(`  public base url  : ${publicBaseUrl}  (handoff/enroll links use this)`);
   log(
     `  doctor           : bridge endpoint is ${bridgeIsLocal ? "LOCAL ✓ (not 0.0.0.0)" : "NON-LOCAL ✗ — REFUSED"} (S-6 single-public-entry)`,
@@ -323,6 +352,45 @@ function originOf(baseUrl: string): string {
   }
 }
 
+/**
+ * Assemble the authentik OIDC config from the daemon options (only called when `GLA_AUTH_PROVIDER=authentik`,
+ * authentik-integration.md §7). The issuer / client id / client secret / redirect uri are all required —
+ * a missing one is a fail-loud startup error (never a silent fallback to the default provider). The secret is
+ * `sensitive`: it is carried inward to the adapter and never echoed in the banner or an error message.
+ */
+function buildAuthentikConfig(opts: ServeOptions): AuthentikConfig {
+  const missing: string[] = [];
+  if (opts.authentikIssuerUrl === undefined) {
+    missing.push("GLA_AUTHENTIK_ISSUER_URL");
+  }
+  if (opts.authentikClientId === undefined) {
+    missing.push("GLA_AUTHENTIK_CLIENT_ID");
+  }
+  if (opts.authentikClientSecret === undefined) {
+    missing.push("GLA_AUTHENTIK_CLIENT_SECRET");
+  }
+  if (opts.authentikRedirectUri === undefined) {
+    missing.push("GLA_AUTHENTIK_REDIRECT_URI");
+  }
+  if (
+    opts.authentikIssuerUrl === undefined ||
+    opts.authentikClientId === undefined ||
+    opts.authentikClientSecret === undefined ||
+    opts.authentikRedirectUri === undefined
+  ) {
+    throw new Error(
+      `GLA_AUTH_PROVIDER=authentik requires the authentik OIDC config — missing: ${missing.join(", ")}`,
+    );
+  }
+  return {
+    issuerUrl: opts.authentikIssuerUrl,
+    clientId: opts.authentikClientId,
+    clientSecret: opts.authentikClientSecret,
+    redirectUri: opts.authentikRedirectUri,
+    ...(opts.authentikScopes !== undefined ? { scopes: opts.authentikScopes } : {}),
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // `gla serve` — the runnable command (arg parsing + signal-wired lifetime).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,13 +401,22 @@ const SERVE_USAGE = `gla serve — run the long-running GLA daemon (the :3000 de
 Usage:
   gla serve [--port <n>] [--host <h>] [--endpoint <path|host:port>] [--public-base-url <url>]
             [--rp-id <id>] [--rp-name <name>] [--launcher <auto|full|headless>] [--workspace-root <dir>]
+            [--auth-provider <webauthn|authentik>]
+            [--authentik-issuer-url <url>] [--authentik-client-id <id>]
+            [--authentik-client-secret <secret>] [--authentik-redirect-uri <url>] [--authentik-scopes <s>]
 
 Binds:
   • the Access Gateway (PUBLIC) on  host:port           default 0.0.0.0:3000   (front with Caddy)
   • the Agent Bridge   (LOCAL)  on  a unix socket        default $XDG_RUNTIME_DIR/gla.sock or /run/gla.sock
                                     (or 127.0.0.1:<port>; NEVER 0.0.0.0)
 
-Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE.
+Auth provider (--auth-provider, default webauthn): the in-tree WebAuthn passkey verifier is the default;
+  set authentik to delegate step-up to a self-hosted authentik over OIDC (then the GLA_AUTHENTIK_* config
+  below is required). The client secret is sensitive and is never logged.
+
+Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE,
+  GLA_AUTH_PROVIDER, GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET,
+  GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
 
 Then drive it from another shell with the daemon's bridge endpoint:
   GLA_ENDPOINT=<endpoint> gla whoami
@@ -413,6 +490,35 @@ export function parseServeArgs(
   const rpName = str("rp-name", "GLA_RP_NAME");
   if (rpName !== undefined) {
     options.rpName = rpName;
+  }
+  // ── Provider selection (§7): the switch + the authentik OIDC config it gates. Default `webauthn` (left
+  //    unset so the default boot path is untouched). An invalid value is a stable error the caller surfaces.
+  const authProvider = str("auth-provider", "GLA_AUTH_PROVIDER");
+  if (authProvider !== undefined) {
+    if (authProvider !== "webauthn" && authProvider !== "authentik") {
+      throw new Error(`invalid --auth-provider "${authProvider}" (expected webauthn|authentik)`);
+    }
+    options.authProvider = authProvider;
+  }
+  const authentikIssuerUrl = str("authentik-issuer-url", "GLA_AUTHENTIK_ISSUER_URL");
+  if (authentikIssuerUrl !== undefined) {
+    options.authentikIssuerUrl = authentikIssuerUrl;
+  }
+  const authentikClientId = str("authentik-client-id", "GLA_AUTHENTIK_CLIENT_ID");
+  if (authentikClientId !== undefined) {
+    options.authentikClientId = authentikClientId;
+  }
+  const authentikClientSecret = str("authentik-client-secret", "GLA_AUTHENTIK_CLIENT_SECRET");
+  if (authentikClientSecret !== undefined) {
+    options.authentikClientSecret = authentikClientSecret;
+  }
+  const authentikRedirectUri = str("authentik-redirect-uri", "GLA_AUTHENTIK_REDIRECT_URI");
+  if (authentikRedirectUri !== undefined) {
+    options.authentikRedirectUri = authentikRedirectUri;
+  }
+  const authentikScopes = str("authentik-scopes", "GLA_AUTHENTIK_SCOPES");
+  if (authentikScopes !== undefined) {
+    options.authentikScopes = authentikScopes;
   }
   const launcher = str("launcher", "GLA_LAUNCHER_MODE");
   if (launcher !== undefined) {
