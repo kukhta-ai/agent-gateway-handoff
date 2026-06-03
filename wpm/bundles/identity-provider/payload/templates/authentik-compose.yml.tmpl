@@ -7,17 +7,26 @@
 #
 # GLA reaches authentik over the network via OIDC and needs ONLY the server's endpoints
 # (/application/o/authorize|token, /application/o/<app>/jwks/, /.well-known/openid-configuration). server +
-# worker + PostgreSQL [+ Redis on older versions] are authentik-internal; GLA never dials them directly.
+# worker + PostgreSQL (and Redis on older versions) are authentik-internal; GLA never dials them directly.
 #
 # VERSION BRANCH — Redis (§2 A4, §8.3): authentik >= 2025.10 REMOVED Redis (cache/tasks/WebSocket moved to
 # PostgreSQL). Include the `redis` service + the AUTHENTIK_REDIS__HOST env ONLY for versions < 2025.10. The
-# {{#REDIS}}…{{/REDIS}} blocks below are stripped by the installer for >= 2025.10. Pin {{AUTHENTIK_TAG}} to the
-# target version so the composition matches it.
+# Redis service / volume / env / depends-on sections below are guarded by a Redis section marker and are STRIPPED
+# by the installer's renderer for >= 2025.10 (so a newer standup gets no Redis). Pin {{AUTHENTIK_TAG}} to the
+# target version so the composition matches it. (PROVEN against authentik 2025.10.4 — the Redis-free path.)
+#
+# FIRST-BOOT BOOTSTRAP SEAM (to configure unattended). To create the OIDC provider/app + the `amr` scope mapping
+# via the API on first boot, authentik reads AUTHENTIK_BOOTSTRAP_PASSWORD (the initial akadmin password) and
+# AUTHENTIK_BOOTSTRAP_TOKEN (an initial API token) ON FIRST BOOT ONLY. Both are wired below on `server` AND
+# `worker`, OPTIONAL + env-sourced (empty default), the SAME pattern as PG_PASS — set them in the .env / secret
+# store for the first boot, run the configure step (create the provider/app + attach amr-scope-mapping.py), then
+# UNSET them (they have no effect after the initial bootstrap). They are SECRET-bearing: never inline here.
 #
 # Placeholders the installer fills (none are secrets in this file — the real secrets live in an .env / secret
 # seam alongside, NEVER inline here): {{AUTHENTIK_TAG}}, {{PG_DB}}, {{PG_USER}}, {{AUTHENTIK_HOST_PORT}},
-# {{AUTHENTIK_HOST_PORT_HTTPS}}. Secret-bearing values (PG password, AUTHENTIK_SECRET_KEY) are referenced from
-# the environment / a secret store, not written into this template.
+# {{AUTHENTIK_HOST_PORT_HTTPS}}. Secret-bearing values referenced from the environment / a secret store (never
+# written into this template): PG_PASS, AUTHENTIK_SECRET_KEY, and (first-boot only, optional) AK_BOOTSTRAP_PASSWORD
+# + AK_BOOTSTRAP_TOKEN.
 
 services:
   postgresql:
@@ -62,6 +71,10 @@ services:
       AUTHENTIK_POSTGRESQL__USER: "{{PG_USER}}"
       AUTHENTIK_POSTGRESQL__NAME: "{{PG_DB}}"
       AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?set PG_PASS in the environment / secret store}
+      # First-boot bootstrap (OPTIONAL, env-sourced, empty default — set for the FIRST boot to configure
+      # unattended via the API, then unset). Secret-bearing → from the .env / secret store, never inline.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AK_BOOTSTRAP_TOKEN:-}
 {{#REDIS}}
       AUTHENTIK_REDIS__HOST: redis
 {{/REDIS}}
@@ -80,13 +93,17 @@ services:
     image: ghcr.io/goauthentik/server:{{AUTHENTIK_TAG}}
     restart: unless-stopped
     command: worker
-    # The worker runs migrations + background tasks; same image as the server. Not reachable by GLA.
+    # The worker runs migrations + the first-boot bootstrap + background tasks; same image as the server. Not
+    # reachable by GLA. It needs the SAME bootstrap vars so the initial akadmin + API token are created.
     environment:
       AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in the environment / secret store}
       AUTHENTIK_POSTGRESQL__HOST: postgresql
       AUTHENTIK_POSTGRESQL__USER: "{{PG_USER}}"
       AUTHENTIK_POSTGRESQL__NAME: "{{PG_DB}}"
       AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?set PG_PASS in the environment / secret store}
+      # First-boot bootstrap (OPTIONAL, env-sourced, empty default — see the server service + the header note).
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AK_BOOTSTRAP_TOKEN:-}
 {{#REDIS}}
       AUTHENTIK_REDIS__HOST: redis
 {{/REDIS}}

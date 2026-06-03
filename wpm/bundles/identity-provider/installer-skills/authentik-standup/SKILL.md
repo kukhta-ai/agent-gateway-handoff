@@ -59,15 +59,24 @@ to find on the instance; `payload/templates/oidc-app-and-flow.outcomes.md` is th
   redirect URI. Turn **"include claims in id_token"** on so `sub`, `amr`/`acr`, `nonce`, `aud`, `exp` ride in
   the **id_token** (the adapter validates the id_token, not a userinfo round-trip). Scope `openid profile`
   suffices. The discovery doc's `issuer` must **equal** `GLA_AUTHENTIK_ISSUER_URL` (the adapter validates `iss`).
-- **An authentication flow offering passkey AND password**, emitting a **distinguishing `amr`/`acr`** — an
+- **An authentication flow offering passkey AND password**, emitting a **distinguishing `amr`** — an
   Identification stage leading to a WebAuthn-validator stage **and** a Password stage (plus any MFA), the user
-  chooses. Then the **critical, version-sensitive** part (`§3.2`/`§8.2`): a **custom property/scope mapping**
-  populates `amr` from the authentication context so a **passkey** login emits a token in GLA's webauthn set
-  (`{hwk, swk, webauthn, fido}`) and a **password** login emits `{pwd}` (`adapters/auth-authentik/src/strength.ts`
-  `DEFAULT_METHOD_MAPS`). If the instance's labels differ, set `GLA_AUTHENTIK_AMR_MAP`/`_ACR_MAP` to the actual
-  labels — but the flow **must** emit *something* separating the two tiers. **Verify this against the running
-  instance** (Step 2), never assume; if it cannot be made to distinguish them, the integration **safely degrades
-  to `password`-only** (the adapter never up-maps) and the operator must be **warned**.
+  chooses. Then the **critical, version-sensitive, LOAD-BEARING** part (`§3.2`/`§8.2`), confirmed by the GLA-074
+  rehearsal: **authentik 2025.10 emits `amr: []` (empty) by default** and only a generic `acr` — it does **not**
+  distinguish passkey from password out of the box, so without this step GLA floors every login to `password`
+  (the dual-method *strength* claim can't be realized). The **REQUIRED, PROVEN fix** ships in this bundle: apply
+  **`payload/templates/amr-scope-mapping.py`** as a **custom OAuth2 provider scope mapping** (`scope_name:
+  "openid"`, attached to GLA's provider's property mappings). Its expression reads authentik's recorded login
+  method and populates `amr`: a **password** login → `["pwd"]` → `password`; a **passkey** login → `["swk"]` →
+  `webauthn`. (See `amr-scope-mapping.md` for how to apply it via the API.) This **matches GLA's default amr map**
+  (`adapters/auth-authentik/src/strength.ts` `DEFAULT_METHOD_MAPS`: `{pwd}→password`, `{hwk,swk,webauthn,fido}→
+  webauthn`), so **no adapter change and no `GLA_AUTHENTIK_AMR_MAP` override** is needed for this recipe. If the
+  instance's labels differ, tune the expression's branches (and/or set the map) — but the flow **must** emit
+  *something* separating the two tiers. **Verify the emitted `amr` against the running instance** (Step 2), never
+  assume. **Proven live (authentik 2025.10.4):** after applying it, a real password login yielded `amr:["pwd"]`
+  and GLA resolved `{ok:true, authStrength:"password", methodResolvable:true}`. If it cannot be made to
+  distinguish the methods, the integration **safely degrades to `password`-only** (the adapter never up-maps) and
+  the operator must be **warned**.
 - **A stable, immutable `sub`** — set the provider **subject mode** to the user's **UUID / hashed id**, never
   username or email (which change). The recipient is enrolled against this `sub`; every later step-up checks
   `id_token.sub === the bound sub`. A mutable `sub` silently breaks re-verification.
@@ -77,12 +86,22 @@ to find on the instance; `payload/templates/oidc-app-and-flow.outcomes.md` is th
   `/handoff/auth/verify` (resp. `/enroll/verify`). **No grant leak:** the GLA grant rides only between GLA's page
   and GLA's verify route (same-origin sessionStorage); authentik sees only the OIDC `code`/`state`. The callback
   is on GLA's origin, **not** authentik's, and is **not** the local bridge (the S-6 guard keeps the bridge local).
+- **First-boot bootstrap (to configure UNATTENDED)** — creating the OIDC provider/app + the `amr` scope mapping
+  via the API needs an admin + an API token. authentik reads **`AUTHENTIK_BOOTSTRAP_PASSWORD`** (the initial
+  `akadmin` password) and **`AUTHENTIK_BOOTSTRAP_TOKEN`** (an initial API token) **on first boot only**. The
+  compose template (`payload/templates/authentik-compose.yml.tmpl`) already wires these as **optional,
+  env-sourced (empty default) on the `server` AND the `worker`** (the same pattern as `PG_PASS`). Set
+  `AK_BOOTSTRAP_PASSWORD` / `AK_BOOTSTRAP_TOKEN` in the `.env` / secret store **for the first boot**, run the
+  configure step (create the provider/app, apply the `amr` scope mapping, attach it), then **unset them** (they
+  have no effect after the initial bootstrap). They are **secret-bearing → never inline**. (The rehearsal injected
+  exactly these to configure authentik 2025.10.4 unattended via the API.)
 - **Point GLA at it** — write the connection config GLA reads: `GLA_AUTHENTIK_ISSUER_URL`,
   `GLA_AUTHENTIK_CLIENT_ID`, `GLA_AUTHENTIK_REDIRECT_URI`, and the **client secret via the secret seam** (a
   secret-ref), **never** a literal in any file/receipt/log (`§8.5`).
 - **Version-branch the stack** (Managed/host-standup only) — authentik **≥2025.10 removes Redis**
   (caching/tasks/WebSocket moved to PostgreSQL); older versions need it. The compose template is parameterized;
-  **omit Redis** on ≥2025.10 (`§2 A4`/`§8.3`). Detect the target version and compose accordingly.
+  **omit Redis** on ≥2025.10 (`§2 A4`/`§8.3`). Detect the target version and compose accordingly. (The rehearsal
+  ran the **Redis-free 2025.10.4 path** — postgres + server + worker only — successfully.)
 
 ## Step 2 — VERIFY end-to-end, then RECORD the DependencyBinding (task 6)
 

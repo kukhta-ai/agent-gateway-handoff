@@ -8,11 +8,14 @@ requires: { gla-core: ^0.1.0 }
 payload:
   files: []
   # Authoring references the agent fills/applies for the authentik branch (not auto-placed): the parameterized
-  # authentik compose stack (Managed/host standup; version-branched Redis), the OIDC app + dual-method-flow
-  # outcomes checklist, the same-origin redirect_uri Caddy route, and the DependencyBinding receipt shape.
+  # authentik compose stack (Managed/host standup; version-branched Redis + the first-boot bootstrap seam), the
+  # OIDC app + dual-method-flow outcomes checklist, the PROVEN amr scope-mapping expression (the load-bearing
+  # dual-method config) + its note, the same-origin redirect_uri Caddy route, and the DependencyBinding receipt shape.
   templates:
     - templates/authentik-compose.yml.tmpl
     - templates/oidc-app-and-flow.outcomes.md
+    - templates/amr-scope-mapping.py
+    - templates/amr-scope-mapping.md
     - templates/caddy-authentik-callback.snippet
     - templates/dependency-binding.example.json
   scripts: []
