@@ -3,11 +3,11 @@
 # Re-read on every resume; update at every phase boundary.
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
-phase: 5
-phase_name: "Build — authentik delegated-IdP epic (GLA-067..076), per-story loop"
+phase: 7
+phase_name: "Handoff — authentik epic COMPLETE (10/10); PR feature/authentik -> dev pending (user gate)"
 branch: feature/authentik
 epic: authentik             # delegated identity provider behind the existing AuthProvider seam (passkey + password + MFA)
-active_story: GLA-074        # RE-OPENED to incorporate real-authentik rehearsal findings (amr recipe + bootstrap seam). DONE through GLA-075 (9/10 + 074 hardening).
+active_story: none           # ALL 10 authentik tasks (GLA-067..076) Done. 548 tests green. Real OIDC interop proven vs real authentik 2025.10.4.
 review_cycle: 0
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
