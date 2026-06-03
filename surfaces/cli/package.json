@@ -1,0 +1,28 @@
+{
+  "name": "@gla/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "EDGE · the `gla` command tree over the bridge core (docs/05).",
+  "bin": {
+    "gla": "./bin/gla.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "bin"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@gla/assembly": "workspace:*",
+    "@gla/bridge": "workspace:*",
+    "@gla/kernel": "workspace:*"
+  }
+}

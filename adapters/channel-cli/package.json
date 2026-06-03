@@ -1,0 +1,23 @@
+{
+  "name": "@gla/channel-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FALLBACK ChannelAdapter: local/CLI for headless tests (stub).",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@gla/kernel": "workspace:*"
+  }
+}
