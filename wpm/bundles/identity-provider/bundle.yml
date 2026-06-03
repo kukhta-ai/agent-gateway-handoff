@@ -2,12 +2,23 @@ id: identity-provider
 version: 0.1.0
 summary: Configure the WebAuthn/passkey provider. GLA's in-tree @simplewebauthn
   provider is the default (just sets the RP id); authentik is the heavyweight
-  alternative.
+  alternative — stood up or adopted over OIDC only when GLA_AUTH_PROVIDER=authentik.
 confirmation: safe
 requires: { gla-core: ^0.1.0 }
 payload:
   files: []
-  templates: []
+  # Authoring references the agent fills/applies for the authentik branch (not auto-placed): the parameterized
+  # authentik compose stack (Managed/host standup; version-branched Redis), the OIDC app + dual-method-flow
+  # outcomes checklist, the same-origin redirect_uri Caddy route, and the DependencyBinding receipt shape.
+  templates:
+    - templates/authentik-compose.yml.tmpl
+    - templates/oidc-app-and-flow.outcomes.md
+    - templates/caddy-authentik-callback.snippet
+    - templates/dependency-binding.example.json
   scripts: []
   skills: []
-installerSkills: []
+# Install-time helpers + probes for the authentik branch (active only while this bundle is in focus). The probe
+# scripts under installer-scripts/ run during install (not delivered to the agent's runtime scope).
+installerSkills:
+  - name: authentik-standup
+    path: installer-skills/authentik-standup/SKILL.md
