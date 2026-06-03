@@ -3,11 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "ALT AuthProvider: managed IdP behind the same seam (stub).",
+  "description": "Delegated AuthProvider: authentik via OIDC (authorization-code + PKCE) behind the AuthProviderPort.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/fake-authentik.d.ts",
+      "import": "./dist/fake-authentik.js"
     }
   },
   "main": "./dist/index.js",
