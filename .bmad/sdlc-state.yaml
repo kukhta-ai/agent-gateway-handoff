@@ -7,13 +7,16 @@ phase: 5
 phase_name: "Autonomous build — scenario-01 vertical slices"
 branch: feature/scenario-01
 epic: scenario-01            # the whole MVP = deliver scenario-01 end to end
-active_story: [GLA-006, GLA-018, GLA-019, GLA-020, GLA-021]   # Slice 2: propose + admit (+Cedar) — Phase 2
-review_cycle: 1              # cycle 1: security review of admission found 1 blocker (denylist missing ~/.ssh + GLA state dir) + 4 should-fix (symlink-escape, launcher-override not rejected, compatibleWith unenforced, implicit-task leak) + url-watcher rename; slice2-dev fixing. 173 tests green pre-fix.
-# Slice plan in memory: gla-build-execution-plan. Slice 2 builds task svc, capability(task), assembly
-# resolver, admission (mutate->validate), policy-cedar (Cedar forbid-wins) -> gla task create, session create --dry-run.
+active_story: [GLA-022, GLA-023, GLA-024, GLA-025]   # Slice 3: provision the live capsule + CDP connector — Phases 3-4
+review_cycle: 1              # cycle 1: review CLEAN on saga/agent-blind/isolation/no-orphan; 2 should-fix wiring omissions (connector cap not descended from task cap -> no cascade; terminal teardown doesn't revoke connector/unbind secret_ref); slice3-dev fixing. 233 tests + real CDP test green.
+# Slice 2 done + security-reviewed clean (2 cycles): admission/Cedar sound to build provisioning on. 188 tests.
+# Slice 3 builds worker/spawner + launcher-process (T2: Playwright Chromium [installed] + Xvfb/x11vnc/websockify/noVNC),
+# workspace-profile, capsule, connector-cdp, entrypoint-novnc, session.provision -> gla session create (real) + connector.
+# Dev note: Playwright Chromium present (~/.cache/ms-playwright); X stack (Xvfb/x11vnc) apt-blocked (repo missing xserver pkgs)
+# -> test CDP/agent path for real, gate noVNC real-spawn test on Xvfb availability (runs in hermes-1 / wpm human-view bundle).
 # Phase-3 test architecture produced: docs/architecture/test-strategy.md (tea, docs-driven fallback) —
 # pyramid (unit/contract/E2E), scenario-01 E2E harness (virtual WebAuthn authenticator + channel-cli + stub acme site + process-tier launcher), 10 security invariants gating GLA-066.
-done: [GLA-001, GLA-002, GLA-003, GLA-004, GLA-005, GLA-014, GLA-015, GLA-016, GLA-017]   # foundation + Slice 1 (inbound+orient; gla whoami/template/skill/catalog working, 105 tests)
+done: [GLA-001, GLA-002, GLA-003, GLA-004, GLA-005, GLA-006, GLA-014, GLA-015, GLA-016, GLA-017, GLA-018, GLA-019, GLA-020, GLA-021]   # foundation + Slice 1 (inbound+orient) + Slice 2 (propose+admit+Cedar); 188 tests, gate green
 # Foundation artifacts: docs/architecture/{baseline,kernel-contracts,dependency-strategy}.md + the building pnpm
 # workspace skeleton (15 packages + 11 adapters + 2 surfaces). Quality gate `pnpm gate` verified green.
 # Note: backlog has a global definitionOfDone but no per-task DoD checkboxes -> DoD enforced via pnpm gate/CI, not --check-dod.

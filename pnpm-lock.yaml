@@ -74,6 +74,9 @@ importers:
       '@gla/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
+      playwright-core:
+        specifier: ^1.49.1
+        version: 1.60.0
 
   adapters/policy-cedar:
     dependencies:
@@ -176,6 +179,10 @@ importers:
       '@gla/workspace-profile':
         specifier: workspace:*
         version: link:../../adapters/workspace-profile
+    devDependencies:
+      playwright-core:
+        specifier: ^1.49.1
+        version: 1.60.0
 
   packages/assembly:
     dependencies:
@@ -784,6 +791,11 @@ packages:
     resolution: {integrity: sha512-QP88BAKvMam/3NxH6vj2o21R6MjxZUAd6nlwAS/pnGvN9IVLocLHxGYIzFhg6fUQ+5th6P4dv4eW9jX3DSIj7A==}
     engines: {node: '>=12'}
 
+  playwright-core@1.60.0:
+    resolution: {integrity: sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==}
+    engines: {node: '>=18'}
+    hasBin: true
+
   postcss@8.5.15:
     resolution: {integrity: sha512-FfR8sjd4em2T6fb3I2MwAJU7HWVMr9zba+enmQeeWFfCbm+UOC/0X4DS8XtpUTMwWMGbjKYP7xjfNekzyGmB3A==}
     engines: {node: ^10 || ^12 || >=14}
@@ -1249,6 +1261,8 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.4: {}
+
+  playwright-core@1.60.0: {}
 
   postcss@8.5.15:
     dependencies:
