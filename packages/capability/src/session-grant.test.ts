@@ -69,11 +69,11 @@ describe("CapabilityService.mintSessionGrant — recipient-bound, short-TTL, sco
     }
   });
 
-  it("ATTENUATES from the session/task capability — the grant is a CHILD (descends by lineage)", async () => {
+  it("ATTENUATES from the session/task capability — the grant is a SESSION-class CHILD that VERIFIES at the edge", async () => {
     const signer = new HmacCapabilitySigner();
     const svc = new CapabilityService(signer);
     const parent = await parentTaskGrant(signer);
-    const { capability } = await svc.mintSessionGrant({
+    const { capability, token, scopePath } = await svc.mintSessionGrant({
       sessionId: SESS,
       recipient,
       parentToken: parent,
@@ -81,6 +81,13 @@ describe("CapabilityService.mintSessionGrant — recipient-bound, short-TTL, sco
     // A genuine child: it has a parent ref + a non-empty lineage (so revoking the parent cascades).
     expect(capability.parentRef).toBeDefined();
     expect((capability.lineage ?? []).length).toBeGreaterThan(0);
+    // RE-CLASSED to `session` (it descends from a `task` cap by lineage but IS a handoff grant): a VALID,
+    // UN-REVOKED parent-attenuated grant must VERIFY at the gateway edge (class=`session` is asserted there). This
+    // closes the gap where the parent-cascade test below only passes because the parent is revoked first.
+    expect(capability.cls).toBe("session");
+    const r = svc.verifySessionGrantToken(token, { scopePath });
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.recipient).toBe(recipient);
   });
 
   it("CANNOT be widened by the request — a DIFFERENT recipient than the parent is REJECTED", async () => {

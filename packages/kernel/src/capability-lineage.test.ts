@@ -122,6 +122,66 @@ describe("#2 — verify rejects if self OR any ancestor is revoked (full chain, 
   });
 });
 
+describe("attenuate childClass — re-class a child to a narrower class while preserving lineage + cascade", () => {
+  it("a `childClass` re-classes the child (parent stays its own class) and the class is SIGNED", async () => {
+    const signer = new HmacCapabilitySigner();
+    const { token: task } = await signer.mint({
+      cls: "task",
+      caveats: [{ kind: "scope", path: "/task/t1" }],
+    });
+    // Re-class the child to `session` (a handoff grant descending from a task cap by lineage).
+    const grant = await signer.attenuate(
+      task,
+      [{ kind: "scope", path: "/task/t1/handoff/s1" }],
+      "session",
+    );
+    expect(grant.capability.cls).toBe("session"); // re-classed, not the parent's `task`
+    expect(grant.capability.parentRef).toBeDefined(); // still a genuine child
+    // The class is folded into the signed tag: flipping the encoded class breaks verification.
+    const p = decodePayload(grant.token);
+    expect(p.cls).toBe("session");
+    p.cls = "task"; // tamper the class, keep the original tag
+    const forged = encodePayload(p);
+    expect(
+      signer.verify(forged, { now: T0, revocations: NEVER, scopePath: "/task/t1/handoff/s1" }).ok,
+    ).toBe(false);
+  });
+
+  it("a re-classed child STILL cascades — revoking ANY ancestor invalidates it", async () => {
+    const signer = new HmacCapabilitySigner();
+    const { token: root, capability: rootCap } = await signer.mint({
+      cls: "agent-authority",
+      caveats: [],
+    });
+    const task = await signer.attenuate(root, [], "task"); // agent-authority → task
+    const grant = await signer.attenuate(task.token, [], "session"); // task → session (the handoff grant)
+    // Revoke the ROOT (the grandparent) — the re-classed session grant two levels down is still invalidated.
+    const revs = new InMemoryRevocations();
+    revs.add(rootCap.id);
+    const r = signer.verify(grant.token, { now: T0, revocations: revs.snapshot() });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("auth.revoked");
+    }
+    // And revoking the immediate parent (the task cap) also cascades.
+    const revs2 = new InMemoryRevocations();
+    revs2.add(task.capability.id);
+    expect(signer.verify(grant.token, { now: T0, revocations: revs2.snapshot() }).ok).toBe(false);
+  });
+
+  it("re-classing does NOT relax the widening guard — a wider scope still throws", async () => {
+    const signer = new HmacCapabilitySigner();
+    const { token: task } = await signer.mint({
+      cls: "task",
+      caveats: [{ kind: "scope", path: "/task/t1" }],
+    });
+    // A scope OUTSIDE the parent's must still be rejected even with a re-class requested.
+    await expect(
+      signer.attenuate(task, [{ kind: "scope", path: "/task/other" }], "session"),
+    ).rejects.toMatchObject({ code: "auth.attenuation_widened" });
+  });
+});
+
 describe("#3 — scope caveat FAILS CLOSED when ctx.scopePath is omitted", () => {
   it("rejects with auth.scope_required when a scoped grant is presented without a path", async () => {
     const signer = new HmacCapabilitySigner();

@@ -191,6 +191,7 @@ export class HmacCapabilitySigner implements CapabilityPort {
   async attenuate(
     parentToken: OpaqueToken,
     addedCaveats: Caveat[],
+    childClass?: CapabilityClass,
   ): Promise<{ capability: Capability; token: OpaqueToken }> {
     const decoded = this.decode(parentToken);
     if ("error" in decoded) {
@@ -209,19 +210,25 @@ export class HmacCapabilitySigner implements CapabilityPort {
       );
     }
     const id = freshCapabilityId();
-    // The child's lineage is the parent's full chain plus the parent itself (root first).
+    // The child's lineage is the parent's full chain plus the parent itself (root first) — so revoking ANY ancestor
+    // still cascades to this child (the cascade is independent of the class label).
     const lineage: CapabilityId[] = [...parent.lineage, parent.id];
-    const tag = computeTag(this.key, parent.cls, id, lineage, childCaveats);
+    // The child's class is the parent's UNLESS a (narrower) `childClass` was requested — e.g. a `session` handoff
+    // grant that descends by lineage from a `task` cap. Re-classing only changes the label; the caveats still narrow
+    // (checked above) and the full ancestor lineage (the cascade) is unchanged. The tag is computed over the class,
+    // so the child's class is part of its signed, tamper-evident identity.
+    const cls = childClass ?? parent.cls;
+    const tag = computeTag(this.key, cls, id, lineage, childCaveats);
     const capability: Capability = {
       id,
-      cls: parent.cls,
+      cls,
       caveats: childCaveats,
       parentRef: parent.id,
       lineage,
     };
     const payload: TokenPayload = {
       id,
-      cls: parent.cls,
+      cls,
       parentRef: parent.id,
       lineage,
       caveats: childCaveats,
