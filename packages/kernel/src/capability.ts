@@ -107,10 +107,17 @@ export interface CapabilityPort {
     caveats: Caveat[];
   }): Promise<{ capability: Capability; token: OpaqueToken }>;
 
-  /** Derive a strictly-narrower child. MUST reject (throw a typed `auth.attenuation_widened`) if the result is not ⊆ parent. */
+  /**
+   * Derive a strictly-narrower child. MUST reject (throw a typed `auth.attenuation_widened`) if the result is not ⊆
+   * parent. `childClass` optionally RE-CLASSES the child to a NARROWER capability class (e.g. a `session` handoff
+   * grant that descends by lineage from a `task` cap) — the caveats still only narrow and the full ancestor lineage
+   * (for the revoke-the-parent cascade) is preserved; only the class label changes. When omitted, the child inherits
+   * the parent's class (the default macaroon attenuation).
+   */
   attenuate(
     parentToken: OpaqueToken,
     addedCaveats: Caveat[],
+    childClass?: CapabilityClass,
   ): Promise<{ capability: Capability; token: OpaqueToken }>;
 
   /** Stateless verify against a pushed revocation snapshot — NO database round-trip in the common case. */

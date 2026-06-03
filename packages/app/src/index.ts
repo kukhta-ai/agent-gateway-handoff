@@ -144,6 +144,14 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
     host?: string;
     /** Gateway bind port. Default `3000`; tests pass `0` for an ephemeral port. */
     port?: number;
+    /**
+     * The AUTH-REUSE TTL (ms) — how long a recipient's successful step-up stays valid for REUSE on a LATER handoff
+     * window for the SAME recipient (scenario-01 Phase 12, GLA-050/051: "auth still valid, no re-prompt"). Within
+     * the TTL, a second window for that recipient opens with NO fresh WebAuthn ceremony; an expired/absent validity
+     * (or a different recipient) re-prompts (Phase 6). The grant is STILL verified cryptographically every request.
+     * Defaults to the gateway default (≈15m, the window TTL). Set 0 to disable reuse (always re-prompt).
+     */
+    authReuseTtlMs?: number;
     /** Where the channel writes the recipient-bound handoff link (defaults to stdout). */
     deliverySink?: DeliverySink;
     /** A shared identity service (so enrollment + handoff use the SAME enrolled credential store). */
@@ -211,6 +219,20 @@ export interface ProvisioningStack {
   route?: RouteController;
   /** The identity service (Slice 4b: enrolled-credential store the gateway steps up against). Present only when handoff is wired. */
   identity?: IdentityService;
+  /**
+   * The OPERATOR enrollment action (Phase E; present only when handoff is wired, since the gateway then fronts
+   * enrollment too). Mint a single-use operator-discharge grant bound to the recipient + deliver the enrollment
+   * invite link. Lets a caller/test enroll the recipient (the precondition for any handoff) on the SAME gateway +
+   * credential store the step-up verifies against — so a full two-handoff scenario runs end to end.
+   */
+  enrollInvite?: (
+    recipient: RecipientRef,
+  ) => Promise<{ link: string; grant: OpaqueToken; nonce: string }>;
+  /**
+   * The public base URL handoff/enroll links are built against (present only when handoff is wired) — so a caller can
+   * compose links the same way the gateway does.
+   */
+  publicBaseUrl?: string;
 }
 
 /**
@@ -272,6 +294,11 @@ export function createProvisioningBridge(
   let identity: IdentityService | undefined;
   let handoffDeps: HandoffDeps | undefined;
   let completionDeps: CompletionDeps | undefined;
+  /** The operator enrollment action (wired when handoff is, since the same gateway then fronts enrollment). */
+  let enrollInvite:
+    | ((recipient: RecipientRef) => Promise<{ link: string; grant: OpaqueToken; nonce: string }>)
+    | undefined;
+  let publicBaseUrl: string | undefined;
   // A holder so the completion deps' closures (resolved only when a window opens/closes — after this) can reference
   // the SessionService built below (assigned into `.svc` once constructed). Avoids a forward `let`.
   const sessionRef: { svc?: SessionService } = {};
@@ -287,10 +314,19 @@ export function createProvisioningBridge(
     // The gateway is the Route controller's abstract edge AND the public step-up/WS-proxy entry. It verifies the
     // recipient-bound grant statelessly + requires the bound identity (step-up) before forwarding to the capsule.
     gateway = new AccessGateway({
+      // ONE gateway fronts BOTH enrollment (Phase E) AND the handoff (Phases 6/12) — the sole public entry on
+      // hermes-1. The enrollment seams (the capability grant verifier + the identity enroll surface) let the SAME
+      // gateway serve the grant-verified enrollment flow against the SAME enrolled-credential store the step-up
+      // verifies against, so a real two-handoff scenario (enroll → handoff → re-open) runs through one edge.
+      grants: capability,
+      identity,
       sessionGrants: capability,
       stepUp: identity,
       host: h.host ?? "0.0.0.0",
       port: h.port ?? 3000,
+      // The auth-reuse TTL (GLA-050/051): a recipient's step-up stays valid for a later window for THIS recipient,
+      // so scenario-01 Phase 12's second window opens with no re-prompt. Defaults to the gateway default (~15m).
+      ...(h.authReuseTtlMs !== undefined ? { authReuseTtlMs: h.authReuseTtlMs } : {}),
     });
     route = new RouteController({ gateway });
     handoffDeps = {
@@ -323,6 +359,17 @@ export function createProvisioningBridge(
       // The grant attenuates FROM the session's TASK capability TOKEN (so it cannot widen recipient/scope/ttl and
       // cascades on the task cap's revoke). Resolve the task → its minted task-capability bearer token.
       parentTokenFor: (_sessionId, taskId) => task.capabilityToken(taskId),
+    };
+
+    // The operator enrollment action (Phase E) on the SAME gateway + credential store the step-up verifies against —
+    // mint a single-use operator-discharge grant bound to the recipient + deliver the invite link. The precondition
+    // for any handoff (the recipient must be enrolled before window 1).
+    publicBaseUrl = h.publicBaseUrl;
+    enrollInvite = async (recipient: RecipientRef) => {
+      const minted = await capability.mintEnrollmentGrant(recipient);
+      const link = AccessGateway.enrollLink(h.publicBaseUrl, minted.token);
+      await channel.deliver(recipient, link, minted.token);
+      return { link, grant: minted.token, nonce: minted.nonce };
     };
 
     // ── Slice 5 — the COMPLETION-CLOSE pipeline (the Completion service + the url-watcher detector + the
@@ -464,6 +511,12 @@ export function createProvisioningBridge(
   }
   if (identity !== undefined) {
     stack.identity = identity;
+  }
+  if (enrollInvite !== undefined) {
+    stack.enrollInvite = enrollInvite;
+  }
+  if (publicBaseUrl !== undefined) {
+    stack.publicBaseUrl = publicBaseUrl;
   }
   return stack;
 }
