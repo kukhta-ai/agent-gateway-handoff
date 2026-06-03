@@ -13,9 +13,10 @@ export { ExitCode } from "./exit-codes.js";
 /**
  * Process entry point: parse the global output flag from argv just enough to construct the sink,
  * run the dispatcher against the real stdout/stderr, and return the exit code. The caller (the bin
- * shim) is responsible for `process.exit` so this stays side-effect-light and testable.
+ * shim) is responsible for `process.exit` so this stays side-effect-light and testable. Async
+ * because the dispatcher connects to the Agent Bridge (minting the agent-authority anchor).
  */
-export function main(argv: readonly string[] = process.argv.slice(2)): number {
+export function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const mode = sniffOutputMode(argv);
   const out = new Output(mode);
   return run(argv, out);

@@ -23,6 +23,7 @@
   "dependencies": {
     "@gla/assembly": "workspace:*",
     "@gla/bridge": "workspace:*",
+    "@gla/catalog": "workspace:*",
     "@gla/kernel": "workspace:*"
   }
 }

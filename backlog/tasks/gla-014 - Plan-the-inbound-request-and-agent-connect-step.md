@@ -1,9 +1,10 @@
 ---
 id: GLA-014
 title: Plan the inbound-request and agent-connect step
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-03 03:31'
+updated_date: '2026-06-03 07:16'
 labels:
   - plan
   - architecture
@@ -26,11 +27,17 @@ Why: the flow starts when a human request arrives over a channel and the agent c
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The Channel adapter's part is specified: how an inbound human message is delivered to the agent with its recipient binding attached, as a port the core depends on rather than a provider-specific call.
-- [ ] #2 The Agent Bridge's part is specified: how the agent connects and obtains an agent-authority anchor that scopes its operations.
-- [ ] #3 The Capability service's part is specified: how the agent-authority capability is issued without becoming something the agent can forge.
-- [ ] #4 The operating experience of connecting is designed: how the agent discovers it is connected and what it is allowed to do.
-- [ ] #5 An implementation plan for the build task exists, with how a delivered, recipient-bound, connected state is observed.
-- [ ] #6 Dependencies are identified and classified; the channel client is named for in-tree integration, and any non-traditional one has a wpm-installer-package task in this backlog.
-- [ ] #7 The channel seam is specified at full capability so a second channel is added as a provider with no seam change.
+- [x] #1 The Channel adapter's part is specified: how an inbound human message is delivered to the agent with its recipient binding attached, as a port the core depends on rather than a provider-specific call.
+- [x] #2 The Agent Bridge's part is specified: how the agent connects and obtains an agent-authority anchor that scopes its operations.
+- [x] #3 The Capability service's part is specified: how the agent-authority capability is issued without becoming something the agent can forge.
+- [x] #4 The operating experience of connecting is designed: how the agent discovers it is connected and what it is allowed to do.
+- [x] #5 An implementation plan for the build task exists, with how a delivered, recipient-bound, connected state is observed.
+- [x] #6 Dependencies are identified and classified; the channel client is named for in-tree integration, and any non-traditional one has a wpm-installer-package task in this backlog.
+- [x] #7 The channel seam is specified at full capability so a second channel is added as a provider with no seam change.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Design artifact: docs/architecture/slice-1-inbound-orient.md (inbound seam = ChannelPort + recipient binding delivered as a port the core depends on; agent-authority anchor on connect; capability-service non-forgeable signed issuance; operating experience; 2nd-channel-as-provider no seam change; build/observation plan; deps: channel client in-tree, none non-traditional). Rule-3: bmad-dev-story needs sprint-status/story file -> docs-driven fallback. Implemented+tested under GLA-015.
+<!-- SECTION:NOTES:END -->
