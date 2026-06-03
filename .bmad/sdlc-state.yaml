@@ -3,15 +3,17 @@
 # Re-read on every resume; update at every phase boundary.
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
-phase: 3
-phase_name: "Solutioning + test architecture"
+phase: 5
+phase_name: "Autonomous build — scenario-01 vertical slices"
 branch: feature/scenario-01
 epic: scenario-01            # the whole MVP = deliver scenario-01 end to end
-active_story: GLA-004        # wave 2: implement the kernel (critical path); GLA-007..011 wpm pkgs also unblocked
-review_cycle: 2              # cycle 1 found a capability-token blocker (parentRef/lineage unsigned -> revocation bypass) + 3 gaps; fixed (lineage now signed, all-ancestors checked, scope fail-closed, recursive canonical); cycle 2 = focused re-review in progress
+active_story: [GLA-014, GLA-015, GLA-016, GLA-017]   # Slice 1: inbound + orient (Phases 0-1)
+review_cycle: 0
+# Slice plan in memory: gla-build-execution-plan. Slice 1 builds channel-cli, bridge read-models,
+# capability(agent-authority)+whoami, catalog (browser-handoff template + provider manifests + skills), identity binding.
 # Phase-3 test architecture produced: docs/architecture/test-strategy.md (tea, docs-driven fallback) —
 # pyramid (unit/contract/E2E), scenario-01 E2E harness (virtual WebAuthn authenticator + channel-cli + stub acme site + process-tier launcher), 10 security invariants gating GLA-066.
-done: [GLA-001, GLA-002, GLA-003, GLA-005]   # architecture baseline; kernel contracts; scaffold+gate (green); dependency strategy
+done: [GLA-001, GLA-002, GLA-003, GLA-004, GLA-005]   # FOUNDATION COMPLETE: architecture; kernel contracts; scaffold+gate; kernel impl (reviewed clean, 48 tests); dependency strategy
 # Foundation artifacts: docs/architecture/{baseline,kernel-contracts,dependency-strategy}.md + the building pnpm
 # workspace skeleton (15 packages + 11 adapters + 2 surfaces). Quality gate `pnpm gate` verified green.
 # Note: backlog has a global definitionOfDone but no per-task DoD checkboxes -> DoD enforced via pnpm gate/CI, not --check-dod.

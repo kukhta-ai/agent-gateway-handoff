@@ -188,6 +188,12 @@ importers:
       '@gla/assembly':
         specifier: workspace:*
         version: link:../assembly
+      '@gla/capability':
+        specifier: workspace:*
+        version: link:../capability
+      '@gla/catalog':
+        specifier: workspace:*
+        version: link:../catalog
       '@gla/kernel':
         specifier: workspace:*
         version: link:../kernel
@@ -256,6 +262,9 @@ importers:
       '@gla/bridge':
         specifier: workspace:*
         version: link:../../packages/bridge
+      '@gla/catalog':
+        specifier: workspace:*
+        version: link:../../packages/catalog
       '@gla/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel

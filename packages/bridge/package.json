@@ -19,6 +19,8 @@
   },
   "dependencies": {
     "@gla/kernel": "workspace:*",
-    "@gla/assembly": "workspace:*"
+    "@gla/assembly": "workspace:*",
+    "@gla/capability": "workspace:*",
+    "@gla/catalog": "workspace:*"
   }
 }
