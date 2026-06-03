@@ -8,7 +8,9 @@ phase_name: "Solutioning + test architecture"
 branch: feature/scenario-01
 epic: scenario-01            # the whole MVP = deliver scenario-01 end to end
 active_story: GLA-004        # wave 2: implement the kernel (critical path); GLA-007..011 wpm pkgs also unblocked
-review_cycle: 0
+review_cycle: 2              # cycle 1 found a capability-token blocker (parentRef/lineage unsigned -> revocation bypass) + 3 gaps; fixed (lineage now signed, all-ancestors checked, scope fail-closed, recursive canonical); cycle 2 = focused re-review in progress
+# Phase-3 test architecture produced: docs/architecture/test-strategy.md (tea, docs-driven fallback) —
+# pyramid (unit/contract/E2E), scenario-01 E2E harness (virtual WebAuthn authenticator + channel-cli + stub acme site + process-tier launcher), 10 security invariants gating GLA-066.
 done: [GLA-001, GLA-002, GLA-003, GLA-005]   # architecture baseline; kernel contracts; scaffold+gate (green); dependency strategy
 # Foundation artifacts: docs/architecture/{baseline,kernel-contracts,dependency-strategy}.md + the building pnpm
 # workspace skeleton (15 packages + 11 adapters + 2 surfaces). Quality gate `pnpm gate` verified green.
@@ -29,10 +31,10 @@ specialists:
   pm:           {spawned: false, role: "PRD (conformed from docs)",                          last_skill: null}
   ux-designer:  {spawned: false, role: "UX spec (capsule surfaces, conformed from docs)",     last_skill: null}
   architect:    {spawned: true, id: "a8822e198c36c2519", role: "architecture baseline + epics/stories + readiness", last_skill: "bmad-create-architecture (interactive->docs-driven fallback, recorded)"}
-  tea:          {spawned: false, role: "test design / framework / ci / gate",                 last_skill: null}
+  tea:          {spawned: true, id: "afcc13c75f32bf15b", role: "test design / framework / ci / gate", last_skill: "bmad-testarch-test-design (interactive->docs-driven fallback) -> docs/architecture/test-strategy.md"}
   sm:           {spawned: false, role: "sprint setup + create-story",                         last_skill: null}
   worker:       {spawned: true, id: "a6484317ea052fcca (scaffolder)", role: "dev-story implementation", last_skill: "direct TS scaffold for GLA-003 (tooling task; bmad-dev-story not used)"}
-  reviewer:     {spawned: false, role: "separate-lane story-automator-review",                last_skill: null}
+  reviewer:     {spawned: true, id: "a71373b6380ac963a", role: "separate-lane code review (feature-dev:code-reviewer)", last_skill: "kernel security review -> found+verified the capability-token fixes"}
   investigator: {spawned: false, role: "systematic debugging at the epic gate",               last_skill: null}
   retro:        {spawned: false, role: "epic retrospective",                                  last_skill: null}
 
