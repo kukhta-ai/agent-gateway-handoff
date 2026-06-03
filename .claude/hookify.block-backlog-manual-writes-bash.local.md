@@ -9,10 +9,11 @@ conditions:
     pattern: '(\bsed\s+-i|\btee\b|\bdd\b|\bcp\b|\bmv\b|\brm\b|\btruncate\b|>>?)'
   - field: command
     operator: regex_match
-    # Targets a Backlog.md root path — but NOT one under templates/ (template content, not a live backlog;
-    # see the file-event hook for the rationale). The negative lookahead lets a command that writes a shipped
-    # template's backlog scaffold through, while still blocking out-of-band writes to the real backlog/.
-    pattern: '^(?!.*templates/).*\b[\w-]*backlog/'
+    # Targets a Backlog.md root path — but NOT one under templates/ or install-backlog/ (template content and
+    # wpm shipped install-backlog recipes are hand-authored scaffolds, not live CLI-managed backlogs; see the
+    # file-event hook for the rationale). The negative lookahead lets a command that writes a shipped scaffold
+    # through, while still blocking out-of-band writes to the real, live backlogs (GLA backlog/, .authoring-backlog/).
+    pattern: '^(?!.*(templates|install-backlog)/).*\b[\w-]*backlog/'
 ---
 
 🚫 **Manual shell write to a Backlog.md file is forbidden — use the `backlog` CLI.**

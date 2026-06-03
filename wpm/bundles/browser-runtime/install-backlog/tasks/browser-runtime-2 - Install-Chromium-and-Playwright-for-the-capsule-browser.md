@@ -16,7 +16,11 @@ ordinal: 2000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-SETUP step (kind:state, idempotent). Make a Playwright-launchable Chromium available on the host — the typical path is the host's cached Chromium, or npx playwright install --with-deps chromium where it is absent — adopting an existing browser rather than reinstalling when one is present. Ensure the OS libraries Chromium needs are present so it launches cleanly. Honor the confirmation level and surface any system-level package changes first. Record what was installed (browser revision, Playwright, any OS packages) with the inverse op, and record an adopted pre-existing browser as adopted so uninstall leaves it. Managed ownership where we install; adopted where we reuse.
+SETUP step (kind:state, idempotent). Make a Playwright-launchable Chromium available on the host — the validated path on a clean host is `npx playwright install --with-deps chromium`, which both downloads the Playwright-managed Chromium revision (~1 GB on disk) and apt-installs the system libraries it needs (the `--with-deps` part is the shared-host mutation that makes this bundle's confirmation dangerous). Where a usable Chromium/Chrome and the needed libraries are already present, adopt them rather than reinstalling. Ensure the OS libraries Chromium needs are present so it launches cleanly.
+
+This is a SEPARATE layer on top of gla-core, not part of it: without browser-runtime the GLA daemon still serves and the read/control surface and `gla session create --dry-run` (admission only) work, but a real `gla session create` for a browser capsule cannot provision because there is no browser to launch — which is exactly the gap this bundle closes. It requires gla-core (the runtime must exist), but installs independently of it.
+
+Honor the confirmation level and surface any system-level package changes first (this is a dangerous bundle — pause for consent before the apt step). Record what was installed (browser revision, Playwright, any OS packages) with the inverse op, and record an adopted pre-existing browser as adopted so uninstall leaves it. Managed ownership where we install; adopted where we reuse.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -16,7 +16,7 @@ ordinal: 3000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-VERIFY step (kind:state). Prove the view stack works end to end: each binary (virtual display, VNC server, websockify) is runnable, and a websockify-fronted endpoint accepts a connection with the noVNC client assets served — the browser-native remote view is reachable. It must operate for the same OS user that runs the GLA service, so a daemon-spawned capsule can expose its display through it. Re-read and confirm the setup receipt entries. On failure return to setup.
+VERIFY step (kind:state). Prove the view stack works end to end: each binary (virtual display, VNC server, websockify) is runnable, and a websockify-fronted endpoint accepts a connection with the noVNC client assets served — the browser-native remote view is reachable. It must operate for the same OS user that runs the GLA service (that user is recorded in gla-core's receipt — the required dependency), so a daemon-spawned capsule can expose its display through it. Re-read and confirm the setup receipt entries. On failure return to setup.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

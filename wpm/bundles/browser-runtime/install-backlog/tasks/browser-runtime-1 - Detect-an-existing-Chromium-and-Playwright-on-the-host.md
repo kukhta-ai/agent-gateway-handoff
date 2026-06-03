@@ -23,7 +23,8 @@ DETECT step (kind:state, idempotent / Repair). browser-runtime delivers the in-c
 - [ ] #1 whether a Chromium (or Chrome) browser binary usable by Playwright is already present on the host is determined by inspection, and an adoptable existing browser is distinguished from none
 - [ ] #2 whether Playwright and a Playwright-managed browser revision are already installed is determined, including any cached browser download, so a prior install is reconciled rather than duplicated
 - [ ] #3 whether the host has the shared libraries Chromium needs to launch is assessed, so a missing-dependency failure is anticipated before setup rather than discovered at first launch
-- [ ] #4 the findings (browser present/absent and source, Playwright present/absent, missing OS libraries) are recorded for the receipt before setup runs
+- [ ] #4 whether the target filesystem has room for a Playwright browser download (on the order of 1 GB) is determined, so an out-of-disk failure during install is anticipated rather than discovered
+- [ ] #5 the findings (browser present/absent and source, Playwright present/absent, missing OS libraries) are recorded for the receipt before setup runs
 <!-- AC:END -->
 
 ## Definition of Done

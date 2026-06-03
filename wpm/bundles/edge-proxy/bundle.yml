@@ -6,7 +6,8 @@ confirmation: dangerous
 requires: { gla-core: ^0.1.0 }
 payload:
   files: []
-  templates: []
+  templates:
+    - Caddyfile.tmpl
   scripts: []
   skills: []
 installerSkills: []

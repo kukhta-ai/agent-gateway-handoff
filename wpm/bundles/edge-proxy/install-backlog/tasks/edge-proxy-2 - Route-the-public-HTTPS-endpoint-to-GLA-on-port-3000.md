@@ -16,7 +16,11 @@ ordinal: 2000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-SETUP step (kind:state), confirmation-level dangerous because it edits the host reverse proxy. Caddy must serve the operator's public HTTPS URL and reverse-proxy it to the address that reaches GLA's gateway on :3000, forwarding WebSocket upgrades (the human-view session and verified upgrades depend on it). For a host-fronting-container topology, target the host-to-container forward (hermes-1: host:13000 to container:3000), and record the topology. Surface the routing change and get consent first; reload an existing Caddy rather than replacing it. Record the placed/modified proxy config with its checksum and inverse op; record an adopted Caddy as adopted so uninstall leaves it.
+SETUP step (kind:state), confirmation-level dangerous because it edits the host reverse proxy. Caddy must serve the operator's public HTTPS URL and reverse-proxy it to the address that reaches GLA's gateway on :3000, forwarding WebSocket upgrades (the human-view session and verified upgrades depend on it). For a host-fronting-container topology, target the host-to-container forward (hermes-1: host:13000 to container:3000), and record the topology.
+
+The bundle ships a real starting point at payload/templates/Caddyfile.tmpl — a parameterized site block with the upstream-selection guidance baked in (same-host 127.0.0.1:3000 vs the host-side forward 127.0.0.1:13000 for the host-fronts-container case), transparent WebSocket proxying (Caddy v2 forwards the upgrade as-is), and the bare-IP `tls internal` note. Fill its ⟨…⟩ placeholders for this host and either install it as the Caddyfile or merge its site block into the existing one; record the placed file via --ref so the receipt owns it.
+
+Surface the routing change and get consent first; reload an existing Caddy rather than replacing it. Record the placed/modified proxy config with its checksum and inverse op; record an adopted Caddy as adopted so uninstall leaves it.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
