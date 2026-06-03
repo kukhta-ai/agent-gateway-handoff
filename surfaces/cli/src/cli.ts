@@ -62,7 +62,8 @@ Nouns:
   task create [flags]         open a Task + mint its task capability (parent = agent-authority)
   task get <id>               read a Task aggregate
   task list [--state <s>]     list Tasks
-  session create [flags]      admit an assembly (mutate→validate); --dry-run = admission only
+  session create [flags]      admit + provision a capsule; --dry-run = admission only
+  session connector <id>      re-emit the agent-connector for a live capsule (exit 7 if none)
   session get <id>            read a Session aggregate
   session list [flags]        list Sessions
   version                     print client (+ server when connected) version
@@ -345,6 +346,14 @@ export async function run(
         if (verb === "create") {
           return await sessionCreate(parsed, out, services);
         }
+        if (verb === "connector") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla session connector <id>");
+          // Re-emit the agent-connector for a LIVE capsule (GLA-025). No live capsule → the bridge
+          // throws state.conflict, which the outer catch maps to exit 7 (NOT a crash).
+          out.emit(await services.bridge.sessionConnector(id));
+          return ExitCode.OK;
+        }
         if (verb === "get") {
           const id = parsed.positionals[2];
           if (id === undefined) return usageError(out, "usage: gla session get <id>");
@@ -360,7 +369,7 @@ export async function run(
           out.emit(services.bridge.sessionList(f));
           return ExitCode.OK;
         }
-        return usageError(out, "usage: gla session (create | get <id> | list)");
+        return usageError(out, "usage: gla session (create | connector <id> | get <id> | list)");
       }
 
       default:

@@ -20,6 +20,7 @@ import {
   HmacCapabilitySigner,
   type Iso8601,
   type OpaqueToken,
+  type Ref,
   type RevocationSnapshot,
   glaError,
 } from "@gla/kernel";
@@ -59,6 +60,22 @@ export interface MintedAuthority {
   capability: Capability;
   /** The opaque bearer token — the agent receives this reference, never raw signing material. */
   token: OpaqueToken;
+}
+
+/**
+ * What `mintConnector` hands back (GLA-024/025): the minted agent-connector capability + the
+ * **agent-blind `secret_ref`** the connector JSON carries. The `secretRef` is the capability's id as
+ * an opaque {@link Ref}<"secret-ref"> — a capability REFERENCE the agent passes around but cannot
+ * inspect or forge; it is **never** the bearer token bytes and **never** raw signing material
+ * (kernel-contracts.md §2.3, baseline §4). The bearer `token` stays GLA-side (the agent never receives
+ * it); only the `secretRef` is surfaced to the agent.
+ */
+export interface MintedConnector {
+  capability: Capability;
+  /** GLA-side bearer token (NOT handed to the agent) — held to revoke/cascade on teardown. */
+  token: OpaqueToken;
+  /** The agent-blind capability reference the connector JSON's `secret_ref` carries. */
+  secretRef: Ref<"secret-ref">;
 }
 
 /**
@@ -105,6 +122,49 @@ export class CapabilityService {
       { kind: "audience", id: profile.identity },
     ];
     return this.port.mint({ cls: "agent-authority", caveats });
+  }
+
+  /**
+   * Mint the **agent-connector capability** for a session (GLA-024/025). The connector is an
+   * **agent-blind `secret-ref`-class** capability **derived from the session/task capability**: it is
+   * minted as a child (`parentRef` = the session/task capability id) so it descends by lineage —
+   * revoking the parent (or the connector itself) cascades at the next `verify()`
+   * (kernel-contracts.md §2.4). It carries an `audience` caveat naming the session (the connector is
+   * bound to exactly that capsule) and a `scope` caveat `"/session/<id>/connector"` (a narrow
+   * dimension). The class is `secret-ref` per the kernel taxonomy (§2.1: agent-blind), distinguishing
+   * it from the session grant.
+   *
+   * **Agent-blind (the load-bearing GLA-024/025 AC#1/#2):** the method returns the capability's id as
+   * an opaque {@link Ref}<"secret-ref"> (`secretRef`) — a capability REFERENCE — and keeps the bearer
+   * `token` GLA-side. The agent receives only the `secretRef`; it never receives the token bytes or any
+   * raw signing material. The connector JSON's `secret_ref` is this reference.
+   *
+   * @param sessionId  the session this connector is bound to (the `audience`)
+   * @param parentRef  the session/task capability id the connector descends from (for lineage cascade);
+   *                   omit only in a degraded path where no parent capability is available.
+   */
+  async mintConnector(sessionId: string, parentRef?: CapabilityId): Promise<MintedConnector> {
+    const caveats: Caveat[] = [
+      // Bound to exactly this session's capsule (the connector is per-capsule, agent-blind).
+      { kind: "audience", id: sessionId },
+      // A narrow scope dimension — the connector authorizes only the session's connector path.
+      { kind: "scope", path: `/session/${sessionId}/connector` },
+    ];
+    const req: { cls: "secret-ref"; parentRef?: CapabilityId; caveats: Caveat[] } = {
+      cls: "secret-ref",
+      caveats,
+    };
+    if (parentRef !== undefined) {
+      // Descend from the session/task capability so a lineage revocation cascades to the connector.
+      req.parentRef = parentRef;
+    }
+    const minted = await this.port.mint(req);
+    return {
+      capability: minted.capability,
+      token: minted.token,
+      // The agent-blind reference: the capability id as an opaque secret-ref handle. NEVER the token.
+      secretRef: minted.capability.id as unknown as Ref<"secret-ref">,
+    };
   }
 
   /**
