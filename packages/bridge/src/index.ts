@@ -296,6 +296,29 @@ export class AgentBridge {
   }
 
   /**
+   * `task complete <id>` (docs/05, scenario-01 Phase 15; GLA-065) — the TERMINAL transition: tear down every
+   * session under the task (cancel windows, STOP + reap each capsule, revoke connectors), revoke the task
+   * capability so **by lineage every descendant capability stops verifying** (the session grants + the
+   * agent-connector), and drive the Task to `completed`. After it returns, NOTHING live remains (no capsule
+   * process, no route, no grant, no verifying capability). Returns the public task view `{task_id, state:completed}`.
+   * Throws `state.not_found` (unknown id → exit 5) or `state.conflict` (→ exit 7) on an illegal transition.
+   */
+  async taskComplete(id: string): Promise<TaskView> {
+    const task = await this.task.complete(id as TaskId);
+    return TaskService.toView(task);
+  }
+
+  /**
+   * `task revoke <id>` (docs/05; GLA-065 AC#6) — ABORT: the SAME teardown as `task complete` but to a
+   * NON-SUCCESS terminal state (`revoked`). Every session is torn down, the task cap is revoked (descendants
+   * stop verifying), the task transitions to `revoked`. Returns `{task_id, state:revoked}`.
+   */
+  async taskRevoke(id: string): Promise<TaskView> {
+    const task = await this.task.revoke(id as TaskId);
+    return TaskService.toView(task);
+  }
+
+  /**
    * `session create ( -f <spec> | --template <id> [parts…] ) [--task <id>] [--mount …] [--dry-run]`
    * (docs/05; GLA-020/021). The propose→admit flow:
    *   1. resolve the presented capability + the proposal's task binding:
@@ -422,6 +445,18 @@ export class AgentBridge {
       f.state = filter.state as SessionView["state"];
     }
     return this.session.list(f).map(SessionService.toView);
+  }
+
+  /**
+   * `session revoke <id>` (docs/05; GLA-065) — TERMINAL teardown of ONE session: cancel any open handoff
+   * window, STOP + reap this session's capsule + workspace, unmount routes, revoke its grants + connector,
+   * session → `revoked`. The ephemeral capsule state is destroyed; host paths the agent mounted survive. A
+   * subset of `task complete` (one session, not the whole goal; the task cap is NOT revoked here — other
+   * sessions under the task live on). Returns the session view in its terminal state.
+   */
+  async sessionRevoke(id: string): Promise<SessionView> {
+    await this.session.teardownSession(id as SessionView["session_id"], "revoked");
+    return SessionService.toView(this.session.get(id as SessionView["session_id"]));
   }
 
   // ── Handoff (Slice 4b, docs/05 §3 handoff) ─────────────────────────────────────────────────────

@@ -13,12 +13,15 @@
 // `CapabilityPort` SEAM (it never names a signer adapter). `app` injects the concrete signer.
 
 import {
+  type CapabilityId,
   type CapabilityPort,
   type Caveat,
   type Iso8601,
   type OpaqueToken,
   type RecipientRef,
   type Ref,
+  type SessionId,
+  TASK_TERMINAL,
   type Task,
   type TaskId,
   type TaskState,
@@ -69,6 +72,25 @@ export interface CreatedTask {
   taskCapabilityToken: OpaqueToken;
 }
 
+/**
+ * The terminal-teardown wiring {@link TaskService.complete}/{@link TaskService.revoke} need (Slice 7,
+ * scenario-01 Phase 15). `app` wires it; a bare task service (the orient/propose slices) is built
+ * without it (and `complete`/`revoke` then reject with a clear error — teardown is not wired).
+ *
+ * The seam is the SESSION-teardown step only — revoking the task capability (and thus, by lineage, every
+ * descendant: the session grants AND the agent-connector — kernel-contracts.md §2) is the Task service's
+ * own job via its injected {@link CapabilityPort.revoke}; it does not delegate that.
+ */
+export interface TaskTeardownDeps {
+  /**
+   * Tear down ONE session under the task: cancel any open handoff window, STOP its capsule + reap its
+   * workspace (the worker), revoke its connector, and transition the session to the terminal
+   * `disposition` (`completed` for a normal completion, `revoked` for an abort). The Session service's
+   * `teardownSession` (idempotent + restart-safe — GLA-065 AC#5). Returns the session's terminal state.
+   */
+  teardownSession(sessionId: SessionId, disposition: "completed" | "revoked"): Promise<unknown>;
+}
+
 /** Options for {@link TaskService}. */
 export interface TaskServiceOptions {
   /** The kernel capability port that mints/attenuates (default: caller must inject; no signer named here). */
@@ -76,6 +98,11 @@ export interface TaskServiceOptions {
   clock?: TaskClock;
   /** Id generator seam (default: a process-local counter + random suffix). */
   newTaskId?: () => TaskId;
+  /**
+   * The terminal-teardown wiring (Slice 7). When omitted, `complete`/`revoke` reject with a clear
+   * `state.conflict` (teardown is not wired — a bare task service from the early slices).
+   */
+  teardown?: TaskTeardownDeps;
 }
 
 let taskCounter = 0;
@@ -103,11 +130,14 @@ export class TaskService {
   private readonly tasks = new Map<TaskId, Task>();
   /** The task-capability token per task (the service holds it to revoke/cascade later). */
   private readonly tokens = new Map<TaskId, OpaqueToken>();
+  /** The terminal-teardown wiring (Slice 7), or undefined on a bare task service. */
+  private readonly teardown: TaskTeardownDeps | undefined;
 
   constructor(opts: TaskServiceOptions) {
     this.port = opts.capability;
     this.clock = opts.clock ?? SYSTEM_CLOCK;
     this.newTaskId = opts.newTaskId ?? defaultTaskId;
+    this.teardown = opts.teardown;
   }
 
   /**
@@ -234,6 +264,91 @@ export class TaskService {
     return t;
   }
 
+  /**
+   * **Complete a Task** (docs/05 `task complete`, scenario-01 Phase 15; GLA-065) — the TERMINAL transition
+   * that leaves NOTHING live. The complete-or-revoke contract (task-service.md "A revoked task cascades
+   * revocation to its sessions"):
+   *
+   *   1. **Tear down every session under the task** — for each session id in the aggregate's chain, run
+   *      the Session service's terminal `teardownSession` to the `completed` disposition: cancel any open
+   *      handoff window, STOP its capsule + reap its workspace, revoke its connector, session → `completed`.
+   *      Idempotent + best-effort per session (one session's teardown failing does not strand the rest).
+   *   2. **Revoke the task capability** — so, **by lineage, every descendant capability stops verifying**
+   *      (the session grants AND the agent-connector descend from the task cap; revoking it adds the task
+   *      cap id to the revocation snapshot and the kernel `verify()` rejects any token whose ancestor is
+   *      revoked — `auth.revoked`; kernel-contracts.md §2.3/§2.4, capability-service.md). ONE revoke, the
+   *      whole subtree dies.
+   *   3. **Transition the Task to `completed`** (the kernel reducer; terminal).
+   *
+   * Idempotent (GLA-065 AC#5): completing an already-terminal task re-runs the (idempotent) session
+   * teardown + cap revoke but does not re-transition, returning the existing terminal state. Surfaces no
+   * partial: a teardown step failing is swallowed (the reconciler converges); the cap revoke + the
+   * transition always run.
+   *
+   * @param id  the task to complete
+   * @returns the task aggregate in its terminal (`completed`) state
+   * @throws GlaErrorException `state.not_found` (unknown id → exit 5); `state.conflict` (teardown not wired,
+   *         or — for a NON-terminal task already in a non-`active` terminal state — an illegal transition).
+   */
+  async complete(id: TaskId): Promise<Task> {
+    return this.terminate(id, "completed");
+  }
+
+  /**
+   * **Revoke (abort) a Task** (docs/05 `task revoke`, GLA-065 AC#6) — the SAME teardown as
+   * {@link complete}, but to a NON-SUCCESS terminal state (`revoked`). Every session under the task is torn
+   * down (to the `revoked` disposition), the task capability is revoked (descendants stop verifying by
+   * lineage), and the task transitions to `revoked`. Idempotent + restart-safe, exactly as `complete`.
+   *
+   * @param id  the task to abort
+   * @returns the task aggregate in its terminal (`revoked`) state
+   */
+  async revoke(id: TaskId): Promise<Task> {
+    return this.terminate(id, "revoked");
+  }
+
+  /**
+   * The shared terminal-teardown routine for {@link complete}/{@link revoke}. Drives the three-step
+   * contract (teardown sessions → revoke the task cap → transition the task). The `disposition` is the
+   * terminal state both the sessions and the task land in (`completed` | `revoked`). Best-effort per step
+   * so the closing guarantee (the cap revoke) always runs even if a capsule reap hiccups.
+   */
+  private async terminate(id: TaskId, disposition: "completed" | "revoked"): Promise<Task> {
+    const task = this.get(id); // throws state.not_found (→ exit 5) if unknown
+    if (this.teardown === undefined) {
+      throw glaError("state.conflict", "task teardown is not wired (no session/worker injected)", {
+        detail: { id },
+        retryable: false,
+      });
+    }
+    const alreadyTerminal = TASK_TERMINAL.has(task.state);
+
+    // ── Step 1 — tear down every session under the task (cancel windows, stop+reap capsules, revoke
+    //    connectors, sessions → terminal). Best-effort per session — one failing must not strand the rest.
+    for (const sessionId of [...task.sessions]) {
+      await safeTeardown(
+        () =>
+          this.teardown?.teardownSession(sessionId as SessionId, disposition) ?? Promise.resolve(),
+      );
+      // Bump the `completed` step counter for a normal completion (the aggregate's progress view).
+      if (disposition === "completed") {
+        task.stepCounters.completed += 1;
+      }
+    }
+
+    // ── Step 2 — REVOKE the task capability → every descendant (session grants + connector) stops
+    //    verifying by lineage (the closing guarantee; kernel-contracts.md §2). Always runs.
+    const taskCapId = task.taskCapabilityRef as unknown as CapabilityId;
+    await safeTeardown(() => this.port.revoke(taskCapId));
+
+    // ── Step 3 — transition the Task to its terminal state (idempotent: skip if already terminal).
+    if (!alreadyTerminal) {
+      task.state = taskTransition(task.state, disposition);
+      task.updatedAt = this.clock.now();
+    }
+    return task;
+  }
+
   /** The minted task-capability token for a task (held by the service), or undefined. */
   capabilityToken(id: TaskId): OpaqueToken | undefined {
     return this.tokens.get(id);
@@ -271,3 +386,17 @@ export const TASK_SCOPED_OPS: string[] = [
   "handoff.wait",
   "task.complete",
 ];
+
+/**
+ * Run one terminal-teardown step, swallowing errors (Slice 7). The closing guarantee must CONVERGE: a
+ * single session's reap (or the cap revoke) failing must not strand the rest of the teardown — the
+ * worker's Cleanup Reconciler is idempotent and converges on a later pass, and the task cap revoke +
+ * the task transition still run. Mirrors the session saga's `safe`.
+ */
+async function safeTeardown(fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn();
+  } catch {
+    // A teardown step failure must not mask the rest of the closing sequence (idempotent convergence).
+  }
+}
