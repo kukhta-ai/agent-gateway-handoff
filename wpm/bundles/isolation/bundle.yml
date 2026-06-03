@@ -1,0 +1,12 @@
+id: isolation
+version: 0.1.0
+summary: Choose the capsule isolation tier. Process-tier is the default and
+  needs nothing extra; Docker is the stronger alternative tier (opt-in).
+confirmation: safe
+requires: { gla-core: ^0.1.0 }
+payload:
+  files: []
+  templates: []
+  scripts: []
+  skills: []
+installerSkills: []

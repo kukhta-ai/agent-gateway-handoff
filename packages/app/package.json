@@ -12,10 +12,14 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "bin": {
+    "gla": "./bin/gla.mjs"
+  },
+  "files": ["dist", "bin"],
   "scripts": {
     "build": "tsc -b",
-    "clean": "tsc -b --clean"
+    "clean": "tsc -b --clean",
+    "serve": "node ./bin/gla.mjs serve"
   },
   "dependencies": {
     "@gla/admission": "workspace:*",
