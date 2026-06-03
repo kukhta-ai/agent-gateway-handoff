@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLA scenario 01 · unified — protocol, CLI, and providers</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#faf8f3; --paper-2:#f3efe6; --ink:#211f1b; --muted:#5d574c; --faint:#8a8478;
+    --rule:#e4ded1; --rule-2:#d8d1c0;
+    --teal:#0f6e56; --teal-2:#e1f0ea; --coral:#993c1d; --coral-2:#f7e9e2;
+    --blue:#185fa5; --amber:#854f0b; --purple:#534ab7;
+    --display:"Fraunces",Georgia,serif; --body:"Hanken Grotesk",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--body);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 28px}
+  .wide{max-width:min(2000px,97vw);margin:0 auto;padding:0 28px}
+  a{color:var(--teal)}
+  code,.mono{font-family:var(--mono);font-size:.86em;background:var(--paper-2);padding:.08em .34em;border-radius:4px;border:1px solid var(--rule)}
+  h1,h2,h3,h4{font-family:var(--display);font-weight:500;line-height:1.18;letter-spacing:-.01em;color:var(--ink)}
+  h1{font-size:2.5rem;margin:.2em 0 .15em}
+  h2{font-size:1.7rem;margin:2.4em 0 .5em;padding-top:.6em;border-top:1px solid var(--rule)}
+  h3{font-size:1.18rem;margin:1.6em 0 .35em}
+  p{margin:.5em 0 .9em}
+  .kicker{font-family:var(--mono);font-size:.74rem;letter-spacing:.16em;text-transform:uppercase;color:var(--teal);font-weight:500}
+  header.masthead{padding:64px 0 28px}
+  .lede{font-size:1.2rem;color:var(--muted);max-width:62ch;font-family:var(--display);font-weight:400;font-style:italic}
+  .meta{font-family:var(--mono);font-size:.78rem;color:var(--faint);margin-top:18px;border-top:1px dashed var(--rule-2);padding-top:14px;display:flex;flex-wrap:wrap;gap:6px 22px}
+  .meta b{color:var(--muted);font-weight:500}
+
+  /* legend */
+  .legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:18px 0 8px}
+  .zone{border:1px solid var(--rule);border-radius:12px;padding:14px 16px;background:#fff}
+  .zone h4{margin:0 0 8px;font-size:.84rem;font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:500}
+  .zone ul{margin:0;padding:0;list-style:none}
+  .zone li{font-size:.92rem;padding:3px 0;border-bottom:1px dashed var(--rule)}
+  .zone li:last-child{border-bottom:0}
+  .zone li b{font-family:var(--mono);font-size:.84em;color:var(--ink);font-weight:500}
+  .zone li span{color:var(--muted)}
+  .z-actor{border-left:4px solid var(--faint)}
+  .z-agent{border-left:4px solid var(--blue)}
+  .z-edge{border-left:4px solid var(--teal)}
+  .z-control{border-left:4px solid var(--purple)}
+  .z-worker{border-left:4px solid var(--coral)}
+
+  /* diagram */
+  .diagram-card{background:#fff;border:1px solid var(--rule);border-radius:14px;padding:8px 8px 14px;margin:14px 0;overflow-x:auto}
+  .diagram-card .mermaid{min-width:1100px;width:100%}
+  .diagram-card .mermaid svg{width:100%!important;height:auto!important;max-width:none!important;display:block}
+  .cap{font-size:.82rem;color:var(--faint);font-family:var(--mono);margin:6px 4px 0}
+  pre.mermaid{font-family:var(--mono);font-size:12px;white-space:pre;margin:0;color:var(--muted)}
+
+  /* phase blocks */
+  .phase{border-left:4px solid var(--rule-2);padding:2px 0 2px 18px;margin:1.4em 0}
+  .phase .ptag{font-family:var(--mono);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;font-weight:500}
+  .phase h3{margin:.1em 0 .25em}
+  .phase ol{margin:.4em 0 .6em 1.1em;padding:0}
+  .phase ol li{margin:.18em 0}
+  .aside{background:var(--paper-2);border:1px solid var(--rule);border-radius:10px;padding:10px 14px;margin:.5em 0 0;font-size:.92rem;color:var(--muted)}
+  .aside b{color:var(--ink);font-weight:600}
+  .p-setup{border-color:var(--faint)} .p-setup .ptag{color:var(--faint)}
+  .p-prov{border-color:var(--blue)} .p-prov .ptag{color:var(--blue)}
+  .p-drive{border-color:var(--amber)} .p-drive .ptag{color:var(--amber)}
+  .p-handoff{border-color:var(--purple)} .p-handoff .ptag{color:var(--purple)}
+  .p-complete{border-color:var(--teal)} .p-complete .ptag{color:var(--teal)}
+  .p-teardown{border-color:var(--coral)} .p-teardown .ptag{color:var(--coral)}
+
+  /* tables */
+  table{border-collapse:collapse;width:100%;margin:.8em 0 1.4em;font-size:.9rem}
+  th,td{text-align:left;vertical-align:top;padding:8px 12px;border-bottom:1px solid var(--rule)}
+  thead th{font-family:var(--mono);font-size:.74rem;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:500;border-bottom:1.5px solid var(--rule-2)}
+  tbody tr:hover{background:#fff}
+  td b,td .mono{font-family:var(--mono);font-size:.84em}
+  .pill{display:inline-block;font-family:var(--mono);font-size:.72rem;padding:1px 7px;border-radius:20px;border:1px solid var(--rule-2);color:var(--muted)}
+  .pill.trad{background:var(--teal-2);border-color:#9fe1cb;color:#0f6e56}
+  .pill.wpm{background:var(--coral-2);border-color:#f0c4b5;color:#993c1d}
+
+  .callout{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--coral);border-radius:0 10px 10px 0;padding:12px 16px;margin:1em 0}
+  .callout h4{margin:0 0 .3em;font-size:1rem;color:var(--coral)}
+  ul.tight{margin:.4em 0 1em;padding-left:1.2em}
+  ul.tight li{margin:.22em 0}
+  footer{margin:3em 0 4em;padding-top:1em;border-top:1px solid var(--rule);font-family:var(--mono);font-size:.76rem;color:var(--faint)}
+  hr.soft{border:0;border-top:1px dashed var(--rule-2);margin:2em 0}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="kicker">GLA · reference scenario 01 · unified view</div>
+    <h1>One diagram, end to end</h1>
+    <p class="lede">The complete same-session browser-handoff flow in one diagram: the internal protocol between services, the concrete <code>gla</code> commands the agent runs, and every pluggable layer labelled with the dependency filling it — including the one-time recipient enrollment (Phase E) that must precede any handoff.</p>
+    <div class="meta">
+      <span><b>Merges:</b> the former abstract protocol diagram and the CLI/providers companion, now one</span>
+      <span><b>Agent:</b> Hermes via <code>gla</code> CLI · <b>Channel:</b> Telegram · <b>Runtime:</b> Docker · <b>Surface:</b> noVNC + CDP</span>
+      <span><b>Reads:</b> 05-cli-and-entities.md (commands) · 02-provider-and-extension-model.md (what's pluggable) · 03-software-candidates.md (the software per layer)</span>
+    </div>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+<h2 id="stack">The provider stack — what's pluggable on every layer</h2>
+<p>Every capability GLA leans on a third party for is a <b>pluggable provider</b>: a catalog kind with a concrete dependency behind it (see <code>02-provider-and-extension-model.md</code>). Swapping any one is "install a different provider plugin" — the rest of the system, and the agent's <code>gla</code> commands, are unchanged. This slice's concrete choices, layer by layer:</p>
+
+<table>
+  <thead><tr><th>Layer</th><th>Capability needed</th><th>Catalog kind</th><th>Concrete in this slice</th><th>Swap = install instead</th></tr></thead>
+  <tbody>
+    <tr><td>Delivery / channel</td><td>reach &amp; receive the human</td><td><span class="pill trad">ChannelAdapter</span></td><td><b>Telegram</b> (+ Mini App)</td><td>Slack · Email · CLI</td></tr>
+    <tr><td>Public edge</td><td>verify grant &amp; proxy</td><td><span class="pill trad">reverse-proxy dep</span></td><td><b>Caddy</b></td><td>nginx · Traefik</td></tr>
+    <tr><td>Identity / auth</td><td>prove the recipient</td><td><span class="pill trad">AuthProvider</span></td><td><b>WebAuthn</b> + <b>authentik</b></td><td>Authelia · OIDC</td></tr>
+    <tr><td>Capsule runtime / isolation</td><td>run &amp; isolate the capsule</td><td><span class="pill trad">Launcher (Spawner)</span></td><td><b>Docker</b> (tier T4)</td><td>Podman · rootless · Firecracker · remote-worker</td></tr>
+    <tr><td>Human entrypoint / surface</td><td>the user-facing view</td><td><span class="pill trad">HumanEntrypoint</span></td><td><b>noVNC</b> + websockify</td><td>KasmVNC · Guacamole · Xpra</td></tr>
+    <tr><td>Agent connector</td><td>the agent's handle to the capsule</td><td><span class="pill trad">AgentConnector</span></td><td><b>CDP</b> (driven by Playwright)</td><td>filesystem path · secret_ref</td></tr>
+    <tr><td>Workspace</td><td>the live-state volume</td><td><span class="pill trad">Workspace</span></td><td><b>browser-profile-temp</b></td><td>staged-copy · persistent</td></tr>
+    <tr><td>Completion detection</td><td>know the step is done</td><td><span class="pill trad">CompletionDetector</span></td><td><b>url-watcher</b> (+ user-done)</td><td>exit-code · dom-watcher</td></tr>
+    <tr><td>Browser (inside capsule)</td><td>the thing being acted on</td><td><span class="pill trad">template-bundled</span></td><td><b>Chromium</b></td><td>Firefox · WebKit</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <h4>Not pluggable here</h4>
+  <p><b>GLA core (our code, not a dependency):</b> Admission + Policy (Cedar is the embedded policy engine), the Task / Session / Capability / Route / Completion services, and the Worker plane — these appear as their own lanes in the diagram but carry no provider marker, because they are not swappable dependencies. <b>External (not a GLA dependency at all):</b> the agent runtime (Hermes), the website (acme.example), and the user's email inbox.</p>
+</div>
+
+<h2 id="cast">The lanes</h2>
+<div class="legend">
+  <div class="zone z-actor">
+    <h4>Actors &amp; externals</h4>
+    <ul>
+      <li><b>User</b> — <span>the human, in Telegram and at their laptop</span></li>
+      <li><b>Authenticator</b> — <span>WebAuthn passkey / fingerprint, used at enrollment (Phase E) and every handoff</span></li>
+      <li><b>Telegram</b> — <span>channel · ChannelAdapter</span></li>
+      <li><b>Website</b> — <span>acme.example (third party)</span></li>
+      <li><b>Email</b> — <span>the user's inbox (third party)</span></li>
+    </ul>
+  </div>
+  <div class="zone z-agent">
+    <h4>Agent</h4>
+    <ul>
+      <li><b>Hermes</b> — <span>the using agent; drives via <code>gla</code></span></li>
+    </ul>
+  </div>
+  <div class="zone z-edge">
+    <h4>Edges &amp; providers</h4>
+    <ul>
+      <li><b>gla CLI</b> — <span>the Agent Bridge surface</span></li>
+      <li><b>Gateway · Caddy</b> — <span>verify grant + proxy</span></li>
+      <li><b>Auth · authentik</b> — <span>WebAuthn step-up</span></li>
+    </ul>
+  </div>
+  <div class="zone z-control">
+    <h4>Control plane (GLA core · not pluggable)</h4>
+    <ul>
+      <li><b>Admission · Cedar</b> — <span>mutate → validate the proposal</span></li>
+      <li><b>Task svc</b> — <span>the multi-step aggregate</span></li>
+      <li><b>Session svc</b> — <span>the per-handoff aggregate + saga</span></li>
+      <li><b>Capability svc</b> — <span>mint / revoke macaroons</span></li>
+      <li><b>Route ctrl</b> — <span>mount / unmount gateway routes</span></li>
+      <li><b>Completion svc</b> — <span>validate + normalize the done-signal</span></li>
+    </ul>
+  </div>
+  <div class="zone z-worker">
+    <h4>Worker &amp; capsule</h4>
+    <ul>
+      <li><b>Worker · Docker</b> — <span>spawner / launcher (tier T4)</span></li>
+      <li><b>Capsule</b> — <span>Chromium · noVNC entrypoint · CDP connector</span></li>
+    </ul>
+  </div>
+</div>
+
+</div>
+
+<div class="wide">
+<div class="diagram-card">
+<pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant DEV as Passkey + WebAuthn authenticator
+    participant TG as Telegram + channel
+    participant AG as Hermes agent
+    participant CLI as Agent Bridge + gla CLI
+    participant ADM as Admission + Policy + Cedar
+    participant TSK as Task svc
+    participant SES as Session svc
+    participant CAP as Capability svc + macaroons
+    participant RTE as Route ctrl
+    participant CMP as Completion svc
+    participant GW as Access Gateway + Caddy
+    participant IDP as Identity + Auth + authentik
+    participant WK as Worker spawner + Docker
+    participant CPS as Capsule + Chromium + noVNC + CDP
+    participant SITE as Website acme.example
+    participant MAIL as Email inbox
+
+    Note over U,IDP: Phase E one-time prerequisite, recipient enrollment by the operator, not repeated per task
+    Note over IDP: the operator registered this recipient and issued a single-use operator-discharge enrollment grant bound to it
+    TG->>U: enrollment invite carrying the single-use enrollment grant
+    U->>GW: open the enrollment invite
+    GW->>GW: verify the enrollment grant, macaroon + recipient + single-use + TTL, Caddy
+    GW->>IDP: begin passkey registration for this recipient
+    IDP->>U: WebAuthn registration challenge
+    U->>DEV: create a passkey for GLA
+    DEV-->>IDP: signed attestation
+    IDP->>IDP: store the credential bound to the recipient identity, authentik
+    IDP-->>U: enrolled, the grant is spent and this recipient can be verified at handoff
+
+    Note over U,MAIL: Phase 0 — request arrives, channel is Telegram
+    U->>TG: Register me on acme.example
+    TG->>AG: inbound message + recipient binding
+
+    Note over AG,CMP: Phase 1 — orient, agent uses the gla CLI, Bridge serves read-models
+    AG->>CLI: gla whoami
+    CLI->>CAP: resolve agent-authority capability
+    CAP-->>CLI: identity + AuthorityProfile + allowed ops
+    CLI-->>AG: whoami result
+    AG->>CLI: gla template show browser-handoff
+    CLI-->>AG: required parts + dependency status from catalog, docker novnc cdp url-watcher available
+    AG->>CLI: gla skill show browser-handoff
+    CLI-->>AG: SKILL.md, how to drive this capsule
+
+    Note over AG,CAP: Phase 2 — propose and validate
+    AG->>CLI: gla task create --intent register-on-acme --recipient U
+    Note over CLI: task is optional, implicit if omitted
+    CLI->>TSK: create Task, recipient U
+    TSK->>CAP: mint task capability, parent agent-authority
+    CAP-->>TSK: task capability
+    TSK-->>CLI: task_id
+    CLI-->>AG: task_id
+    AG->>CLI: gla session create --task T -f assembly.json --dry-run
+    Note over CLI,ADM: assembly = template browser-handoff, launcher docker, entrypoint novnc
+    Note over CLI,ADM: connector cdp, workspace temp-profile, detectors user-done + url-watcher
+    CLI->>ADM: admit assembly, proposal + task capability
+    ADM->>ADM: mutate, defaults TTL + isolation tier
+    ADM->>ADM: validate, Cedar policy + capability scope + catalog availability + recipient
+    ADM-->>CLI: accepted dry-run, nothing provisioned
+    CLI-->>AG: accepted
+    AG->>CLI: gla session create --task T -f assembly.json
+    CLI->>ADM: admit assembly
+    ADM->>TSK: dispatch accepted session
+    TSK->>SES: create Session under Task T
+
+    Note over SES,CPS: Phase 3 — provision the capsule, Worker is Docker
+    SES->>CAP: mint agent-connector capability
+    CAP-->>SES: agent-connector capability
+    SES->>WK: spawn capsule from assembly
+    WK->>CPS: start Chromium + noVNC + temp profile, Docker container
+    CPS-->>WK: ready
+    WK-->>SES: runtime handle
+    SES-->>CLI: session_id + connector cdp_url + secret_ref
+    CLI-->>AG: session_id + connector cdp_url + secret_ref
+
+    Note over AG,CPS: Phase 4 — agent drives the capsule via the connector, CDP/Playwright, not gla
+    AG->>CPS: CDP, open acme.example, go to /register
+    CPS->>SITE: GET /register
+    SITE-->>CPS: registration form
+    AG->>CPS: CDP, inspect form, needs human, passkey + password
+
+    Note over AG,GW: Phase 5 — handoff 1, open a recipient-bound window
+    AG->>CLI: gla handoff open --session S --reason complete-registration-form
+    CLI->>SES: open handoff window on S
+    SES->>CAP: mint recipient-bound grant-1, TTL + recipient caveat
+    CAP-->>SES: grant-1
+    SES->>RTE: mount route to capsule, bound to grant-1
+    RTE->>GW: program route, Caddy
+    SES->>TG: deliver Mini App link grant-1 to the bound recipient
+    TG->>U: handoff link
+    SES-->>CLI: handoff_id hand_1 + link
+    CLI-->>AG: handoff_id hand_1 + link
+    AG->>CLI: gla handoff wait hand_1 --timeout 15m
+    Note over CLI: blocks until the human is done, or TTL
+
+    Note over U,IDP: Phase 6 — user opens the link and authenticates, Gateway is Caddy, Auth is WebAuthn
+    Note over U,IDP: relies on the recipient being enrolled in Phase E, verification checks the credential registered there
+    U->>GW: open link
+    GW->>GW: verify grant-1, macaroon + revocation cache
+    GW->>IDP: auth strength insufficient, step-up
+    IDP->>U: WebAuthn challenge
+    U->>DEV: fingerprint
+    DEV-->>IDP: signed assertion
+    IDP-->>GW: auth ok, auth_strength webauthn, via authentik
+    GW->>CPS: proxy WS upgrade to the noVNC stream
+
+    Note over U,SITE: Phase 7 — user fills the form in the live browser, surface is noVNC
+    U->>CPS: noVNC, fill fields, choose a password
+    Note over U,CPS: keystrokes, the password, reach the site, never the agent, agent-blind
+    CPS->>SITE: submit registration
+    SITE-->>CPS: verify page, check your email
+    SITE->>MAIL: verification email
+
+    Note over CPS,AG: Phase 8 — completion 1, Completion validates, Session closes the window
+    CPS->>CMP: signal, user-done + url-watcher matched /verify
+    CMP->>CMP: validate signal vs the detector contract
+    CMP->>SES: completion-1, status submitted, next email-verification
+    SES->>RTE: unmount route
+    RTE->>GW: remove route, force-close WS, Caddy
+    SES->>CAP: revoke grant-1
+    SES-->>CLI: completion-1
+    CLI-->>AG: gla handoff wait returns, status submitted, next email-verification
+
+    Note over AG,CPS: Phase 9 — agent inspects, CDP
+    AG->>CPS: CDP, read /verify, code emailed, enter it
+    Note over MAIL: Phase 10 — the verification code now sits in the user inbox, out-of-band
+
+    Note over AG,GW: Phase 11 — handoff 2, same capsule, new window
+    AG->>CLI: gla handoff open --session S --reason enter-verification-code
+    CLI->>SES: open handoff window on S, same capsule
+    SES->>CAP: mint recipient-bound grant-2
+    CAP-->>SES: grant-2
+    SES->>RTE: mount route, bound to grant-2
+    RTE->>GW: program route, Caddy
+    SES->>TG: deliver link grant-2
+    TG->>U: handoff link
+    SES-->>CLI: handoff_id hand_2 + link
+    CLI-->>AG: handoff_id hand_2 + link
+    AG->>CLI: gla handoff wait hand_2 --timeout 15m
+
+    Note over U,SITE: Phase 12 — user enters the code, auth reused, surface is noVNC
+    U->>GW: open link
+    GW->>GW: verify grant-2, macaroon + revocation, auth still valid, no re-prompt
+    U->>MAIL: read the code, out-of-band, GLA cannot see it
+    GW->>CPS: proxy WS to noVNC
+    U->>CPS: noVNC, enter the verification code
+    CPS->>SITE: submit code
+    SITE-->>CPS: dashboard page
+
+    Note over CPS,AG: Phase 13 — completion 2, detector is url-watcher
+    CPS->>CMP: signal, url-watcher matched /dashboard
+    CMP->>CMP: validate signal vs contract
+    CMP->>SES: completion-2, status verified
+    SES->>RTE: unmount route
+    RTE->>GW: remove route, force-close WS
+    SES->>CAP: revoke grant-2
+    SES-->>CLI: completion-2
+    CLI-->>AG: gla handoff wait returns, status verified
+
+    Note over AG,CPS: Phase 14 — agent configures the account, CDP/Playwright
+    AG->>CPS: CDP, set preferences on /dashboard
+
+    Note over AG,U: Phase 15 — close and tear down
+    AG->>TG: done, here is how to access your account
+    TG->>U: final message
+    AG->>CLI: gla task complete T
+    CLI->>TSK: complete Task T
+    TSK->>SES: complete sessions
+    SES->>WK: stop capsule
+    WK->>CPS: terminate Chromium, wipe temp profile, Docker
+    SES->>CAP: revoke grant + connector capabilities
+    TSK->>CAP: revoke task capability
+    TSK-->>CLI: completed
+    CLI-->>AG: completed
+</pre>
+</div>
+<p class="cap">Control lanes show the agent's concrete <code>gla</code> commands and the internal protocol between services; in-capsule work stays on the connector (CDP/Playwright), not the CLI. Phase E is the one-time recipient enrollment that precedes any handoff. Notes name the concrete provider doing the work; only pluggable layers carry a provider label.</p>
+</div>
+
+<div class="wrap">
+
+<h2 id="commands">The agent's command sequence</h2>
+<p>Every control step above, as the concrete <code>gla</code> calls in order. Lines marked <i>(CDP)</i> are the agent driving the live capsule with its own tooling against the connector — not the CLI.</p>
+<pre style="background:var(--paper-2);border:1px solid var(--rule);border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:.82rem;line-height:1.65;color:var(--ink)"># precondition (one-time, operator-run, not an agent command): recipient enrolled — see Phase E
+gla whoami
+gla template show browser-handoff
+gla skill show browser-handoff
+# task is optional — a single-capsule goal may skip it (implicit task)
+TASK=$(gla task create --intent "register on acme" --recipient $USER --fields task_id -q)
+gla session create --task $TASK -f assembly.json --dry-run     # admission check only
+SESS=$(gla session create --task $TASK -f assembly.json)       # provisions the capsule
+#   -> {session_id, connector={cdp_url, secret_ref}}
+# (CDP) drive Chromium via the connector: open acme.example, go to /register
+H1=$(gla handoff open --session $SESS --reason "complete registration form" --fields handoff_id -q)
+gla handoff wait $H1 --timeout 15m                             # blocks -> {status=submitted}
+# (CDP) read /verify -> "code emailed"
+H2=$(gla handoff open --session $SESS --reason "enter verification code" --fields handoff_id -q)
+gla handoff wait $H2 --timeout 15m                             # blocks -> {status=verified}
+# (CDP) configure the account on /dashboard
+gla task complete $TASK                                        # tears down capsule, revokes caps</pre>
+
+<div class="callout">
+  <h4>Reading this as an extension surface</h4>
+  <p>Every bold provider in the stack table is a row the operator can change by installing a different plugin — <code>Docker → Firecracker</code>, <code>Telegram → Slack</code>, <code>noVNC → KasmVNC</code>, <code>authentik → Authelia</code> — with <b>no change to the <code>gla</code> commands the agent runs</b> and no change to GLA core. That is the inversion-of-control model in <code>02-provider-and-extension-model.md</code>: the agent composes registered providers <i>by capability</i>; the concrete dependency behind each capability is the operator's choice, discovered at runtime through the catalog.</p>
+</div>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">GLA · scenario 01 — one unified view · internal protocol + the agent's <code>gla</code> CLI + the concrete provider per pluggable layer · enrollment (Phase E) precedes any handoff.</div>
+</footer>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    maxTextSize: 200000,
+    sequence: { useMaxWidth: false },
+    themeVariables: {
+      fontFamily: '"Hanken Grotesk", system-ui, sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d8d1c0',
+      primaryTextColor: '#211f1b',
+      lineColor: '#8a8478',
+      actorBkg: '#f3efe6',
+      actorBorder: '#0f6e56',
+      actorTextColor: '#211f1b',
+      actorLineColor: '#c9c2b3',
+      signalColor: '#5d574c',
+      signalTextColor: '#211f1b',
+      labelBoxBkgColor: '#f3efe6',
+      labelBoxBorderColor: '#d8d1c0',
+      labelTextColor: '#211f1b',
+      noteBkgColor: '#fbf3d9',
+      noteTextColor: '#3b2f12',
+      noteBorderColor: '#e6c97a',
+      loopTextColor: '#534ab7',
+      sequenceNumberColor: '#ffffff',
+      activationBkgColor: '#e1f0ea'
+    }
+  });
+  try {
+    await mermaid.run({ querySelector: '.mermaid' });
+  } catch (e) {
+    console.error('Mermaid render failed; raw source remains visible.', e);
+  }
+</script>
+</body>
+</html>

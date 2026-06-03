@@ -1,8 +1,7 @@
-project_name: "agent-gateway-handoff"
+project_name: "Gateway Live Access"
 default_status: "To Do"
 statuses: ["To Do", "In Progress", "Done"]
 labels: []
-definition_of_done: ["The project quality gate is green: build/type-check clean, linter/formatter clean (see CONTRIBUTING.md > Quality gate)", "Tests added and green: unit for pure logic, integration where it touches external edges", "Public interfaces documented; no dead code; architectural boundaries respected"]
 date_format: yyyy-mm-dd
 max_column_width: 20
 auto_open_browser: true
@@ -10,7 +9,15 @@ default_port: 6420
 remote_operations: false
 auto_commit: false
 filesystem_only: true
+zero_padded_ids: 3
 bypass_git_hooks: false
 check_active_branches: false
 active_branch_days: 30
-task_prefix: "task"
+task_prefix: "gla"
+definition_of_done:
+  - "Typecheck passes with no errors."
+  - "Linter passes clean."
+  - "Tests are added for the change and the full suite is green."
+  - "Public functions and exported types are documented."
+  - "No dead code or unused exports are introduced."
+  - "The core import-boundary holds: core depends only on ports, never on concrete adapters."
