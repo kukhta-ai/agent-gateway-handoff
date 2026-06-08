@@ -27,7 +27,7 @@ design set** (`identity-and-auth.md`, `kernel-contracts.md §6/§7`, `dependency
 real seam (`packages/kernel/src/ports.ts`), the default adapter (`adapters/auth-webauthn/src/index.ts`), the
 gateway step-up path (`packages/gateway/src/index.ts`), the composition root (`packages/app/src/index.ts`,
 `daemon.ts`), the identity service (`packages/identity/src/index.ts`), and the installer bundle
-(`wpm/bundles/identity-provider/`) as the stated fallback.
+(`wpm/wip/bundles/identity-provider/`) as the stated fallback.
 
 ---
 
@@ -310,9 +310,9 @@ bundle.*
   This is host-touching, environment-specific, and **unknowable in advance** — precisely the `wpm` half.
 
 **The named task that stands the provider service up: `GLA-074` — "Build the wpm installer for the authentik
-identity provider."** GLA-074 **extends the existing `wpm/bundles/identity-provider` bundle** (today it sets
+identity provider."** GLA-074 **extends the existing `wpm/wip/bundles/identity-provider` bundle** (today it sets
 only `GLA_RP_ID` for the in-tree default and *names authentik as the alternative it would stand up if
-selected* — `see wpm/bundles/identity-provider/bundle.yml` + the `install-backlog` tasks
+selected* — `see wpm/wip/bundles/identity-provider/bundle.yml` + the `install-backlog` tasks
 `identity-provider-1..3`). GLA-074 adds the authentik **detect → setup → verify → record** path to that same
 recipe: detect an existing/intended authentik; stand up server+worker+Postgres+Redis (Managed) **or** adopt a
 running instance (Local-/Remote-External); configure the OIDC application + flow/stages; write the
@@ -403,7 +403,7 @@ the **capstone (076) last**):
 | 4 | **GLA-071** — plan the passkey-and-password flow | plan | GLA-067 | plan the dual-method UX + the redirect-page resolution (`§2` (i)) before building it. (May run in parallel with steps 1–3.) |
 | 5 | **GLA-072** — support both passkey & password step-up via authentik | impl: dual-method flow | GLA-068, GLA-071 | the dual-method capability — the point of the integration. Needs the adapter (068) + its plan (071); gates by required strength (`§4`) with no gateway change (`§2`). |
 | 6 | **GLA-073** — plan the authentik service standup & config | plan | GLA-067 | plan the wpm standup (server+worker+Postgres+Redis + flow/stages emitting `amr`/`acr`) before building it. (May run in parallel with steps 1–5.) |
-| 7 | **GLA-074** — build the wpm installer for authentik | impl: installer | GLA-073, GLA-068 | extends `wpm/bundles/identity-provider` to stand authentik up + write the `DependencyBinding` (`§6`). Needs its plan (073) + the adapter it verifies against (068). |
+| 7 | **GLA-074** — build the wpm installer for authentik | impl: installer | GLA-073, GLA-068 | extends `wpm/wip/bundles/identity-provider` to stand authentik up + write the `DependencyBinding` (`§6`). Needs its plan (073) + the adapter it verifies against (068). |
 | 8 | **GLA-076** — verify the delegated provider covers both methods E2E | impl: verification (**capstone**) | GLA-070, GLA-072, GLA-074 | proves passkey **and** password both work through a real handoff behind the unchanged seam. Composes 070+072+074; **last**. |
 
 **Order property checks:** every plan (069/071/073) precedes its impl (070/072/074); the adapter (068)
@@ -457,7 +457,7 @@ the adapter build; the table lists one **legal serialization**.
    `UserIdentity.enrolledCredentialId` / the identity `EnrollmentRecord.credentialId` (field shapes
    unchanged); enrollment becomes **subject-linking** (**§5**).
 5. **Runtime code** = the adapter + OIDC client + composition; the **installer concern** (server+worker+
-   Postgres+Redis + flow/stages) is **GLA-074**, extending `wpm/bundles/identity-provider` (**§6**).
+   Postgres+Redis + flow/stages) is **GLA-074**, extending `wpm/wip/bundles/identity-provider` (**§6**).
 6. In-tree WebAuthn **stays the default**; authentik is **opt-in** via **`GLA_AUTH_PROVIDER`** at the
    `packages/app` composition root, with the authentik OIDC config (issuer / client id / client secret /
    redirect URI) (**§7**).
@@ -478,4 +478,4 @@ enrollment) · `docs/architecture/dependency-strategy.md §4 D6, §5, §7` (the 
 `packages/gateway/src/index.ts` (the unchanged gateway step-up path) ·
 `packages/identity/src/index.ts` (the identity service the binding fact lives in) ·
 `packages/app/src/index.ts`, `packages/app/src/daemon.ts` (the composition root / selection surface) ·
-`wpm/bundles/identity-provider/` (the installer bundle GLA-074 extends).
+`wpm/wip/bundles/identity-provider/` (the installer bundle GLA-074 extends).
