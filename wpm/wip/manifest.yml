@@ -7,7 +7,7 @@ project:
     control plane — onto a host: the gla serve runtime plus optional browser,
     human-view, isolation, edge-proxy, and identity bundles."
   license: MIT
-  repository: https://github.com/your-org/gla
+  repository: https://github.com/kukhta-ai/agent-gateway-handoff
   author: GLA project
 
 # The agents this installer supports; each becomes a scope-alias the install creates.
