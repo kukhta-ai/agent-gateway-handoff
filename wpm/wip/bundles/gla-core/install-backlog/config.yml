@@ -1,0 +1,16 @@
+project_name: "gla-core"
+default_status: "To Do"
+statuses: ["To Do", "In Progress", "Done"]
+labels: []
+definition_of_done: ["Effect verified against the task acceptance criteria (verify before record)", "Files placed or modified are recorded via --ref and their checksum journaled in the notes", "Ownership recorded in the notes: installed by us vs adopted from the user's machine", "Inverse op recorded in the notes: the uninstall step plus the condition under which it runs", "Decisions and their rationale recorded (notes, or --final for a pinned decision)", "Non-file effects recorded in the notes: services started, registrations made, artifacts built"]
+date_format: yyyy-mm-dd
+max_column_width: 80
+auto_open_browser: true
+default_port: 6420
+remote_operations: false
+auto_commit: false
+filesystem_only: true
+bypass_git_hooks: false
+check_active_branches: true
+active_branch_days: 30
+task_prefix: "gla-core"

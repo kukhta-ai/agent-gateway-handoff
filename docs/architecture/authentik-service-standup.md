@@ -2,7 +2,7 @@
 
 > **Status:** Solution-design sub-doc (the standup-shape contract **GLA-074** conforms to). **Scope:** fix how
 > the external authentik IdP (server + worker + PostgreSQL [+ Redis on older versions]) is **stood up and
-> configured on the operator host**, slotting into the existing `wpm/bundles/identity-provider` bundle as its
+> configured on the operator host**, slotting into the existing `wpm/wip/bundles/identity-provider` bundle as its
 > **authentik alternative** — the installer half of the delegated provider. **Planning only:** it builds no
 > code, stands nothing up, and touches no backlog.
 >
@@ -21,7 +21,7 @@ Same established reality as the master/sibling docs: `bmad-create-architecture` 
 proceed until the user selects 'C'"*) and **cannot run unattended** here. Per `AGENTS.md` Rule 3's explicit
 allowance, that path was **stopped, the blocker named**, and this artifact was driven **docs-first** from the
 committed design set + the deployment-target notes, the real adapter (`adapters/auth-authentik/src/oidc.ts` —
-the endpoints it expects), and the existing bundle (`wpm/bundles/identity-provider/`), with **authentik's own
+the endpoints it expects), and the existing bundle (`wpm/wip/bundles/identity-provider/`), with **authentik's own
 deployment + OIDC docs consulted** to ground the config-outcomes (see Sources). Config is kept **outcome-level
 (what must be true)**, never a click-by-click script — fitting `wpm`'s "thin builder, fat agent" model.
 
@@ -165,8 +165,8 @@ what the **real adapter** requires (`adapters/auth-authentik/src/{index.ts,oidc.
 
 ## §4 · The standup lives in a wpm package — detect-before-change, receipt, idempotent (AC #3)
 
-The standup is the **authentik branch of the existing `wpm/bundles/identity-provider` bundle** (it already
-exists and **names authentik as its alternative** — `see wpm/bundles/identity-provider/bundle.yml` + the three
+The standup is the **authentik branch of the existing `wpm/wip/bundles/identity-provider` bundle** (it already
+exists and **names authentik as its alternative** — `see wpm/wip/bundles/identity-provider/bundle.yml` + the three
 install-backlog tasks `identity-provider-1..3`, which today do the in-tree WebAuthn RP config). GLA-074 adds
 the authentik path under the **same detect → setup → verify → record** loop (`see` the bundle's `AGENTS.md`;
 `dependency-strategy.md §2`/`§5`):
@@ -249,7 +249,7 @@ The standup is **entirely gated on `GLA_AUTH_PROVIDER=authentik`** (`see authent
 
 - The `identity-provider` bundle does **only** what it does today — set the WebAuthn **relying-party id**
   (`GLA_RP_ID`) matching the host in the public base URL, for the in-tree `@simplewebauthn` provider, standing
-  up **no separate service** (`see wpm/bundles/identity-provider/` tasks `identity-provider-1..3`, whose ACs
+  up **no separate service** (`see wpm/wip/bundles/identity-provider/` tasks `identity-provider-1..3`, whose ACs
   already encode "in-tree provider available by default; alternative only when explicitly selected").
 - **None of A1–A4 (`§2`)** is installed, adopted, or required. No authentik, no Postgres, no Redis, no OIDC app,
   no flow config. The default verifier is in-tree library code in `gla-core` (`baseline.md §5`).
@@ -388,7 +388,7 @@ callback + same-origin landing, `§3`/`§8` the `amr` distinction) · `docs/arch
 (`§3` the subject binding, `§8.3` stable `sub`) · `docs/architecture/dependency-strategy.md` (the ownership
 modes + the `DependencyBinding` receipt + availability=system-derived) · `docs/01-architecture-overview.md
 §7–§8` (the dependency/ownership model + the GLA↔`wpm` boundary) · `docs/components/identity-and-auth.md` (the
-identity/auth model) · `wpm/bundles/identity-provider/` (`bundle.yml` + `install-backlog/` tasks
+identity/auth model) · `wpm/wip/bundles/identity-provider/` (`bundle.yml` + `install-backlog/` tasks
 `identity-provider-1..3` — the WebAuthn-default config GLA-074 extends with the authentik branch) ·
 `adapters/auth-authentik/src/oidc.ts` (the OIDC endpoints/discovery the standup must satisfy) ·
 `adapters/auth-authentik/src/strength.ts` (the `amr`→strength map the flow must feed).
