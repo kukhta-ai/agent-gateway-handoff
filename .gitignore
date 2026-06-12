@@ -21,6 +21,7 @@ dist/
 # Vitest / coverage
 coverage/
 .vitest/
+tmp/
 
 # ── OS / editor cruft ────────────────────────────────────────────────────────
 .DS_Store
