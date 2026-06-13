@@ -160,6 +160,10 @@ export type SessionGrantVerifyResult =
 
 /** The short default TTL for a handoff grant (kernel-contracts §2.1: a recipient-bound window is short-lived). */
 const DEFAULT_HANDOFF_GRANT_TTL_MS = 15 * 60 * 1000;
+const EMPTY_STALE_ROUTE_PROOF_REVOCATIONS: RevocationSnapshot = {
+  has: () => false,
+  version: "stale-route-proof",
+};
 
 /** Mutable string-set seam for small security caches such as spent enrollment nonces. */
 export interface StringSetStore {
@@ -404,6 +408,27 @@ export class CapabilityService {
       // Authenticate the recipient caveat by signature, then READ it from the grant (no presenter to compare).
       bindRecipientFromCapability: true,
       revocations: this.port.revocationSnapshot(),
+    };
+    return this.verifySessionGrantWith(token, ctx);
+  }
+
+  /**
+   * Prove a stale handoff token belongs to a route without authorizing it. This intentionally ignores TTL and
+   * revocation, but still authenticates the token, checks the route `scope`, asserts class=`session`, and reads the
+   * bound recipient from the signed grant. The gateway uses this only to classify an already-refused stale link, never
+   * to admit a request or WebSocket.
+   */
+  proveStaleSessionGrantRoute(
+    token: OpaqueToken,
+    args: { scopePath: string; now?: string },
+  ): SessionGrantVerifyResult {
+    const ctx: VerifyContext = {
+      now: "0000-01-01T00:00:00.000Z" as Iso8601,
+      scopePath: args.scopePath,
+      // Authenticate the recipient caveat by signature, then READ it from the grant (no presenter to compare).
+      bindRecipientFromCapability: true,
+      // Route proof is not authorization: ignore revocation so a revoked but route-bound token can be classified.
+      revocations: EMPTY_STALE_ROUTE_PROOF_REVOCATIONS,
     };
     return this.verifySessionGrantWith(token, ctx);
   }
