@@ -169,7 +169,16 @@ describe("REAL completion + close-window + agent-blind end-to-end (scenario-01 P
           // connection (standing in for the noVNC human path).
           entrypoint: {
             async open() {
-              return { internalEndpoint: "ws://127.0.0.1:1/" };
+              return {
+                resourceId: "entrypoint:fake-view:completion-e2e",
+                provider: "fake-view",
+                client: { kind: "provider-asset", ref: "fake-viewer" },
+                transport: {
+                  kind: "reverse-proxy" as const,
+                  protocol: "websocket",
+                  upstream: "ws://127.0.0.1:1/",
+                },
+              };
             },
           },
           completion: { pollMs: 100 }, // the REAL url-watcher reads the capsule's CDP /json

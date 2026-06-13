@@ -9,6 +9,7 @@
 import type {
   CapabilityId,
   HandoffId,
+  HumanEntrypointBinding,
   Iso8601,
   OpaqueToken,
   RecipientRef,
@@ -32,6 +33,12 @@ import {
 const TASK = "task_1" as TaskId;
 const recipient = "tg:user:123" as RecipientRef;
 const ENDPOINT = "ws://127.0.0.1:6080/";
+const ENTRYPOINT: HumanEntrypointBinding = {
+  resourceId: "entrypoint:fake-view:1",
+  provider: "fake-view",
+  client: { kind: "provider-asset", ref: "fake-viewer" },
+  transport: { kind: "reverse-proxy", protocol: "websocket", upstream: ENDPOINT },
+};
 
 function resolved(): ResolvedAssemblySpec {
   return {
@@ -92,7 +99,7 @@ class StubRoute implements HandoffRoutePort {
   async program(
     window: { id: HandoffId; sessionId: SessionId },
     grantId: CapabilityId,
-    capsuleEntrypoint: string,
+    entrypoint: HumanEntrypointBinding,
     path?: string,
   ): Promise<Route> {
     if (this.failProgram) {
@@ -101,11 +108,13 @@ class StubRoute implements HandoffRoutePort {
         code: "dependency.unavailable",
       });
     }
-    this.programmed.push({ windowId: window.id, grantId, endpoint: capsuleEntrypoint });
+    this.programmed.push({ windowId: window.id, grantId, endpoint: entrypoint.transport.upstream });
     return {
       id: `route_${this.nextId++}` as Route["id"],
       path: path ?? `/handoff/${window.sessionId}`,
-      internalEndpoint: capsuleEntrypoint,
+      entrypointResourceId: entrypoint.resourceId,
+      client: entrypoint.client,
+      transport: entrypoint.transport,
       boundGrantId: grantId,
     };
   }
@@ -114,10 +123,10 @@ class StubRoute implements HandoffRoutePort {
   }
 }
 
-/** A stub entrypoint seam returning the capsule's noVNC endpoint. */
+/** A stub entrypoint seam returning a fake provider-neutral entrypoint binding. */
 class StubEntry implements HandoffEntrypointPort {
-  async open(_runtime: RuntimeHandle): Promise<{ internalEndpoint: string }> {
-    return { internalEndpoint: ENDPOINT };
+  async open(_runtime: RuntimeHandle): Promise<HumanEntrypointBinding> {
+    return ENTRYPOINT;
   }
 }
 

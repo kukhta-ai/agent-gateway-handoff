@@ -35,6 +35,7 @@ function resolved(launcher = "launcher-process"): ResolvedAssemblySpec {
       // biome-ignore lint/suspicious/noExplicitAny: recipient brand cast in test
       recipient: "tg:user:1" as any,
       launcher: { use: launcher },
+      workspace: { use: "browser-profile-temp" },
     },
     __resolved: true,
   };
@@ -351,5 +352,32 @@ describe("WorkspaceManager — realize/reap over the WorkspacePort", () => {
     await mgr.realize(spec, 1000);
     expect(seenUid).toBe(1000); // the agent uid is threaded (docs/04 §6)
     expect(seenMounts).toEqual([{ host: "/h", target: "/work/h", mode: "ro" }]);
+  });
+
+  it("missing resolved workspace fails closed before provider realization or host mutation", async () => {
+    let called = false;
+    const port: WorkspacePort = {
+      async realize() {
+        called = true;
+        return "wh" as unknown as WorkspaceHandle;
+      },
+      async reap() {},
+    };
+    const mgr = new WorkspaceManager(port);
+    const spec = resolved();
+    // biome-ignore lint/performance/noDelete: test intentionally removes the resolved provider state.
+    delete spec.spec.workspace;
+
+    let thrown: unknown;
+    try {
+      mgr.realize(spec, 1000);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toMatchObject({
+      code: "dependency.unavailable",
+      detail: { expected: "catalog/admission resolved spec.spec.workspace" },
+    });
+    expect(called).toBe(false);
   });
 });

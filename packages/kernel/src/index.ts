@@ -99,9 +99,18 @@ export {
   decodeRuntimeHandle,
   encodeRuntimeHandle,
   getSpawnContext,
+  runtimeEndpoint,
   setSpawnContext,
 } from "./runtime-handle.js";
-export type { RuntimeDescriptor, SpawnContext, WorkspaceHandleRef } from "./runtime-handle.js";
+export type {
+  RuntimeClientDescriptor,
+  RuntimeDescriptor,
+  RuntimeEndpointDescriptor,
+  RuntimeEndpointFamily,
+  RuntimeEndpointTransport,
+  SpawnContext,
+  WorkspaceHandleRef,
+} from "./runtime-handle.js";
 
 // ── K7 · module ports + identity/enrollment types ─────────────────────────────
 export type {
@@ -118,6 +127,8 @@ export type {
   ChannelPort,
   CompletionDetectorPort,
   EnrollmentChallenge,
+  HumanEntrypointBinding,
+  HumanEntrypointClientBinding,
   HumanEntrypointPort,
   IdentityPort,
   IdentityVerificationResult,
@@ -128,6 +139,7 @@ export type {
   PolicyPort,
   RawCompletionSignal,
   RecipientBinding,
+  ReverseProxyTransportBinding,
   SecretStorePort,
   SecretValue,
   TemplateDescriptor,

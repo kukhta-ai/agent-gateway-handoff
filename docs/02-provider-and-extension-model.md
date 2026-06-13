@@ -43,6 +43,15 @@ The provider families (the pluggable kinds backed by third-party code or depende
 
 (The same registry also holds operator-*authored* kinds — `AuthorityProfile`, `PolicyProfile`, `Skill`, `Location` — but those are configuration, not third-party providers; this doc is about the provider families above.)
 
+Runtime-facing provider families communicate through **provider-neutral resource descriptors**. A `Launcher`
+publishes runtime endpoint descriptors: resource id, family (`AgentConnector` or `HumanEntrypoint`), provider id,
+transport class, and non-secret client/diagnostic metadata. `AgentConnector` adapters map those descriptors to
+their agent-facing DTOs and own any protocol-specific fields. `HumanEntrypoint` adapters return a binding containing
+an entrypoint resource id, browser-client requirements, and a reverse-proxy transport binding. Session, Route,
+Capability, Identity, and Gateway authorization logic key lifecycle and teardown to those resource ids; raw upstream
+addresses are transport data, not resource identity. This is the seam a new connector or human-view provider must
+implement to avoid core edits.
+
 Every provider's manifest declares the same fields, regardless of family — this is how a dependency "manifests itself":
 
 | Field | What it declares | Consumed by |

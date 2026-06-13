@@ -1,9 +1,10 @@
 ---
 id: GLA-088
 title: Generalize runtime connector and human-entrypoint provider contracts
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-12 22:58'
+updated_date: '2026-06-13 19:34'
 labels:
   - architecture
   - human-entrypoint
@@ -45,28 +46,28 @@ Boundaries: this task does not add a new concrete connector or human-view provid
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Runtime handles expose provider-neutral endpoint descriptors for agent connectors and human entrypoints without CDP or noVNC field names in the kernel contract.
-- [ ] #2 Session lifecycle, bind, unbind, reuse, and teardown behavior identifies connector and entrypoint resources through provider-neutral resource identities rather than CDP URLs or noVNC endpoint shapes.
-- [ ] #3 Access Gateway authorization and route registration can represent HumanEntrypoint providers with different browser-client asset and transport requirements while preserving identical grant and recipient enforcement outcomes.
-- [ ] #4 Reverse-proxy transport programming and Access Gateway authorization route programming are distinct boundaries, and diagnostics show which layer owns a route failure.
-- [ ] #5 Missing or unresolved provider workspace state fails closed with an actionable diagnostic instead of silently falling back to a provider-specific default workspace.
-- [ ] #6 Existing CDP and noVNC providers remain behaviorally compatible through adapter-owned mappings, and import-boundary tests prevent provider-specific runtime fields from re-entering kernel/session/capability/auth logic.
+- [x] #1 Runtime handles expose provider-neutral endpoint descriptors for agent connectors and human entrypoints without CDP or noVNC field names in the kernel contract.
+- [x] #2 Session lifecycle, bind, unbind, reuse, and teardown behavior identifies connector and entrypoint resources through provider-neutral resource identities rather than CDP URLs or noVNC endpoint shapes.
+- [x] #3 Access Gateway authorization and route registration can represent HumanEntrypoint providers with different browser-client asset and transport requirements while preserving identical grant and recipient enforcement outcomes.
+- [x] #4 Reverse-proxy transport programming and Access Gateway authorization route programming are distinct boundaries, and diagnostics show which layer owns a route failure.
+- [x] #5 Missing or unresolved provider workspace state fails closed with an actionable diagnostic instead of silently falling back to a provider-specific default workspace.
+- [x] #6 Existing CDP and noVNC providers remain behaviorally compatible through adapter-owned mappings, and import-boundary tests prevent provider-specific runtime fields from re-entering kernel/session/capability/auth logic.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Created from independent architecture/layering review findings. Evidence: packages/kernel/src/runtime-handle.ts currently names CDP/noVNC fields; packages/session/src/index.ts keys connector lifecycle around CDP URLs; packages/gateway/src/index.ts is noVNC/WebSocket-shaped; packages/route/src/index.ts conflates route authorization with Caddy transport programming; packages/worker/src/index.ts contains a provider-specific workspace fallback.
+Implemented provider-neutral runtime endpoint descriptors, connector resource-id lifecycle, human-entrypoint bindings, separated route authorization/transport diagnostics, fail-closed workspace handling, CDP/noVNC adapter compatibility, architecture docs, boundary/fake-provider tests, QA summary, and review fixes. BMAD evidence: bmad-create-story, bmad-dev-story, bmad-qa-generate-e2e-tests, bmad-story-automator-review; persistent reviewer and TEA/security follow-ups approved. Quality gate: pnpm run gate passed (typecheck, Biome CI, 60 Vitest files, 656 passed, 12 skipped; known wpm/CLAUDE.md symlink warning only).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Typecheck passes with no errors.
-- [ ] #2 Linter passes clean.
-- [ ] #3 Tests are added for the change and the full suite is green.
-- [ ] #4 Public functions and exported types are documented.
-- [ ] #5 No dead code or unused exports are introduced.
-- [ ] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
-- [ ] #7 Architecture docs are updated to name the provider-neutral runtime endpoint, connector-resource, human-entrypoint, route-authorization, and reverse-proxy transport seams.
-- [ ] #8 Boundary tests cover adding a fake non-CDP connector and a fake non-noVNC human-entrypoint provider without kernel/session/capability/auth edits.
+- [x] #1 Typecheck passes with no errors.
+- [x] #2 Linter passes clean.
+- [x] #3 Tests are added for the change and the full suite is green.
+- [x] #4 Public functions and exported types are documented.
+- [x] #5 No dead code or unused exports are introduced.
+- [x] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
+- [x] #7 Architecture docs are updated to name the provider-neutral runtime endpoint, connector-resource, human-entrypoint, route-authorization, and reverse-proxy transport seams.
+- [x] #8 Boundary tests cover adding a fake non-CDP connector and a fake non-noVNC human-entrypoint provider without kernel/session/capability/auth edits.
 <!-- DOD:END -->

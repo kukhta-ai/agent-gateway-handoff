@@ -239,24 +239,28 @@ describe("provisioning composition root — real `session create` + `session con
       const connectorCapId = stack.session.connectorLineage(sid as never)?.connectorCapId as
         | string
         | undefined;
-      const cdpUrl = (created as { connector: { cdp_url: string } }).connector.cdp_url;
+      const connector = (
+        created as unknown as { connector: { cdp_url: string; resourceId: string } }
+      ).connector;
+      expect(connector.cdp_url).toMatch(/^ws:\/\/127\.0\.0\.1:/);
+      const connectorResourceId = connector.resourceId;
       expect(connectorCapId).toBeDefined();
 
       // BEFORE teardown: the connector cap is LIVE (not revoked) and its secret_ref is bound.
       expect(stack.capability.revocationSnapshot().has(connectorCapId as never)).toBe(false);
-      expect(stack.connector.hasBinding(cdpUrl)).toBe(true);
+      expect(stack.connector.hasBinding(connectorResourceId)).toBe(true);
 
       // TERMINAL teardown via the Cleanup Reconciler (the normal reap path — session revoke/complete).
       await stack.reconciler.reconcile(sid);
 
-      // AFTER teardown: the connector cap is REVOKED and the secret_ref→cdpUrl binding is GONE (no
+      // AFTER teardown: the connector cap is REVOKED and the secret_ref resource binding is GONE (no
       // residual) — Finding #2's fix. (Previously the reconciler had no revokeConnector callback.)
       expect(stack.capability.revocationSnapshot().has(connectorCapId as never)).toBe(true);
-      expect(stack.connector.hasBinding(cdpUrl)).toBe(false);
+      expect(stack.connector.hasBinding(connectorResourceId)).toBe(false);
 
       // IDEMPOTENT: a second terminal teardown is a clean no-op (the provision info was cleared).
       await expect(stack.reconciler.reconcile(sid)).resolves.toBeUndefined();
-      expect(stack.connector.hasBinding(cdpUrl)).toBe(false);
+      expect(stack.connector.hasBinding(connectorResourceId)).toBe(false);
     },
     120_000,
   );
