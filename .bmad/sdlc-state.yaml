@@ -4,15 +4,15 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — GLA-078 complete; ready for next follow-on hardening task"
-branch: feature/authentik
+phase_name: "Autonomous build — GLA-079 configured public gateway base paths"
+branch: feature/authentik-task-079
 epic: authentik-hardening-077-094
-active_story: none
-review_cycle: 0
+active_story: GLA-079
+review_cycle: 3
 follow_on_scope:
   tasks: "GLA-077..GLA-094"
   branch_base: "feature/authentik"
-  next_ready_sequence: "GLA-079, GLA-081, GLA-082, GLA-083, GLA-084, GLA-088, GLA-090, GLA-092, GLA-094"
+  next_ready_sequence: "GLA-081, GLA-082, GLA-083, GLA-084, GLA-088, GLA-090, GLA-091, GLA-092, GLA-094"
   note: "2026-06-12 user goal: implement backlog 077-094 according to project SDLC, architecture, and vision; first initialize persistent Codex-native specialists."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
@@ -81,8 +81,8 @@ specialists:
   architect:    {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: false, resumable: true, role: "architecture baseline + epics/stories + readiness", last_skill: "bmad-create-architecture and bmad-create-epics-and-stories loaded; init only; workflow execution deferred because artifact-producing/interactive"}
   tea:          {spawned: true, id: "019ebe27-16cd-7802-abbc-0539030f8760", open: true, resumable: true, role: "test design / trace / NFR / quality gate", last_skill: "bmad-testarch-test-design, bmad-testarch-trace, bmad-testarch-nfr loaded; init only"}
   sm:           {spawned: true, id: "019ebe27-1702-75a3-b8de-ab1c33162e33", open: true, resumable: true, role: "sprint setup + create-story", last_skill: "bmad-create-story loaded; task order verified; init only"}
-  worker:       {spawned: true, id: "019ebe2c-d18a-79d3-ad68-1008a7cdde09", open: true, resumable: true, role: "dev-story implementation + E2E generation", last_skill: "bmad-dev-story and bmad-qa-generate-e2e-tests loaded; init only"}
-  reviewer:     {spawned: true, id: "019ebe2c-d1c2-7802-b8f4-0d6573657443", open: true, resumable: true, role: "separate-lane story review", last_skill: "bmad-story-automator-review loaded with workflow/checklist; init only"}
+  worker:       {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation + E2E generation", last_skill: "bmad-create-story, bmad-dev-story validation, and bmad-qa-generate-e2e-tests validation for GLA-079; findings addressed"}
+  reviewer:     {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "separate-lane story review", last_skill: "bmad-story-automator-review for GLA-079; final outcome Approve after fixes"}
   investigator: {spawned: true, id: "019ebe2c-d1e4-7c80-958e-dcab9457d9e4", open: true, resumable: true, role: "systematic debugging at the epic gate", last_skill: "bmad-investigate loaded and workflow resolved; init only"}
   retro:        {spawned: true, id: "019ebe2c-d23e-7520-85b7-3e08ad373179", open: true, resumable: true, role: "epic retrospective", last_skill: "bmad-retrospective loaded and workflow resolved; init only"}
 specialist_runtime_note: "Collaboration limit allows six open agents. Analyst/PM/UX/architect were initialized, then closed to free capacity; their IDs remain resumable."

@@ -115,14 +115,13 @@ delegation that fits (a) onto (b) is an **OIDC Authorization-Code flow with PKCE
   against the recipient's bound subject (`§3`, `§5`), reads `amr`/`acr` to derive `AuthStrength` (`§4`), and
   returns `{ok, authStrength}`.
 
-**Where the callback lands (the load-bearing decision).** It is an **adapter-owned endpoint, NOT a new
-gateway route** — because adding a route to `packages/gateway` would violate AC #1. The composition stands up
-a **second, small HTTP listener owned by `@gla/auth-authentik`** (bound LOCAL, fronted by the *same* host
-Caddy at a distinct path, e.g. `/auth/callback`, mapped to the adapter's port — an installer/edge concern,
-`§6`), whose sole job is to receive `?code&state`, hand them to the pending attempt, and bounce the browser
-back to the gateway handoff route so the existing WS-open path resumes. The gateway keeps doing exactly what
-it does today: verify the recipient-bound grant, call `stepUp.authenticationOptions` / `verifyAuthentication`,
-and proxy the authorized WS — it neither knows nor cares that "options" is now a redirect URL.
+**Where the callback lands (the load-bearing decision).** It is a **gateway-served, provider-neutral landing
+page** on GLA's public origin (for example `/auth/callback`, under `GLA_PUBLIC_BASE_URL` for subpath
+deployments). The page receives `?code&state`, restores the original GLA grant from same-origin sessionStorage,
+and re-POSTs `{code,state}` to the unchanged `/handoff/auth/verify` or `/enroll/verify` route as the opaque
+assertion/attestation. The gateway still verifies the recipient-bound grant, calls
+`stepUp.authenticationOptions` / `verifyAuthentication`, and proxies the authorized WS — it does not branch on
+authentik-specific method names.
 
 **The one real seam tension (GLA-072 must own it).** The gateway today **serves a fixed step-up page**
 (`packages/gateway/src/handoff-page.ts` → `handoffPageHtml`) that runs `navigator.credentials.get(options)`
@@ -301,7 +300,7 @@ bundle.*
 
 - **`@gla/auth-authentik`** — the delegated adapter: the OIDC relying-party **client** (authorization-request
   builder, token-exchange + `id_token` validation via JWKS, `amr`/`acr`→strength mapper, `sub`-binding check),
-  the **pending-attempt store** (`state`/`nonce`/PKCE), and the **adapter-owned callback listener** (`§2`).
+  the **pending-attempt store** (`state`/`nonce`/PKCE), and the **gateway-served callback landing page** (`§2`).
 - **The composition wiring in `packages/app`** — the provider switch + OIDC config plumbing (`§7`). It reads
   config (issuer URL, client id/secret, redirect URI) and injects the adapter; it stands **no service** up.
 
@@ -365,8 +364,8 @@ today — it is always WebAuthn.** This design fixes the switch and the config i
     from which the adapter discovers `/authorize`, `/token`, and JWKS (`.well-known/openid-configuration`).
   - **`GLA_AUTHENTIK_CLIENT_ID`** — the OIDC client/application id (the `id_token` audience).
   - **`GLA_AUTHENTIK_CLIENT_SECRET`** — the client secret for the confidential token exchange (`sensitive`).
-  - **`GLA_AUTHENTIK_REDIRECT_URI`** — the adapter callback URL (the `redirect_uri`, `§2`), fronted by the
-    same host Caddy (e.g. `https://57.131.31.126/auth/callback`).
+  - **`GLA_AUTHENTIK_REDIRECT_URI`** — the GLA-served callback URL (the `redirect_uri`, `§2`), fronted by the
+    same host Caddy and under `GLA_PUBLIC_BASE_URL` (e.g. `https://57.131.31.126/auth/callback`).
   - (optional) **`GLA_AUTHENTIK_SCOPES`** (default `openid profile`) and **`GLA_AUTHENTIK_AMR_MAP`** /
     **`GLA_AUTHENTIK_ACR_MAP`** — the operator-visible overrides for the `§4` defaults.
 
@@ -436,10 +435,10 @@ the adapter build; the table lists one **legal serialization**.
 3. **Subject stability (`§5`).** The binding rests on the OIDC `sub` being **stable** for a recipient across
    logins; GLA-073/074 must configure authentik so `sub` is the immutable user id (not an email/username that
    can change). A mutable `sub` would silently break re-verification.
-4. **Callback edge routing (`§2`, `§6`).** The adapter callback must be reachable through the **same host
-   Caddy** as the gateway, at a path that does not collide with gateway routes; GLA-074 owns the Caddy mapping
-   and must keep the **bridge** local (`daemon.ts` S-6 guard) — the new listener is a *public* edge surface
-   like the gateway, never the local bridge.
+4. **Callback edge routing (`§2`, `§6`).** The GLA-served callback page must be reachable through the **same
+   host Caddy** as the gateway and under `GLA_PUBLIC_BASE_URL` (for example `/auth/callback`, or
+   `/team-a/auth/callback` for a subpath). The **bridge** stays local (`daemon.ts` S-6 guard); the callback is a
+   public gateway page, never the local bridge.
 5. **Confidential-client secret handling.** `GLA_AUTHENTIK_CLIENT_SECRET` is `sensitive` — held as a
    secret-ref, never logged, never in the audit trail (`kernel-contracts.md §1.7` redaction, `§4` `sensitive`).
    GLA-068 must route it through the secret seam, not a plain env echo.

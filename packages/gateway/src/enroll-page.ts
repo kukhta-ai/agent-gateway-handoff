@@ -18,15 +18,36 @@
 // the provider) and re-verified server-side on the return POST; the browser redirect/return path is exercised by
 // the GLA-076 E2E (the gateway tests drive the UNCHANGED verify route in-process).
 
+/** Same-origin sessionStorage key carrying the enrollment grant across delegated-auth redirects. */
+export const ENROLL_REDIRECT_STORAGE_KEY = "gla.enroll";
+
+/** Same-origin public paths the enrollment page calls back into. */
+export interface EnrollPagePaths {
+  /** Same-origin path for the provider/enrollment options request. */
+  readonly options: string;
+  /** Same-origin path for the enrollment completion request. */
+  readonly verify: string;
+}
+
+const ROOT_ENROLL_PATHS: EnrollPagePaths = {
+  options: "/enroll/options",
+  verify: "/enroll/verify",
+};
+
 /**
  * Render the enrollment page HTML. The grant token is embedded so the page's fetches carry it; it is also still
  * verified server-side on every POST (the page cannot bypass the grant check — GLA-012 AC#2). `recipientLabel` is
- * a display-only hint (the actual recipient is bound in the grant the server verifies).
+ * a display-only hint (the actual recipient is bound in the grant the server verifies). `paths` are same-origin
+ * public paths already joined against `GLA_PUBLIC_BASE_URL`; the page does no deployment-specific path math.
  */
-export function enrollPageHtml(grant: string, recipientLabel: string): string {
+export function enrollPageHtml(
+  grant: string,
+  recipientLabel: string,
+  paths: EnrollPagePaths = ROOT_ENROLL_PATHS,
+): string {
   // The grant + label are JSON-encoded into a <script> data island (safe: JSON.stringify escapes quotes; the
   // values are a base64url token and an opaque recipient ref, neither containing `</script`).
-  const data = JSON.stringify({ grant, recipient: recipientLabel });
+  const data = JSON.stringify({ grant, recipient: recipientLabel, paths });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -94,11 +115,11 @@ export function enrollPageHtml(grant: string, recipientLabel: string): string {
     },
   });
 
-  // POST an opaque attestation to the UNCHANGED /enroll/verify; on success show the enrolled state. Shared by the
+  // POST an opaque attestation to the UNCHANGED verify route; on success show the enrolled state. Shared by the
   // in-page ceremony (a WebAuthn attestation) and the redirect-return arm (the provider's {code,state} params).
   const submitAttestation = async (attestation, grant) => {
     say("Verifying…");
-    const verRes = await fetch("/enroll/verify", {
+    const verRes = await fetch(cfg.paths.verify, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ grant: grant, attestation: attestation }),
@@ -121,8 +142,8 @@ export function enrollPageHtml(grant: string, recipientLabel: string): string {
   if (retCode && retState) {
     btn.disabled = true;
     let g = null;
-    try { g = sessionStorage.getItem("gla.enroll"); } catch (e) {}
-    try { sessionStorage.removeItem("gla.enroll"); } catch (e) {}
+    try { g = sessionStorage.getItem("${ENROLL_REDIRECT_STORAGE_KEY}"); } catch (e) {}
+    try { sessionStorage.removeItem("${ENROLL_REDIRECT_STORAGE_KEY}"); } catch (e) {}
     try { history.replaceState(null, "", location.pathname); } catch (e) {}
     if (g) {
       submitAttestation({ code: retCode, state: retState }, g).then((ok) => { if (!ok) btn.disabled = false; });
@@ -136,7 +157,7 @@ export function enrollPageHtml(grant: string, recipientLabel: string): string {
     btn.disabled = true;
     say("Requesting registration options…");
     try {
-      const optRes = await fetch("/enroll/options", {
+      const optRes = await fetch(cfg.paths.options, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ grant: cfg.grant }),
@@ -151,7 +172,7 @@ export function enrollPageHtml(grant: string, recipientLabel: string): string {
       // A delegated provider returns {kind:"redirect", authorizeUrl}; WebAuthn options have no kind and fall through
       // to the UNCHANGED in-page ceremony below.
       if (options && options.kind === "redirect") {
-        try { sessionStorage.setItem("gla.enroll", cfg.grant); } catch (e) {}
+        try { sessionStorage.setItem("${ENROLL_REDIRECT_STORAGE_KEY}", cfg.grant); } catch (e) {}
         say("Redirecting you to sign in…");
         location.assign(options.authorizeUrl); // server-built target only — no request input → no open redirect.
         return;

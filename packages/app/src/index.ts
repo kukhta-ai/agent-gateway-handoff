@@ -245,6 +245,11 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
     expectedOrigin: string | string[];
     /** The public base URL handoff links are built against, e.g. `http://localhost:3000`. */
     publicBaseUrl: string;
+    /**
+     * Trust `X-Forwarded-Prefix` for strip-prefix reverse proxies. Enable only behind an edge that sanitizes that
+     * header; prefix-preserving proxying does not need it.
+     */
+    trustForwardedPrefix?: boolean;
     /** Gateway bind host. Default `0.0.0.0` (hermes-1); tests pass `127.0.0.1`. */
     host?: string;
     /** Gateway bind port. Default `3000`; tests pass `0` for an ephemeral port. */
@@ -472,6 +477,10 @@ export function createProvisioningBridge(
       stepUp: identity,
       host: h.host ?? "0.0.0.0",
       port: h.port ?? 3000,
+      publicBaseUrl: h.publicBaseUrl,
+      ...(h.trustForwardedPrefix !== undefined
+        ? { trustForwardedPrefix: h.trustForwardedPrefix }
+        : {}),
       // The auth-reuse TTL (GLA-050/051): a recipient's step-up stays valid for a later window for THIS recipient,
       // so scenario-01 Phase 12's second window opens with no re-prompt. Defaults to the gateway default (~15m).
       ...(h.authReuseTtlMs !== undefined ? { authReuseTtlMs: h.authReuseTtlMs } : {}),
@@ -714,6 +723,11 @@ export interface CreateEnrollmentStackOptions {
   expectedOrigin: string | string[];
   /** The public base URL enrollment invite links are built against, e.g. `http://localhost:3000`. */
   publicBaseUrl: string;
+  /**
+   * Trust `X-Forwarded-Prefix` for strip-prefix reverse proxies. Enable only behind an edge that sanitizes that
+   * header; prefix-preserving proxying does not need it.
+   */
+  trustForwardedPrefix?: boolean;
   /** Gateway bind host. Default `0.0.0.0` (hermes-1); tests pass `127.0.0.1`. */
   host?: string;
   /** Gateway bind port. Default `3000`; tests pass `0` for an ephemeral port. */
@@ -821,6 +835,10 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
     identity,
     host: opts.host ?? "0.0.0.0",
     port: opts.port ?? 3000,
+    publicBaseUrl: opts.publicBaseUrl,
+    ...(opts.trustForwardedPrefix !== undefined
+      ? { trustForwardedPrefix: opts.trustForwardedPrefix }
+      : {}),
   });
 
   return {

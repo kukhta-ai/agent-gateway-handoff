@@ -14,19 +14,25 @@
 #     is confined to GLA's origin (page → callback → verify route). authentik sees the code/state, never the grant.
 #
 # So the redirect_uri host = GLA_PUBLIC_BASE_URL's host (NOT authentik's host), and the path resolves to a
-# GLA-served page (the return-detection the dual-method pages run — GLA-072). Because the GLA site block already
+# GLA-served page (the delegated-auth callback landing route). Because the GLA site block already
 # reverse-proxies EVERY path to GLA's :3000, the callback path is reachable through that same upstream — this
 # snippet just pins the path↔origin agreement explicitly and documents the security property. The callback is on
 # GLA's origin, NOT authentik's, and is NOT the local Agent Bridge (the bridge stays local — the S-6 guard).
 #
 # Set GLA_AUTHENTIK_REDIRECT_URI to exactly this URL, and register it as the authentik app's allowed redirect URI
-# (authentik exact-matches it). Example (hermes-1): https://57.131.31.126/auth/callback
+# (authentik exact-matches it). Examples:
+#   root:    GLA_PUBLIC_BASE_URL=https://gla.example/
+#            GLA_AUTHENTIK_REDIRECT_URI=https://gla.example/auth/callback
+#   subpath: GLA_PUBLIC_BASE_URL=https://gla.example/team-a/
+#            GLA_AUTHENTIK_REDIRECT_URI=https://gla.example/team-a/auth/callback
+#   issuer:  GLA_AUTHENTIK_ISSUER_URL=https://idp.example/application/o/gla/  (may be a separate origin)
+# hermes-1 root example: https://57.131.31.126/auth/callback
 #
 # ── MERGE this inside the GLA public site block (the `⟨gla.example.com⟩ { … }` from the edge-proxy Caddyfile) ──
 #
 #   ⟨gla.example.com⟩ {
 #       # The OIDC redirect_uri callback — SAME-ORIGIN with the gateway. It resolves to GLA's :3000 upstream like
-#       # every other path, so the GLA-served callback page (the GLA-072 return-detection) runs here and re-POSTs
+#       # every other path, so the GLA-served callback page runs here and re-POSTs
 #       # {code,state} to the unchanged verify route. The GLA grant is never in this request to authentik.
 #       handle ⟨/auth/callback⟩ {
 #           reverse_proxy ⟨127.0.0.1:13000⟩   # the SAME upstream that reaches GLA's gateway :3000 on this topology
@@ -35,12 +41,15 @@
 #       # … the existing `reverse_proxy ⟨127.0.0.1:13000⟩` for everything else stays as edge-proxy wrote it …
 #   }
 #
+# For a subpath GLA base (`/team-a`), merge the callback under the same prefix as the rest of GLA. If Caddy strips
+# the prefix with `handle_path /team-a/*`, set `header_up X-Forwarded-Prefix /team-a` before the `reverse_proxy`
+# and set `GLA_TRUST_FORWARDED_PREFIX=true` only behind this sanitizing edge; if an existing proxy preserves
+# `/team-a`, forward it unchanged and leave the trust flag false. In both modes the callback still lands on GLA.
+#
 # authentik's OWN endpoints (issuer/authorize/token/jwks) are fronted SEPARATELY — at the operator's authentik
 # origin (its own host/subdomain), proxied to the host-level authentik stack (§5.1). They are NOT part of this
 # snippet; GLA only needs to be able to DIAL them over the network (record a container-reachable issuer, §8).
 #
-# NOTE (the honest dependency): the GLA-served page at ⟨/auth/callback⟩ that runs the return-detection is the
-# GLA-072 deliverable (the dual-method pages' redirect-return arm). This snippet wires the EDGE so that path is
-# same-origin with the gateway; confirming the page actually serves the return-detection at the chosen path is a
-# verify-step + deploy concern (identity-provider-6). Pointing redirect_uri at any non-GLA origin (or handing
-# authentik the grant) is the failure this snippet exists to prevent.
+# NOTE: the callback path is served by GLA's gateway, not by authentik. A verify step should open the chosen
+# public callback URL and see the GLA callback page, then prove the original GLA grant stays in same-origin
+# storage and never appears in the authentik authorize/redirect URI.

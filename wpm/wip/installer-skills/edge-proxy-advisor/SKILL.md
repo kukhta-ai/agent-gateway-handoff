@@ -50,11 +50,27 @@ it in place. The placed/modified config is captured in the receipt with its chec
   auto-provision a Let's Encrypt certificate. A **bare IP cannot get a public ACME cert**, so you fall back
   to Caddy's internal CA (`tls internal`) or a supplied certificate — and note that WebAuthn/passkeys want
   a *trusted* HTTPS origin, which a locally-trusted IP cert does not give.
+- **The public base shape** — dedicated root vs. subpath/custom base. At root, set
+  `GLA_PUBLIC_BASE_URL=https://gla.example/` and reverse-proxy the whole site to GLA. Under an existing site
+  prefix, set `GLA_PUBLIC_BASE_URL=https://gla.example/team-a/`; the recommended Caddy shape is
+  `handle_path /team-a/*` with `X-Forwarded-Prefix: /team-a`, which strips the prefix before proxying to GLA's
+  root-shaped routes. This shape also requires `GLA_TRUST_FORWARDED_PREFIX=true` in gla-core, and the edge must
+  overwrite/sanitize any client-supplied `X-Forwarded-Prefix` before proxying. Existing proxies that preserve
+  `/team-a` are also acceptable when they forward it unchanged and GLA is configured with the same base path; they
+  do not need the trust flag.
 - **The upstream address** — what actually reaches GLA's `:3000` on this topology:
   - Caddy and GLA on the **same host/container** → `127.0.0.1:3000`.
   - Caddy on the **host, GLA in a container** (the hermes-1 case) → point at the **host-side forward**, not
     the container address: an LXD forkproxy maps `host:13000 → container:3000`, so the upstream is
     `127.0.0.1:13000`.
+- **If authentik is selected** — the authentik issuer can be separate
+  (`GLA_AUTHENTIK_ISSUER_URL=https://idp.example/application/o/gla/`), but the registered redirect URI must
+  be on GLA's public base, for example
+  `GLA_AUTHENTIK_REDIRECT_URI=https://gla.example/team-a/auth/callback`. Caddy routes that callback to GLA,
+  not to authentik, so the GLA grant stays on GLA's origin.
+
+In every shape, Caddy transports HTTP and WebSocket bytes; it does not authorize a handoff. The Access Gateway
+remains the authorization membrane for grants, recipients, assurance policy, and mounted routes.
 
 ## How to add it
 

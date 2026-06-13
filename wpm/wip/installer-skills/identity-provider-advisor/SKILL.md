@@ -79,6 +79,11 @@ Exactly one decision drives this bundle: **in-tree WebAuthn (the default) vs. de
   to `webauthn`) — a degradation the operator must be **warned** of. The bundle's verify step proves the emitted
   `amr` against the running instance; the real passkey → `webauthn` browser round-trip is an honest deploy-time
   deferral.
+- For authentik routing, keep two URLs distinct: `GLA_AUTHENTIK_ISSUER_URL` is the authentik origin the adapter
+  dials (for example `https://idp.example/application/o/gla/`), while `GLA_AUTHENTIK_REDIRECT_URI` is a
+  GLA-served callback under `GLA_PUBLIC_BASE_URL` (for example
+  `https://gla.example/team-a/auth/callback` when `GLA_PUBLIC_BASE_URL=https://gla.example/team-a/`). The
+  redirect URI must not point at authentik and must not carry the GLA grant.
 
 ## How to add it
 
