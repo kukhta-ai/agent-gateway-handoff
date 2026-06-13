@@ -102,6 +102,12 @@ Implement `AuthProviderPort` behind a new adapter package and wire it only from 
 
 The installer/doctor path must prove the provider can satisfy the selected `GLA_AUTH_ASSURANCE_POLICY`: default `phishing-resistant` requires passkey/phishing-resistant evidence; `password-permitted` is the explicit fallback profile. Required tests are: adapter evidence mapping, invalid/unknown profile diagnostics, gateway handoff/reuse decisions against the common policy, and a boundary check showing `packages/gateway` contains no provider-specific route logic or raw provider claim checks.
 
+For authentik deployments, the doctor evidence includes redacted `loginMethodProofs[]` for password, passkey/WebAuthn,
+and configured external/social/enterprise sources. Those records are operator diagnostics over provider-neutral
+facts: safe claim labels live under `evidence`, stable subject proof under `subjectStable`, and mapping output under
+`authStrength` / `assuranceLevel`. Gateway authorization still consumes only the common assurance result; it must not
+branch on authentik stages, source ids, `amr`, `acr`, or `gla_uv`.
+
 ## Related
 
 `access-gateway.md` (the user's enforcement point), `agent-bridge.md` (the agent's enforcement point), `capability-service.md`, `admission-and-policy.md` (the policy decision point), `catalog.md` (`AuthorityProfile` and Auth Provider plugins).

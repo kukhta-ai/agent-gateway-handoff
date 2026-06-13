@@ -93,6 +93,42 @@ const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
   optionalRecipientChoices: [
     { id: "primary-credential", choices: ["password", "webauthn-passkey", "oauth:github"] },
   ],
+  loginMethodProofs: [
+    {
+      method: "password",
+      kind: "password",
+      stage: "gla-password-prompt",
+      status: "verified",
+      authStrength: "password",
+      assuranceLevel: "password",
+      evidence: { amr: ["pwd"] },
+    },
+    {
+      method: "webauthn-passkey",
+      kind: "webauthn-passkey",
+      stage: "gla-webauthn-setup",
+      status: "verified",
+      authStrength: "webauthn",
+      assuranceLevel: "phishing-resistant",
+      evidence: {
+        amr: ["swk"],
+        gla_uv: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
+    },
+    {
+      method: "oauth:github",
+      kind: "external-source",
+      source: "github-oauth",
+      status: "verified",
+      authStrength: "password",
+      assuranceLevel: "password",
+      subjectStable: true,
+      evidence: { source: "github-oauth", subjectMode: "stable" },
+    },
+  ],
 });
 const AUTHENTIK_EDGE_GUARD_ROLES_JSON = JSON.stringify([
   {
@@ -753,6 +789,14 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         credentialSetupStages?: Array<{ method: string }>;
         externalSources?: Array<{ kind: string; name: string }>;
         optionalRecipientChoices?: Array<{ choices: string[] }>;
+        loginMethodProofs?: Array<{
+          method: string;
+          status: string;
+          authStrength?: string;
+          assuranceLevel?: string;
+          evidence?: Record<string, unknown>;
+          subjectStable?: boolean;
+        }>;
       };
       deploymentRoles?: Array<{
         role?: string;
@@ -775,6 +819,24 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     expect(body.enrollmentPolicy?.optionalRecipientChoices?.[0]?.choices).toContain(
       "webauthn-passkey",
     );
+    expect(body.enrollmentPolicy?.loginMethodProofs?.map((p) => `${p.method}:${p.status}`)).toEqual(
+      ["password:verified", "webauthn-passkey:verified", "oauth:github:verified"],
+    );
+    const passkeyProof = body.enrollmentPolicy?.loginMethodProofs?.find(
+      (p) => p.method === "webauthn-passkey",
+    );
+    expect(passkeyProof?.authStrength).toBe("webauthn");
+    expect(passkeyProof?.assuranceLevel).toBe("phishing-resistant");
+    expect(passkeyProof?.evidence).toMatchObject({
+      amr: ["swk"],
+      gla_uv: true,
+      recipientBound: true,
+      replayResistant: true,
+    });
+    expect(
+      body.enrollmentPolicy?.loginMethodProofs?.find((p) => p.method === "oauth:github")
+        ?.subjectStable,
+    ).toBe(true);
     expect(body.bindingSemantics?.providerAccount).toMatch(/not a GLA enrollment/i);
     expect(body.deploymentRoles?.map((r) => r.role)).toEqual([
       "authentik-forward-auth",

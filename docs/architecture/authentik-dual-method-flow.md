@@ -276,6 +276,12 @@ The flow is designed for three cases (the page + authentik render these; GLA gat
   session opens; under the default `phishing-resistant` policy they are **refused** with the catchable "did not
   satisfy the selected auth assurance policy" message (`§4`) — the design lets the *operator* decide per deployment whether
   the password fallback is acceptable, by setting the policy.
+- **A password-only authentik screen.** This is an operator diagnostic, not gateway behavior. It means the running
+  authentik application did not present a usable passkey/source choice for that recipient at that moment, commonly
+  because the Identification flow, WebAuthn validation stage, browser/HTTPS conditions, resident credential/user
+  enrollment, source attachment, scope/property mapping, or `gla_uv` evidence emission is incomplete. `gla auth
+  diagnostics` should report this through `loginMethodProofs[]`; the gateway still only gates the returned
+  provider-neutral assurance against `GLA_AUTH_ASSURANCE_POLICY`.
 - **A failed attempt.** A cancelled/failed authentik login, an authentik error, or **no valid `id_token`**
   (bad signature / wrong `nonce` / expired / `sub` mismatch / token-exchange failure) yields **`ok:false`**
   from `verifyAssertion` → the gateway's `auth.insufficient` **catchable refusal** (the same "Verification was
