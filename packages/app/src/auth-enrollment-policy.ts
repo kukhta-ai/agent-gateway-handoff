@@ -72,6 +72,26 @@ export interface EnrollmentChoiceGroup {
   required?: boolean;
 }
 
+/** Provider-extensible deployment-role evidence for operator diagnostics. */
+export interface AuthDeploymentRole {
+  /** Open role string, e.g. `authentik-forward-auth`, `gla-oidc-provider`, or future provider roles. */
+  role: string;
+  /** Optional provider name associated with this role. */
+  provider?: string;
+  /** Optional mode, e.g. `forward-auth`, `proxy`, `oidc-provider`. */
+  mode?: string;
+  /** Human label for diagnostics. */
+  label?: string;
+  /** Owner of this role, if known from deployment receipts. */
+  owner?: string;
+  /** Public surface/orientation this role protects or serves. */
+  publicSurface?: string;
+  /** Whether this role is optional defense-in-depth rather than a required GLA auth dependency. */
+  optional?: boolean;
+  /** Sanitized provider-local evidence names, never raw credentials or tokens. */
+  providerEvidence?: Record<string, unknown>;
+}
+
 /**
  * Provider-extensible declaration of the active enrollment method policy. It is deployment evidence: GLA uses it
  * for operator diagnostics and installer/doctor checks, while runtime enforcement still reads provider facts.
@@ -101,8 +121,36 @@ export interface AuthEnrollmentMethodPolicy {
   requiredMethods: string[];
   /** Optional recipient choices, limited to the operator-configured choices in this policy. */
   optionalRecipientChoices: EnrollmentChoiceGroup[];
+  /** Deployment-role evidence from installer/operator receipts. */
+  deploymentRoles?: AuthDeploymentRole[];
   /** Operator notes from installer verification. */
   notes?: string[];
+}
+
+/** Redacted deployment-role diagnostic with recognized semantics for known authentik roles. */
+export interface AuthDeploymentRoleDiagnostic {
+  role: string;
+  provider?: string;
+  mode?: string;
+  label?: string;
+  owner?: string;
+  publicSurface?: string;
+  optional: boolean;
+  providerEvidence?: Record<string, unknown>;
+  /** Open diagnostic string: known roles are recognized, future roles remain `other` until taught. */
+  recognizedRole: string;
+  /** Operator-facing authorization meaning; this is diagnostic orientation, not enforcement state. */
+  authorization: string;
+  /** Short explanation of what this role does and does not authorize. */
+  note: string;
+}
+
+/** Operator-visible edge-guard summary for deployment-shape mistakes. */
+export interface AuthEdgeGuardDiagnostic {
+  summary: string;
+  outerGuards: AuthDeploymentRoleDiagnostic[];
+  glaOidcProvider: string;
+  authorizationSemantics: string;
 }
 
 /** Operator-visible diagnostic read model for the active auth/enrollment configuration. */
@@ -110,6 +158,8 @@ export interface AuthDiagnostics {
   authProvider: AuthProviderKind;
   authAssuranceProfile: AuthAssuranceProfile;
   enrollmentPolicy: AuthEnrollmentMethodPolicy;
+  deploymentRoles: AuthDeploymentRoleDiagnostic[];
+  edgeGuard: AuthEdgeGuardDiagnostic;
   recipientBinding?: AuthRecipientBindingDiagnostic;
   summary: string;
   concerns: string[];
@@ -238,7 +288,35 @@ export function parseAuthEnrollmentPolicyJson(
   if (notes.length > 0) {
     policy.notes = notes;
   }
+  const deploymentRoles = arrayValue(obj, "deploymentRoles").map((item, i) =>
+    deploymentRoleValue(item, `deploymentRoles[${i}]`),
+  );
+  if (deploymentRoles.length > 0) {
+    policy.deploymentRoles = deploymentRoles;
+  }
   return policy;
+}
+
+/** Parse JSON deployment-role evidence from env/WPM receipt data. */
+export function parseAuthDeploymentRolesJson(json: string): AuthDeploymentRole[] {
+  rejectPlaceholders("auth deployment roles", json);
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    throw new Error("auth deployment roles JSON is not valid JSON");
+  }
+  rejectPlaceholders("auth deployment roles", value);
+  if (Array.isArray(value)) {
+    return value.map((item, i) => deploymentRoleValue(item, `auth deployment roles[${i}]`));
+  }
+  const obj = objectValue(value, "auth deployment roles");
+  if (typeof obj.role === "string") {
+    return [deploymentRoleValue(obj, "auth deployment roles")];
+  }
+  return arrayValue(obj, "deploymentRoles").map((item, i) =>
+    deploymentRoleValue(item, `deploymentRoles[${i}]`),
+  );
 }
 
 /** Produce the operator diagnostic for auth provider, enrollment policy, and selected assurance profile. */
@@ -246,6 +324,7 @@ export function authEnrollmentDiagnostics(opts: {
   authProvider?: AuthProviderKind;
   authAssuranceProfile?: AuthAssuranceProfile;
   enrollmentPolicy?: AuthEnrollmentMethodPolicy;
+  deploymentRoles?: AuthDeploymentRole[];
 }): AuthDiagnostics {
   const authProvider = opts.authProvider ?? "webauthn";
   const authAssuranceProfile = opts.authAssuranceProfile ?? DEFAULT_AUTH_ASSURANCE_PROFILE;
@@ -254,6 +333,9 @@ export function authEnrollmentDiagnostics(opts: {
     (authProvider === "webauthn"
       ? defaultWebauthnEnrollmentPolicy()
       : undeclaredDelegatedEnrollmentPolicy(authProvider));
+  const deploymentRoles = opts.deploymentRoles ?? enrollmentPolicy.deploymentRoles ?? [];
+  const deploymentRoleDiagnostics = deploymentRoles.map(deploymentRoleDiagnostic);
+  const edgeGuard = edgeGuardDiagnostic(deploymentRoleDiagnostics, authProvider);
   const concerns: string[] = [];
   const actions: string[] = [];
 
@@ -349,6 +431,21 @@ export function authEnrollmentDiagnostics(opts: {
     );
   }
 
+  const authentikOuterGuards = deploymentRoleDiagnostics.filter(isAuthentikOuterGuardDiagnostic);
+  if (authentikOuterGuards.length > 0 && authProvider !== "authentik") {
+    concerns.push(
+      `authentik proxy/forward-auth is declared as an optional outer proxy, but selected auth provider "${authProvider}" means the outer proxy does not perform GLA handoff step-up`,
+    );
+    actions.push(
+      "Set GLA_AUTH_PROVIDER=authentik with GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET, and GLA_AUTHENTIK_REDIRECT_URI for delegated OIDC/callback step-up, or intentionally keep WebAuthn and treat authentik proxy/forward-auth as defense-in-depth only.",
+    );
+  }
+  if (authentikOuterGuards.length > 0 && authProvider === "authentik") {
+    actions.push(
+      "GLA still verifies handoff/enrollment grants through the Access Gateway; proxy session alone cannot bypass GLA Access Gateway authorization.",
+    );
+  }
+
   if (actions.length === 0) {
     actions.push("No immediate auth enrollment action required by the declared policy.");
   }
@@ -357,7 +454,9 @@ export function authEnrollmentDiagnostics(opts: {
     authProvider,
     authAssuranceProfile,
     enrollmentPolicy: redactEnrollmentPolicy(enrollmentPolicy),
-    summary: safeText(summarizePolicy(enrollmentPolicy, authAssuranceProfile)),
+    deploymentRoles: deploymentRoleDiagnostics,
+    edgeGuard,
+    summary: safeText(summarizePolicy(enrollmentPolicy, authAssuranceProfile, deploymentRoles)),
     concerns: concerns.map(safeText),
     actions: actions.map(safeText),
     bindingSemantics: {
@@ -419,10 +518,12 @@ function recipientBindingFromRecord(
 function summarizePolicy(
   policy: AuthEnrollmentMethodPolicy,
   profile: AuthAssuranceProfile,
+  deploymentRoles: AuthDeploymentRole[] = policy.deploymentRoles ?? [],
 ): string {
   const credentials = policy.credentialSetupStages.map((s) => s.method);
   const sources = policy.externalSources.map((s) => `${s.kind}:${s.name}`);
   const choices = policy.optionalRecipientChoices.map((g) => `${g.id}=[${g.choices.join("|")}]`);
+  const roles = deploymentRoles.map((r) => r.role);
   return [
     `${policy.provider} enrollment policy ${policy.declared ? "declared" : "undeclared"}`,
     `assurance=${profile}`,
@@ -430,6 +531,7 @@ function summarizePolicy(
     `credentials=${credentials.length > 0 ? credentials.join(",") : "none"}`,
     `sources=${sources.length > 0 ? sources.join(",") : "none"}`,
     `choices=${choices.length > 0 ? choices.join(",") : "none"}`,
+    `deploymentRoles=${roles.length > 0 ? roles.join(",") : "none"}`,
   ].join("; ");
 }
 
@@ -593,6 +695,25 @@ function choiceGroupValue(item: unknown, path: string): EnrollmentChoiceGroup {
   return group;
 }
 
+function deploymentRoleValue(item: unknown, path: string): AuthDeploymentRole {
+  const obj = objectValue(item, path);
+  const role: AuthDeploymentRole = {
+    role: requiredString(obj, "role", path),
+  };
+  assignOptional(role, "provider", stringValue(obj, "provider"));
+  assignOptional(role, "mode", stringValue(obj, "mode"));
+  assignOptional(role, "label", stringValue(obj, "label"));
+  assignOptional(role, "owner", stringValue(obj, "owner"));
+  assignOptional(role, "publicSurface", stringValue(obj, "publicSurface"));
+  assignOptional(role, "optional", booleanValue(obj, "optional"));
+  assignOptional(
+    role,
+    "providerEvidence",
+    recordValue(obj.providerEvidence, `${path}.providerEvidence`),
+  );
+  return role;
+}
+
 function objectValue(value: unknown, path: string): PlainObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${path} must be an object`);
@@ -704,6 +825,10 @@ function redactEnrollmentPolicy(policy: AuthEnrollmentMethodPolicy): AuthEnrollm
   if (notes !== undefined && notes.length > 0) {
     redacted.notes = notes;
   }
+  const deploymentRoles = policy.deploymentRoles?.map(redactDeploymentRole);
+  if (deploymentRoles !== undefined && deploymentRoles.length > 0) {
+    redacted.deploymentRoles = deploymentRoles;
+  }
   return redacted;
 }
 
@@ -753,6 +878,128 @@ function redactChoiceGroup(group: EnrollmentChoiceGroup): EnrollmentChoiceGroup 
   };
   assignOptional(redacted, "required", group.required);
   return redacted;
+}
+
+function redactDeploymentRole(role: AuthDeploymentRole): AuthDeploymentRole {
+  const redacted: AuthDeploymentRole = {
+    role: safeText(role.role),
+  };
+  assignOptional(redacted, "provider", optionalSafeText(role.provider));
+  assignOptional(redacted, "mode", optionalSafeText(role.mode));
+  assignOptional(redacted, "label", optionalSafeText(role.label));
+  assignOptional(redacted, "owner", optionalSafeText(role.owner));
+  assignOptional(redacted, "publicSurface", optionalSafeText(role.publicSurface));
+  assignOptional(redacted, "optional", role.optional);
+  assignOptional(redacted, "providerEvidence", redactEvidence(role.providerEvidence));
+  return redacted;
+}
+
+function deploymentRoleDiagnostic(role: AuthDeploymentRole): AuthDeploymentRoleDiagnostic {
+  const redacted = redactDeploymentRole(role);
+  const recognizedRole = recognizedDeploymentRole(role);
+  const diagnostic: AuthDeploymentRoleDiagnostic = {
+    role: redacted.role,
+    optional: redacted.optional ?? false,
+    recognizedRole,
+    authorization: deploymentRoleAuthorization(recognizedRole),
+    note: deploymentRoleNote(recognizedRole),
+  };
+  assignOptional(diagnostic, "provider", redacted.provider);
+  assignOptional(diagnostic, "mode", redacted.mode);
+  assignOptional(diagnostic, "label", redacted.label);
+  assignOptional(diagnostic, "owner", redacted.owner);
+  assignOptional(diagnostic, "publicSurface", redacted.publicSurface);
+  assignOptional(diagnostic, "providerEvidence", redacted.providerEvidence);
+  return diagnostic;
+}
+
+function recognizedDeploymentRole(role: AuthDeploymentRole): string {
+  const text = [role.role, role.provider, role.mode, role.label]
+    .filter((part): part is string => typeof part === "string")
+    .join(" ")
+    .toLowerCase();
+  const provider = role.provider?.toLowerCase();
+  const authentikish = provider === "authentik" || text.includes("authentik");
+  if (authentikish && /forward[-_\s]?auth|forwardauth/.test(text)) {
+    return "authentik-forward-auth";
+  }
+  if (authentikish && /proxy|outpost/.test(text)) {
+    return "authentik-proxy";
+  }
+  if (authentikish && /oidc|openid|auth[-_\s]?provider|step[-_\s]?up/.test(text)) {
+    return "authentik-oidc-provider";
+  }
+  return "other";
+}
+
+function deploymentRoleAuthorization(recognizedRole: string): string {
+  if (recognizedRole === "authentik-forward-auth" || recognizedRole === "authentik-proxy") {
+    return "optional outer edge guard; not GLA handoff authorization";
+  }
+  if (recognizedRole === "authentik-oidc-provider") {
+    return "delegated OIDC step-up provider when selected by GLA_AUTH_PROVIDER=authentik";
+  }
+  return "operator orientation only; no authorization semantics implied";
+}
+
+function deploymentRoleNote(recognizedRole: string): string {
+  if (recognizedRole === "authentik-forward-auth" || recognizedRole === "authentik-proxy") {
+    return "Optional outer protection only; GLA Access Gateway still enforces handoff/enrollment grants.";
+  }
+  if (recognizedRole === "authentik-oidc-provider") {
+    return "Provider supplies OIDC step-up evidence when selected; GLA still verifies callback state and grants.";
+  }
+  return "Reported for deployment orientation; future role strings do not change GLA authorization by themselves.";
+}
+
+function edgeGuardDiagnostic(
+  deploymentRoles: AuthDeploymentRoleDiagnostic[],
+  authProvider: AuthProviderKind,
+): AuthEdgeGuardDiagnostic {
+  const outerGuards = deploymentRoles.filter(isAuthentikOuterGuardDiagnostic);
+  const declaredOidc = deploymentRoles.some(
+    (role) => role.recognizedRole === "authentik-oidc-provider",
+  );
+  const outerSummary =
+    outerGuards.length > 0
+      ? `${outerGuards.map(edgeGuardSummaryName).join(", ")} outer guard declared`
+      : "no authentik outer guard declared";
+  const oidcSummary =
+    authProvider === "authentik"
+      ? "GLA OIDC provider selected"
+      : declaredOidc
+        ? "GLA OIDC provider role declared but not selected"
+        : "GLA OIDC provider not selected";
+  return {
+    summary: safeText(
+      `${outerSummary}; ${oidcSummary}; GLA Access Gateway verifies handoff/enrollment grants`,
+    ),
+    outerGuards,
+    glaOidcProvider:
+      authProvider === "authentik"
+        ? "selected"
+        : declaredOidc
+          ? "declared-not-selected"
+          : "not-selected",
+    authorizationSemantics:
+      "authentik proxy/forward-auth can be an optional outer guard only; GLA handoff/enrollment authorization remains grant-bound inside the Access Gateway.",
+  };
+}
+
+function edgeGuardSummaryName(role: AuthDeploymentRoleDiagnostic): string {
+  if (role.recognizedRole === "authentik-forward-auth") {
+    return "authentik forward-auth";
+  }
+  if (role.recognizedRole === "authentik-proxy") {
+    return "authentik proxy";
+  }
+  return role.role;
+}
+
+function isAuthentikOuterGuardDiagnostic(role: AuthDeploymentRoleDiagnostic): boolean {
+  return (
+    role.recognizedRole === "authentik-forward-auth" || role.recognizedRole === "authentik-proxy"
+  );
 }
 
 function assignOptional<T extends object, K extends keyof T>(

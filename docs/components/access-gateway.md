@@ -26,6 +26,11 @@ The Access Gateway is the user's policy-enforcement point and the only door open
 
 It does **not** mint or revoke capabilities (Capability service). It does **not** program its own routes (Route controller). It does **not** own authentication (Identity + Auth) — it *triggers* it. It does **not** verify the *agent* — that is the Bridge side.
 
+It also does **not** delegate handoff authorization to an outer reverse proxy, including authentik proxy or
+forward-auth. Such a proxy may be deployed as defense-in-depth before traffic reaches GLA, but proxy headers,
+cookies, or an authentik browser session are not GLA grants and cannot satisfy the recipient caveat, route
+scope, TTL/revocation, enrollment, or assurance checks the Access Gateway owns.
+
 ## Entities & data
 
 Grant capabilities (verified), `RevocationEntry` cache, `Route` (consumed).
