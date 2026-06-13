@@ -342,7 +342,16 @@ describe("REAL two-handoff end-to-end (scenario-01 Phases 9–14; Slice 6 deltas
           // The gateway proxies the human's WS upgrade to the stub noVNC upstream (real noVNC gated for hermes-1).
           entrypoint: {
             async open() {
-              return { internalEndpoint: upstream.endpoint };
+              return {
+                resourceId: "entrypoint:fake-view:two-handoff",
+                provider: "fake-view",
+                client: { kind: "provider-asset", ref: "fake-viewer" },
+                transport: {
+                  kind: "reverse-proxy" as const,
+                  protocol: "websocket",
+                  upstream: upstream.endpoint,
+                },
+              };
             },
           },
           completion: { pollMs: 100 }, // the REAL url-watcher reads the capsule's CDP /json active URL

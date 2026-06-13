@@ -190,15 +190,16 @@ export interface IdentityStepUpPort {
 export type RequiredAuthStrength = Exclude<AuthStrength, "none">;
 
 /**
- * A route programmed on the gateway by the Route controller (Slice 4b). The gateway is the {@link RouteGatewayPort}
- * the controller programs: it exposes `path` publicly, verifies the bound grant statelessly on every request + WS
- * upgrade, and proxies an AUTHORIZED WS upgrade to `internalEndpoint` (the capsule's noVNC human entrypoint) — and
- * nothing else (GLA-038/039 AC#1). A route is reachable ONLY within an open authorized window (GLA-039 AC#2).
+ * A route programmed on the gateway by the Route controller (Slice 4b). Authorization state (path, grant,
+ * recipient/session) is separate from the reverse-proxy transport binding. The gateway verifies the bound grant
+ * statelessly on every request + upgrade; only after authorization does the transport binding get used.
  */
 interface ProgrammedRoute {
   routeId: RouteId;
   path: string;
-  internalEndpoint: string;
+  entrypointResourceId: string;
+  client: HumanEntrypointClientBinding;
+  transport: ReverseProxyTransportBinding;
   boundGrantId: CapabilityId;
   sessionId: SessionId;
 }
@@ -207,13 +208,31 @@ interface RetiredRoute extends ProgrammedRoute {
   retiredAt: number;
 }
 
-/** What a `mount` request from the Route controller carries (mirrors `@gla/route`'s RouteMount — kept structural). */
-export interface RouteMountRequest {
+interface HumanEntrypointClientBinding {
+  kind: string;
+  ref?: string;
+  bootstrap?: Record<string, unknown>;
+}
+
+interface ReverseProxyTransportBinding {
+  kind: "reverse-proxy";
+  protocol: string;
+  upstream: string;
+}
+
+interface RouteAuthorizationMount {
   routeId: RouteId;
   path: string;
-  internalEndpoint: string;
   boundGrantId: CapabilityId;
   sessionId: SessionId;
+  entrypointResourceId: string;
+}
+
+/** What a `mount` request from the Route controller carries (mirrors `@gla/route`'s RouteMount — kept structural). */
+export interface RouteMountRequest {
+  authorization: RouteAuthorizationMount;
+  transport: ReverseProxyTransportBinding;
+  client: HumanEntrypointClientBinding;
 }
 
 /** Construction options for the Access Gateway. */
@@ -397,8 +416,8 @@ export class AccessGateway {
     const server = createServer((req, res) => {
       void this.handle(req, res);
     });
-    // The WS upgrade is the human side of the two-actor capsule: verify the grant + require the bound identity,
-    // then proxy the AUTHORIZED upgrade to the capsule's noVNC endpoint and nothing else (GLA-038/039 AC#1).
+    // The upgrade is the human side of the two-actor capsule: verify the grant + require the bound identity,
+    // then proxy the AUTHORIZED upgrade to the mounted entrypoint transport and nothing else (GLA-038/039 AC#1).
     server.on("upgrade", (req, socket, head) => {
       this.handleUpgrade(req, socket as Socket, head);
     });
@@ -467,8 +486,13 @@ export class AccessGateway {
    * statelessly and requires the bound identity. Replacing an existing route on the same path re-binds it.
    */
   async mount(route: RouteMountRequest): Promise<void> {
-    this.retiredRoutes.delete(route.path);
-    this.routes.set(route.path, { ...route });
+    validateTransportBinding(route.transport);
+    this.retiredRoutes.delete(route.authorization.path);
+    this.routes.set(route.authorization.path, {
+      ...route.authorization,
+      transport: route.transport,
+      client: route.client,
+    });
   }
 
   /**
@@ -811,6 +835,7 @@ export class AccessGateway {
           route.path,
           String(verified.recipient),
           this.publicPath(route.path),
+          route.client,
         ),
       );
       return;
@@ -823,6 +848,7 @@ export class AccessGateway {
         authOptions: this.publicPath("/handoff/auth/options"),
         authVerify: this.publicPath("/handoff/auth/verify"),
         stream: this.publicPath(route.path),
+        entrypointClient: route.client,
       }),
     );
   }
@@ -960,8 +986,8 @@ export class AccessGateway {
   /**
    * Handle a WebSocket upgrade on a handoff route (the human reaching the capsule surface — GLA-038/039). VERIFY the
    * recipient-bound grant statelessly AND require that the bound recipient already authenticated to the required
-   * strength (the grant is in the authorized set). Only an AUTHORIZED, in-window upgrade is proxied to the capsule's
-   * noVNC endpoint — and NOTHING else (GLA-038 AC#1). An unverified/expired/revoked grant, an unknown route, or an
+   * strength (the grant is in the authorized set). Only an AUTHORIZED, in-window upgrade is proxied to the mounted
+   * transport binding — and NOTHING else (GLA-038 AC#1). An unverified/expired/revoked grant, an unknown route, or an
    * un-authorized grant is refused (the connection resolves onward to nothing — GLA-035 AC#2/#3, GLA-039 AC#2).
    */
   private handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void {
@@ -1015,7 +1041,7 @@ export class AccessGateway {
           return;
         }
       }
-      // AUTHORIZED, in-window: proxy the WS upgrade to the capsule's noVNC endpoint and NOTHING else.
+      // AUTHORIZED, in-window: proxy the upgrade to the mounted transport binding and NOTHING else.
       this.proxyUpgrade(req, socket, head, route, grantId);
     } catch {
       this.refuseUpgrade(socket, 500);
@@ -1289,10 +1315,10 @@ export class AccessGateway {
   }
 
   /**
-   * Proxy an AUTHORIZED WS upgrade to the capsule's internal noVNC endpoint — and nothing else (GLA-038/039 AC#1).
-   * Opens a raw TCP connection to the noVNC host:port, replays the WebSocket handshake (the upgrade request line +
-   * headers) verbatim, then pipes bytes bidirectionally. The live socket is tracked per grant so a revoke/expiry can
-   * force-close it (GLA-039 AC#3). If the upstream cannot be reached, the client upgrade is refused (502).
+   * Proxy an AUTHORIZED upgrade to the route's reverse-proxy transport binding — and nothing else (GLA-038/039
+   * AC#1). Opens a raw TCP connection to the upstream host:port, replays the WebSocket handshake (the upgrade request
+   * line + headers) verbatim, then pipes bytes bidirectionally. The live socket is tracked per grant so a revoke/
+   * expiry can force-close it (GLA-039 AC#3). If the upstream cannot be reached, the client upgrade is refused (502).
    */
   private proxyUpgrade(
     req: IncomingMessage,
@@ -1301,7 +1327,11 @@ export class AccessGateway {
     route: ProgrammedRoute,
     grantId: CapabilityId,
   ): void {
-    const target = parseWsEndpoint(route.internalEndpoint);
+    if (route.transport.kind !== "reverse-proxy" || route.transport.protocol !== "websocket") {
+      this.refuseUpgrade(clientSocket, 502);
+      return;
+    }
+    const target = parseWsEndpoint(route.transport.upstream);
     if (target === undefined) {
       this.refuseUpgrade(clientSocket, 502);
       return;
@@ -1343,7 +1373,7 @@ export class AccessGateway {
       upstream.removeAllListeners("timeout");
       this.armIdleTimeout(clientSocket, upstream, cleanup);
 
-      // Replay ONLY the WS-handshake-relevant headers to the upstream (the capsule-internal noVNC server completes
+      // Replay ONLY the WS-handshake-relevant headers to the upstream (the capsule-internal server completes
       // the handshake). Defense-in-depth (#2): client `Cookie`/`Authorization`/`X-Forwarded-*`/other hop-by-hop
       // headers are DROPPED so the internal endpoint never sees untrusted client headers; `Host` is set to the
       // upstream, not the client's. There is no request-controlled target and node:http already blocks CRLF, so
@@ -1354,7 +1384,7 @@ export class AccessGateway {
       if (head !== undefined && head.length > 0) {
         upstream.write(head);
       }
-      // Pipe bytes both ways — the gateway is a transparent conduit to the noVNC stream and NOTHING else. Every
+      // Pipe bytes both ways — the gateway is a transparent conduit to the mounted stream and NOTHING else. Every
       // byte resets the idle timeout (Node refreshes `setTimeout` on activity), so a LIVE stream is never killed.
       upstream.pipe(clientSocket);
       clientSocket.pipe(upstream);
@@ -1446,11 +1476,33 @@ export class AccessGateway {
   }
 }
 
-/** Parse a `ws://host:port/path` (or `http://…`) endpoint into `{ host, port, path }`, or undefined if malformed. */
+function validateTransportBinding(transport: ReverseProxyTransportBinding): void {
+  if (transport.kind !== "reverse-proxy") {
+    throw layerError("reverse-proxy-transport", `unsupported transport kind: ${transport.kind}`);
+  }
+  if (typeof transport.upstream !== "string" || transport.upstream.length === 0) {
+    throw layerError("reverse-proxy-transport", "missing reverse-proxy upstream");
+  }
+  if (transport.protocol === "websocket" && parseWsEndpoint(transport.upstream) === undefined) {
+    throw layerError("reverse-proxy-transport", "invalid websocket upstream");
+  }
+}
+
+function layerError(layer: string, message: string): Error {
+  const err = new Error(message) as Error & { layer: string; detail: { layer: string } };
+  err.layer = layer;
+  err.detail = { layer };
+  return err;
+}
+
+/** Parse a websocket-compatible endpoint into `{ host, port, path }`, or undefined if malformed. */
 function parseWsEndpoint(
   endpoint: string,
 ): { host: string; port: number; path: string } | undefined {
   try {
+    if (!/^wss?:/i.test(endpoint)) {
+      return undefined;
+    }
     // Normalize ws/wss to http/https so the URL parser accepts it.
     const normalized = endpoint.replace(/^ws:/i, "http:").replace(/^wss:/i, "https:");
     const u = new URL(normalized);

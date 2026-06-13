@@ -23,7 +23,25 @@
 //   • the browser-side redirect/return path is exercised end-to-end by the GLA-076 E2E; the gateway tests drive the
 //     UNCHANGED verify route in-process.
 
-/** Same-origin public paths the handoff page calls back into. */
+/** Browser-client requirements declared by a human-entrypoint provider. */
+export interface HandoffEntrypointClient {
+  readonly kind: string;
+  readonly ref?: string;
+  readonly bootstrap?: Record<string, unknown>;
+}
+
+const DEFAULT_HANDOFF_CLIENT: HandoffEntrypointClient = { kind: "gateway-page", ref: "handoff" };
+
+function jsonScriptData(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/&/g, "\\u0026")
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+/** Same-origin public paths and client binding the handoff page calls back into. */
 export interface HandoffPagePaths {
   /** Same-origin path for the step-up options request. */
   readonly authOptions: string;
@@ -31,6 +49,8 @@ export interface HandoffPagePaths {
   readonly authVerify: string;
   /** Same-origin path for the WebSocket upgrade route as seen by the recipient's browser. */
   readonly stream: string;
+  /** Provider-declared browser-client binding for this entrypoint. */
+  readonly entrypointClient?: HandoffEntrypointClient;
 }
 
 const ROOT_HANDOFF_PATHS = (routePath: string): HandoffPagePaths => ({
@@ -51,14 +71,14 @@ export function handoffPageHtml(
   recipientLabel: string,
   paths: HandoffPagePaths = ROOT_HANDOFF_PATHS(routePath),
 ): string {
-  // JSON-encoded data island (safe: JSON.stringify escapes quotes; the values are a base64url token, an opaque
-  // path, and an opaque recipient ref — none containing `</script`).
-  const data = JSON.stringify({
+  // JSON-encoded data island. Escape HTML-significant bytes too: provider bootstrap metadata is not trusted.
+  const data = jsonScriptData({
     grant,
     path: routePath,
     streamPath: paths.stream,
     recipient: recipientLabel,
     paths,
+    client: paths.entrypointClient ?? DEFAULT_HANDOFF_CLIENT,
   });
   return `<!doctype html>
 <html lang="en">
@@ -131,7 +151,7 @@ export function handoffPageHtml(
     },
   });
 
-  // Open the noVNC stream over the gateway's authorized WS upgrade (the gateway proxies it to the capsule). ctx
+  // Open the entrypoint stream over the gateway's authorized WS upgrade (the gateway proxies it to the capsule). ctx
   // supplies the route path + grant (cfg for the in-page arm; the restored values on the redirect-return arm).
   const openStreamFor = (ctx) => {
     const c = ctx || cfg;
@@ -212,7 +232,7 @@ export function handoffPageHtml(
       // have no kind and fall through to the UNCHANGED in-page ceremony below.
       if (options && options.kind === "redirect") {
         // Preserve the grant/path SAME-ORIGIN across the top-level redirect (NOT in the redirect_uri the provider sees).
-        try { sessionStorage.setItem("gla.handoff", JSON.stringify({ grant: cfg.grant, path: cfg.path, streamPath: cfg.streamPath })); } catch (e) {}
+        try { sessionStorage.setItem("gla.handoff", JSON.stringify({ grant: cfg.grant, path: cfg.path, streamPath: cfg.streamPath, client: cfg.client })); } catch (e) {}
         say("Redirecting you to sign in…");
         // Navigate ONLY to the server-built authorizeUrl (operator config + fixed redirect_uri) — no request input.
         location.assign(options.authorizeUrl);
@@ -237,7 +257,7 @@ export function handoffPageHtml(
 
 /**
  * Render the handoff REUSED-AUTH page (scenario-01 Phase 12, GLA-050/051): the recipient's prior step-up is still
- * valid, so there is NO WebAuthn ceremony — the page opens the noVNC stream over the gateway's authorized WS upgrade
+ * valid, so there is NO WebAuthn ceremony — the page opens the entrypoint stream over the gateway's authorized WS upgrade
  * DIRECTLY (the gateway already authorized this grant by reuse). It is the second window with "auth still valid, no
  * re-prompt." The grant + path are embedded for the WS upgrade (still verified server-side). The recipient sees no
  * prompt — the session opens straight away.
@@ -247,8 +267,15 @@ export function handoffReusedPageHtml(
   routePath: string,
   recipientLabel: string,
   streamPath: string = routePath,
+  entrypointClient: HandoffEntrypointClient = DEFAULT_HANDOFF_CLIENT,
 ): string {
-  const data = JSON.stringify({ grant, path: routePath, streamPath, recipient: recipientLabel });
+  const data = jsonScriptData({
+    grant,
+    path: routePath,
+    streamPath,
+    recipient: recipientLabel,
+    client: entrypointClient,
+  });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -273,7 +300,7 @@ export function handoffReusedPageHtml(
   const cfg = JSON.parse(document.getElementById("handoff-data").textContent);
   const status = document.getElementById("status");
   const say = (msg, cls) => { status.textContent = msg; status.className = cls || ""; };
-  // No ceremony — auth was reused. Open the noVNC stream over the gateway's already-authorized WS upgrade directly.
+  // No ceremony — auth was reused. Open the entrypoint stream over the gateway's already-authorized WS upgrade.
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const url = proto + "//" + location.host + cfg.streamPath + "?grant=" + encodeURIComponent(cfg.grant);
   try {

@@ -22,6 +22,7 @@
 import {
   type CapabilityId,
   type HandoffWindow,
+  type HumanEntrypointBinding,
   type Route,
   type RouteId,
   type SessionId,
@@ -34,22 +35,28 @@ export const ROUTE_MODULE = "@gla/route" as const;
 /** Ring classification from the architecture baseline (informational). */
 export const ROUTE_RING = "core" as const;
 
-/**
- * A request to mount one grant-bound route on the edge (what {@link RouteGatewayPort.mount} consumes). The edge
- * exposes `path` publicly and proxies an authorized request to `internalEndpoint` (the capsule's human-entrypoint
- * address). A route is bound to EXACTLY one grant (`boundGrantId`); the edge force-closes its live WS on revoke.
- */
-export interface RouteMount {
+/** Authorization state for one public route. */
+export interface RouteAuthorizationMount {
   /** The route id (so unmount/force-close target exactly this route). */
   routeId: RouteId;
   /** The public path the edge exposes (the handoff link path). */
   path: string;
-  /** The capsule's internal human-entrypoint address the edge proxies an authorized request to. */
-  internalEndpoint: string;
   /** The grant this route is bound to (a route binds to exactly one grant — route-controller.md invariant). */
   boundGrantId: CapabilityId;
   /** The session this route serves (so the edge can reconcile / scope force-close by session). */
   sessionId: SessionId;
+  /** The provider-owned human-entrypoint resource exposed by this route. */
+  entrypointResourceId: string;
+}
+
+/**
+ * A request to mount one grant-bound route on the edge. Authorization route state and reverse-proxy transport state
+ * are deliberately separate so diagnostics can name which layer failed.
+ */
+export interface RouteMount {
+  authorization: RouteAuthorizationMount;
+  transport: HumanEntrypointBinding["transport"];
+  client: HumanEntrypointBinding["client"];
 }
 
 /**
@@ -105,15 +112,14 @@ export class RouteController {
   }
 
   /**
-   * Program a grant-bound route for an opening handoff window (GLA-033). Builds the {@link Route} (a fresh route
-   * id, the public `path`, the capsule's `internalEndpoint`, bound to the window's `grantId`), then mounts it on
-   * the edge. **No partial route (GLA-033 AC#4):** if the edge `mount` throws, the controller best-effort unmounts
-   * (rolls back any partial programming) and rethrows a TYPED `dependency.unavailable` — the gateway is left with
-   * NO route for this window, and the controller records none, so a retry starts clean.
+   * Program a grant-bound route for an opening handoff window (GLA-033). Builds authorization state (fresh route id,
+   * public `path`, bound grant, entrypoint resource) and carries the entrypoint's transport binding separately.
+   * **No partial route (GLA-033 AC#4):** if the edge `mount` throws, the controller best-effort unmounts and
+   * rethrows a typed `dependency.unavailable` with the failing layer identified.
    *
    * @param window           the opening window (its id keys the controller's record; its grant binds the route)
    * @param grantId          the grant capability id the route binds to (the window's recipient-bound grant)
-   * @param capsuleEntrypoint the capsule's internal human-entrypoint address the edge proxies to
+   * @param entrypoint        provider-neutral entrypoint resource + transport binding
    * @param path             the public path the edge exposes (defaults to the window's scope `/handoff/<sessionId>`)
    * @returns the programmed {@link Route} (so the session can pin it on the aggregate)
    * @throws GlaErrorException (`dependency.unavailable`) on an edge programming failure — NO partial route remains.
@@ -121,7 +127,7 @@ export class RouteController {
   async program(
     window: Pick<HandoffWindow, "id" | "sessionId">,
     grantId: CapabilityId,
-    capsuleEntrypoint: string,
+    entrypoint: HumanEntrypointBinding,
     path?: string,
   ): Promise<Route> {
     const routeId = this.newRouteId();
@@ -129,15 +135,21 @@ export class RouteController {
     const route: Route = {
       id: routeId,
       path: publicPath,
-      internalEndpoint: capsuleEntrypoint,
+      entrypointResourceId: entrypoint.resourceId,
+      client: entrypoint.client,
+      transport: entrypoint.transport,
       boundGrantId: grantId,
     };
     const mount: RouteMount = {
-      routeId,
-      path: publicPath,
-      internalEndpoint: capsuleEntrypoint,
-      boundGrantId: grantId,
-      sessionId: window.sessionId,
+      authorization: {
+        routeId,
+        path: publicPath,
+        boundGrantId: grantId,
+        sessionId: window.sessionId,
+        entrypointResourceId: entrypoint.resourceId,
+      },
+      transport: entrypoint.transport,
+      client: entrypoint.client,
     };
     try {
       await this.gateway.mount(mount);
@@ -149,9 +161,13 @@ export class RouteController {
       } catch {
         // The rollback is best-effort; the reconciler is the backstop that converges edge truth.
       }
-      const msg = e instanceof Error ? e.message : String(e);
-      throw glaError("dependency.unavailable", `route programming failed: ${msg}`, {
-        detail: { window: window.id, session: window.sessionId, cause: msg },
+      const detail = errorDetail(e);
+      throw glaError("dependency.unavailable", `route programming failed at ${detail.layer}`, {
+        detail: {
+          window: window.id,
+          session: window.sessionId,
+          layer: detail.layer,
+        },
       });
     }
     this.programmed.set(window.id, { ...route, sessionId: window.sessionId });
@@ -183,7 +199,9 @@ export class RouteController {
     return {
       id: r.id,
       path: r.path,
-      internalEndpoint: r.internalEndpoint,
+      entrypointResourceId: r.entrypointResourceId,
+      client: r.client,
+      transport: r.transport,
       boundGrantId: r.boundGrantId,
     };
   }
@@ -220,4 +238,18 @@ export class RouteController {
     }
     return unmounted;
   }
+}
+
+function errorDetail(e: unknown): { layer: string } {
+  if (e instanceof Error && typeof (e as { layer?: unknown }).layer === "string") {
+    return { layer: (e as unknown as { layer: string }).layer };
+  }
+  if (
+    typeof e === "object" &&
+    e !== null &&
+    typeof (e as { detail?: { layer?: unknown } }).detail?.layer === "string"
+  ) {
+    return { layer: (e as { detail: { layer: string } }).detail.layer };
+  }
+  return { layer: "access-gateway-authorization-route" };
 }

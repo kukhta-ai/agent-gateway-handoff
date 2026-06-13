@@ -13,6 +13,7 @@ import type {
   TaskId,
 } from "./brands.js";
 import type { Ref } from "./brands.js";
+import type { HumanEntrypointClientBinding, ReverseProxyTransportBinding } from "./ports.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // §1.1 Task — the multi-step goal
@@ -112,8 +113,12 @@ export interface Route {
   id: RouteId;
   /** The public path the gateway exposes. */
   path: string;
-  /** The capsule's human-entrypoint address. */
-  internalEndpoint: string;
+  /** Provider-neutral entrypoint resource this route exposes while the grant is live. */
+  entrypointResourceId: string;
+  /** Browser client requirements for this route's human-entrypoint provider. */
+  client: HumanEntrypointClientBinding;
+  /** Reverse-proxy transport binding, separated from grant/recipient authorization. */
+  transport: ReverseProxyTransportBinding;
   /** A route binds to exactly one grant. */
   boundGrantId: CapabilityId;
 }

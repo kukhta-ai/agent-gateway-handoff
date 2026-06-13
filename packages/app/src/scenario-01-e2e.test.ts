@@ -509,7 +509,16 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
           // The gateway proxies the human's WS upgrade to the stub noVNC upstream (real noVNC gated for hermes-1).
           entrypoint: {
             async open() {
-              return { internalEndpoint: upstream.endpoint };
+              return {
+                resourceId: "entrypoint:fake-view:scenario-01",
+                provider: "fake-view",
+                client: { kind: "provider-asset", ref: "fake-viewer" },
+                transport: {
+                  kind: "reverse-proxy" as const,
+                  protocol: "websocket",
+                  upstream: upstream.endpoint,
+                },
+              };
             },
           },
           completion: { pollMs: 100 }, // the REAL url-watcher reads the capsule's CDP /json active URL.

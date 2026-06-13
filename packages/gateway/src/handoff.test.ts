@@ -24,6 +24,7 @@ import type {
   SessionId,
 } from "@gla/kernel";
 import { afterEach, describe, expect, it } from "vitest";
+import { handoffPageHtml, handoffReusedPageHtml } from "./handoff-page.js";
 import {
   AccessGateway,
   type GatewayOptions,
@@ -41,6 +42,11 @@ const OUTER_PROXY_HEADERS = {
   "X-Outer-Proxy-User": "recipient@example.com",
   "X-Outer-Proxy-Groups": "gla-users",
   Cookie: "outer_proxy_session=outer-session",
+};
+const MALICIOUS_CLIENT = {
+  kind: "provider-asset",
+  ref: "evil",
+  bootstrap: { payload: "</script><script>globalThis.pwned=1</script>" },
 };
 
 /**
@@ -250,14 +256,25 @@ function blackholeEndpoint(): string {
   return "ws://192.0.2.1:9/";
 }
 
-function mountReq(endpoint: string, overrides: Partial<RouteMountRequest> = {}): RouteMountRequest {
+type MountReqOverrides = Partial<RouteMountRequest> & Partial<RouteMountRequest["authorization"]>;
+
+function mountReq(endpoint: string, overrides: MountReqOverrides = {}): RouteMountRequest {
+  const authorization: RouteMountRequest["authorization"] = {
+    routeId: overrides.routeId ?? ("route_1" as RouteId),
+    path: overrides.path ?? ROUTE_PATH,
+    boundGrantId: overrides.boundGrantId ?? GRANT_ID,
+    sessionId: overrides.sessionId ?? SESS,
+    entrypointResourceId: overrides.entrypointResourceId ?? "entrypoint:test-handoff",
+    ...overrides.authorization,
+  };
   return {
-    routeId: "route_1" as RouteId,
-    path: ROUTE_PATH,
-    internalEndpoint: endpoint,
-    boundGrantId: GRANT_ID,
-    sessionId: SESS,
-    ...overrides,
+    authorization,
+    transport: overrides.transport ?? {
+      kind: "reverse-proxy",
+      protocol: "websocket",
+      upstream: endpoint,
+    },
+    client: overrides.client ?? { kind: "gateway-page", ref: "handoff" },
   };
 }
 
@@ -337,6 +354,40 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     const html = await res.text();
     expect(html).toMatch(/Verify with passkey/);
     expect(html).toMatch(/navigator\.credentials\.get/);
+  });
+
+  it("embeds the provider-declared browser client binding in the handoff page contract", async () => {
+    const { base, gateway, close } = await bootHandoffGateway(
+      new StubSessionGrants(),
+      new StubStepUp(),
+    );
+    closers.push(close);
+    await gateway.mount(
+      mountReq("ws://127.0.0.1:1/", {
+        client: { kind: "provider-asset", ref: "fake-viewer", bootstrap: { mode: "test" } },
+      }),
+    );
+
+    const res = await fetch(`${base}${ROUTE_PATH}?grant=valid`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain(
+      '"client":{"kind":"provider-asset","ref":"fake-viewer","bootstrap":{"mode":"test"}}',
+    );
+  });
+
+  it("rejects malformed reverse-proxy transport at mount without exposing a public route", async () => {
+    const { base, gateway, close } = await bootHandoffGateway(
+      new StubSessionGrants(),
+      new StubStepUp(),
+    );
+    closers.push(close);
+
+    await expect(gateway.mount(mountReq("http://127.0.0.1:6080/"))).rejects.toMatchObject({
+      layer: "reverse-proxy-transport",
+    });
+    const res = await fetch(`${base}${ROUTE_PATH}?grant=valid`);
+    expect(res.status).toBe(404);
   });
 
   it("serves handoff under a configured public base path while keeping the internal scope path unchanged", async () => {
@@ -446,6 +497,31 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     const res = await fetch(`${base}${ROUTE_PATH}?grant=valid`);
     expect(res.status).toBe(403);
     expect(await res.text()).toMatch(/not enrolled/i);
+  });
+});
+
+describe("Access Gateway — handoff page data-island escaping", () => {
+  it("escapes provider bootstrap metadata in both normal and reused handoff pages", () => {
+    const normal = handoffPageHtml("grant", ROUTE_PATH, String(recipient), {
+      authOptions: "/handoff/auth/options",
+      authVerify: "/handoff/auth/verify",
+      stream: ROUTE_PATH,
+      entrypointClient: MALICIOUS_CLIENT,
+    });
+    const reused = handoffReusedPageHtml(
+      "grant",
+      ROUTE_PATH,
+      String(recipient),
+      ROUTE_PATH,
+      MALICIOUS_CLIENT,
+    );
+
+    for (const html of [normal, reused]) {
+      expect(html).not.toContain("</script><script>globalThis.pwned=1</script>");
+      expect(html).toContain(
+        "\\u003c/script\\u003e\\u003cscript\\u003eglobalThis.pwned=1\\u003c/script\\u003e",
+      );
+    }
   });
 });
 

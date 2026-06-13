@@ -119,10 +119,18 @@ describe("SessionService.provision — not wired (bare service)", () => {
 // ── A STUB provision harness (no real browser): records the saga + injectable failures ──────────────
 
 const FAKE_RUNTIME = JSON.stringify({
-  mode: "headless",
-  cdpWebSocketUrl: "ws://127.0.0.1:9/devtools/browser/abc",
-  cdpPort: 9,
+  launchMode: "headless",
+  endpoints: [
+    {
+      resourceId: "connector:fake-pipe:abc",
+      family: "agent-connector",
+      provider: "fake-pipe",
+      transport: "stdio",
+      address: "pipe://capsule/abc",
+    },
+  ],
 }) as unknown as RuntimeHandle;
+const CONNECTOR_RESOURCE_ID = "connector:fake-pipe:abc";
 
 class StubWorker implements CapsuleWorkerPort {
   spawned = 0;
@@ -174,20 +182,24 @@ class StubConnector implements SessionConnectorPort {
   bound = new Map<string, Ref<"secret-ref">>();
   unbound: string[] = [];
   async attach(_runtime: RuntimeHandle): Promise<AgentConnector> {
-    const cdp = "ws://127.0.0.1:9/devtools/browser/abc";
-    const c: AgentConnector = { type: "cdp", cdp_url: cdp };
-    const ref = this.bound.get(cdp);
+    const c: AgentConnector = {
+      type: "fake-pipe",
+      provider: "fake-pipe",
+      resourceId: CONNECTOR_RESOURCE_ID,
+      pipe_ref: "pipe://capsule/abc",
+    };
+    const ref = this.bound.get(CONNECTOR_RESOURCE_ID);
     if (ref !== undefined) {
       c.secret_ref = ref;
     }
     return c;
   }
-  bindSecretRef(cdpUrl: string, secretRef: Ref<"secret-ref">): void {
-    this.bound.set(cdpUrl, secretRef);
+  bindSecretRef(resourceId: string, secretRef: Ref<"secret-ref">): void {
+    this.bound.set(resourceId, secretRef);
   }
-  unbindSecretRef(cdpUrl: string): void {
-    this.unbound.push(cdpUrl);
-    this.bound.delete(cdpUrl);
+  unbindSecretRef(resourceId: string): void {
+    this.unbound.push(resourceId);
+    this.bound.delete(resourceId);
   }
 }
 
@@ -229,8 +241,9 @@ describe("SessionService.provision — the reversible create-saga (GLA-022/023/0
     expect(svc.get(s.id).runtime).toBeDefined();
     // The capsule view + the agent-blind connector (a secret_ref, never a raw secret).
     expect(out.capsule.template).toBe("browser-handoff");
-    expect(out.connector.type).toBe("cdp");
-    expect(out.connector.cdp_url).toContain("ws://127.0.0.1");
+    expect(out.connector.type).toBe("fake-pipe");
+    expect(out.connector.resourceId).toBe(CONNECTOR_RESOURCE_ID);
+    expect(out.connector.pipe_ref).toBe("pipe://capsule/abc");
     expect(out.connector.secret_ref).toBeDefined();
     expect(String(out.connector.secret_ref)).toMatch(/^cap_/);
     // The saga ran each instrument once; nothing was torn down (success).
@@ -296,16 +309,16 @@ describe("SessionService.provision — the reversible create-saga (GLA-022/023/0
 });
 
 describe("SessionService — terminal-teardown connector facts (Finding #2 seam)", () => {
-  it("#2: connectorTeardownInfo exposes the connector cap id + cdp url for the reconciler to revoke/unbind", async () => {
+  it("#2: connectorTeardownInfo exposes the connector cap id + resource id for the reconciler to revoke/unbind", async () => {
     const { svc } = provisioningService();
     const s = svc.createFromAdmitted(TASK, resolved());
     const out = await svc.provision(s.id);
     const info = svc.connectorTeardownInfo(s.id);
     expect(info).toBeDefined();
-    // The cap id matches the returned connector's secret_ref (= the connector cap id), and the cdp url
+    // The cap id matches the returned connector's secret_ref (= the connector cap id), and the resource id
     // matches — exactly what the terminal cleanup path revokes + unbinds.
     expect(info?.connectorCapId).toBe(String(out.connector.secret_ref));
-    expect(info?.cdpUrl).toBe(out.connector.cdp_url);
+    expect(info?.connectorResourceId).toBe(out.connector.resourceId);
   });
 
   it("#2: clearProvisioned makes the teardown info GONE (idempotent second teardown is a no-op)", async () => {
@@ -329,8 +342,9 @@ describe("SessionService.connector — re-emit / conflict (GLA-025)", () => {
     const s = svc.createFromAdmitted(TASK, resolved());
     await svc.provision(s.id);
     const re = await svc.connector(s.id);
-    expect(re.connector.type).toBe("cdp");
-    expect(re.connector.cdp_url).toContain("ws://127.0.0.1");
+    expect(re.connector.type).toBe("fake-pipe");
+    expect(re.connector.resourceId).toBe(CONNECTOR_RESOURCE_ID);
+    expect(re.connector.pipe_ref).toBe("pipe://capsule/abc");
     expect(re.connector.secret_ref).toBeDefined();
     expect(re.capsule.template).toBe("browser-handoff");
   });

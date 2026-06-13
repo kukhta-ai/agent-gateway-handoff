@@ -10,16 +10,19 @@
 
 The Route controller is the bridge between session intent and the public edge. When the Session service opens a window, the Route controller programs a gateway route bound to that window's grant; when the window closes or the grant is revoked, it unmounts the route and forces the connection closed. It also periodically reconciles the gateway's routes against the Session service's truth, so a missed message can't leave a route dangling.
 
+Route programming carries two separate payloads: **route authorization** (`path`, `grant`, `session`, `entrypointResourceId`) and **reverse-proxy transport** (`protocol`, upstream locator, browser-client asset metadata). The controller owns the first as session intent; the gateway/transport layer owns the second as upstream reachability. Diagnostics name the layer that failed.
+
 ## Responsibilities (owns)
 
-- Mount/unmount routes on the Access Gateway per session/window lifecycle, each bound to a specific grant.
+- Mount/unmount authorization routes on the Access Gateway per session/window lifecycle, each bound to a specific grant and entrypoint resource id.
+- Pass the selected human-entrypoint transport binding to the gateway without interpreting provider-specific upstream data.
 - Force-close WebSockets on revoke.
 - Periodically reconcile programmed routes against Session state.
 
 ## Interfaces
 
-**Receives** — from the Session service: mount/unmount for a session window + the grant to bind.
-**Produces** — to the Access Gateway: route programming and close commands.
+**Receives** — from the Session service: mount/unmount for a session window + the grant to bind + a provider-neutral human-entrypoint binding.
+**Produces** — to the Access Gateway: route authorization state, reverse-proxy transport binding, and close commands.
 
 ## What it does NOT do
 
@@ -27,15 +30,15 @@ It does **not** verify requests (the Gateway does) or mint grants (Capability). 
 
 ## Entities & data
 
-`Route` ({ path, internal_endpoint }), bound to a grant capability id.
+`Route` ({ path, entrypoint_resource_id, client, transport }), bound to a grant capability id. `transport` is not an authorization decision; it is the upstream programming input for the edge transport layer.
 
 ## In scenario 01
 
-Phases 5 / 11 — mounts the route to the capsule entrypoint, bound to `grant-1` / `grant-2`. Phases 8 / 13 — unmounts and triggers force-close on revoke.
+Phases 5 / 11 — mounts the authorization route to the capsule entrypoint resource, bound to `grant-1` / `grant-2`, and passes the entrypoint's transport binding to the gateway. Phases 8 / 13 — unmounts and triggers force-close on revoke.
 
 ## Failure modes
 
-A gateway programming failure is surfaced and retried; the reconciler is the backstop that converges routes to the intended set, catching drift from missed events or restarts.
+A gateway programming failure is surfaced and retried; the error detail identifies `access-gateway-authorization-route` versus `reverse-proxy-transport` where possible. The reconciler is the backstop that converges routes to the intended set, catching drift from missed events or restarts.
 
 ## Invariants
 
