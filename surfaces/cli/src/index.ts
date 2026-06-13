@@ -3,6 +3,7 @@
 // taxonomy, and a `main()` that binds them to the real process (used by bin/gla.mjs).
 
 import { AgentBridge } from "@gla/bridge";
+import { isGlaError, redactOperatorText } from "@gla/kernel";
 import { type CliServices, run } from "./cli.js";
 import { ExitCode } from "./exit-codes.js";
 import { Output, type OutputMode } from "./output.js";
@@ -57,11 +58,23 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   try {
     client = await DaemonBridgeClient.connect(endpoint);
   } catch (e) {
+    const diagnosticEndpoint = redactOperatorText(endpoint);
+    const diagnosticError = redactOperatorText(e instanceof Error ? e.message : String(e));
+    if (isGlaError(e) && e.code.startsWith("usage.")) {
+      out.fail({
+        code: e.code,
+        message: diagnosticError,
+        detail: { endpoint: diagnosticEndpoint },
+        skill: "interpret-gla-rejections",
+        retryable: false,
+      });
+      return ExitCode.USAGE;
+    }
     // No daemon reachable at GLA_ENDPOINT → a stable dependency error (exit 8), not a crash.
     out.fail({
       code: "dependency.unavailable",
-      message: `cannot reach the GLA daemon at ${endpoint}: ${e instanceof Error ? e.message : String(e)} (is 'gla serve' running?)`,
-      detail: { endpoint },
+      message: `cannot reach the GLA daemon at ${diagnosticEndpoint}: ${diagnosticError} (is 'gla serve' running?)`,
+      detail: { endpoint: diagnosticEndpoint },
       skill: "interpret-gla-rejections",
       retryable: true,
     });

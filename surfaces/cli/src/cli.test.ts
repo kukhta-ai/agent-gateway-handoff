@@ -7,9 +7,10 @@ import { join } from "node:path";
 import { AgentBridge } from "@gla/bridge";
 import { CatalogService, defaultStoreContent, referenceWpmDependencyBindings } from "@gla/catalog";
 import { glaError } from "@gla/kernel";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CLI_VERSION, type CliServices, run } from "./cli.js";
 import { ExitCode } from "./exit-codes.js";
+import { main } from "./index.js";
 import { Output, type OutputStreams } from "./output.js";
 
 /** Build an Output over capture buffers, with a settable stdout TTY flag. */
@@ -84,6 +85,44 @@ describe("gla exit codes", () => {
     const c = capture(false);
     expect(await run(["--", "version"], c.out, services())).toBe(ExitCode.OK);
     expect(JSON.parse(c.stdout())).toEqual({ client: CLI_VERSION });
+  });
+
+  it("process entry redacts refused GLA_ENDPOINT values before printing daemon connection diagnostics", async () => {
+    const endpoint =
+      "https://gla.example/handoff/sess_1?grant=BRIDGE_GRANT_CANARY_090&secret=RAW_SECRET_CANARY_090";
+    const previous = process.env.GLA_ENDPOINT;
+    process.env.GLA_ENDPOINT = endpoint;
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    try {
+      const code = await main(["-o", "json", "whoami"]);
+      expect(code).toBe(ExitCode.USAGE);
+      expect(stdout.join("")).toBe("");
+      const text = stderr.join("");
+      expect(text).toContain("usage.bad_argument");
+      expect(text).not.toContain("BRIDGE_GRANT_CANARY_090");
+      expect(text).not.toContain("RAW_SECRET_CANARY_090");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
+      } else {
+        process.env.GLA_ENDPOINT = previous;
+      }
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
   });
 });
 
