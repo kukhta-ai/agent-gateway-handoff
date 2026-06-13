@@ -13,6 +13,12 @@ const PROTECTED_SRC_DIRS = [
 const FORBIDDEN_PROVIDER_RUNTIME_TOKENS = [
   "cdpWebSocketUrl",
   "novncEndpoint",
+  "noVNC",
+  "novnc",
+  "@novnc",
+  "rfb-web-client",
+  "RFB",
+  "client-assets",
   "cdpUrl",
   "cdp_url",
   "internalEndpoint",

@@ -6,6 +6,7 @@ import { ENROLL_REDIRECT_STORAGE_KEY } from "./enroll-page.js";
 const CALLBACK_PATHS = {
   enrollVerify: "/gla/enroll/verify",
   handoffVerify: "/gla/handoff/auth/verify",
+  clientAssets: "/gla/handoff/client-assets",
 };
 
 function callbackScript(html: string): string {
@@ -17,6 +18,17 @@ function callbackScript(html: string): string {
 }
 
 describe("delegated-auth callback page", () => {
+  it("escapes callback page data as an inert JSON island", () => {
+    const html = authCallbackPageHtml({
+      enrollVerify: "/gla/enroll/verify",
+      handoffVerify: "/gla/handoff/auth/verify",
+      clientAssets: "/gla/handoff/client-assets</script><script>globalThis.pwned=1</script>",
+    });
+
+    expect(html).toContain("\\u003c/script\\u003e");
+    expect(html).not.toContain("</script><script>globalThis.pwned=1</script>");
+  });
+
   it("restores the enrollment grant from same-origin storage and posts code/state to the prefixed verify route", async () => {
     const html = authCallbackPageHtml(CALLBACK_PATHS);
     const script = callbackScript(html);
@@ -77,25 +89,23 @@ describe("delegated-auth callback page", () => {
     expect(status.textContent).toMatch(/Enrolled/);
   });
 
-  it("restores handoff state, posts code/state to the prefixed verify route, then opens the prefixed stream", async () => {
+  it("restores handoff state and posts code/state to the prefixed verify route without opening a raw stream", async () => {
     const html = authCallbackPageHtml(CALLBACK_PATHS);
     const script = callbackScript(html);
     const status = { textContent: "", className: "" };
     const fetchCalls: Array<{ input: string; init: RequestInit }> = [];
     const removedKeys: string[] = [];
-    const sockets: string[] = [];
     const handoffState = {
       grant: "session-grant-token",
       path: "/handoff/sess_1",
       streamPath: "/gla/handoff/sess_1",
+      client: { kind: "provider-asset", ref: "fake-viewer" },
+      clientAssets: "/gla/handoff/client-assets",
     };
 
     const context = {
       URLSearchParams,
-      WebSocket: vi.fn((url: string) => {
-        sockets.push(url);
-        return { binaryType: "", onclose: undefined, onopen: undefined };
-      }),
+      WebSocket: vi.fn(),
       document: {
         getElementById(id: string): { textContent: string; className?: string } {
           if (id === "callback-data") {
@@ -140,7 +150,8 @@ describe("delegated-auth callback page", () => {
       assertion: { code: "oidc-code", state: "oidc-state" },
     });
     expect(removedKeys).toContain("gla.handoff");
-    expect(sockets).toEqual(["wss://gla.example/gla/handoff/sess_1?grant=session-grant-token"]);
+    expect(context.WebSocket).not.toHaveBeenCalled();
+    expect(status.textContent).toMatch(/no browser viewer is configured/i);
   });
 
   it("refuses a contextless callback without posting to verify routes or opening a stream", async () => {
