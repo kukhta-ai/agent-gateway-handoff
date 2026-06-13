@@ -11,6 +11,8 @@
 //                  codeVerifier,kind,createdAt}`, consumed ONE-TIME on callback (anti-CSRF / anti-replay,
 //                  §3).
 
+import type { AuthAssuranceEvidence } from "@gla/kernel";
+
 /**
  * A tiny key→value store seam (in-memory default; `app` can supply a persistent one). Identical in
  * shape to `@gla/auth-webauthn`'s `KvStore` so the two adapters share the same composition surface.
@@ -73,10 +75,11 @@ export interface PendingAttempt {
 
 /**
  * A typed classification of every rejection in the OIDC verify/finish path (doc §3, AC #3). The kernel
- * port result stays `{ok, authStrength}` (no kernel change), but INTERNALLY each failure is one of these
- * reasons, surfaced via the injectable diagnostic sink and the non-port `*Detailed` methods so tests can
- * assert each rejection's exact cause. On ANY of these, NO identity/strength is asserted (`authStrength`
- * is `"none"`, no `sub` is bound).
+ * port result stays compatible with `{ok, authStrength}` while optionally carrying provider-neutral
+ * assurance evidence on success. Internally each failure is one of these reasons, surfaced via the
+ * injectable diagnostic sink and the non-port `*Detailed` methods so tests can assert each rejection's
+ * exact cause. On ANY of these, NO identity/strength is asserted (`authStrength` is `"none"`, no `sub`
+ * is bound).
  */
 export type AuthFailReason =
   /** No pending attempt for the supplied `state` (unknown/expired/replayed callback — anti-CSRF). */
@@ -124,6 +127,7 @@ export type VerifyOutcome =
       ok: true;
       kind: AttemptKind;
       authStrength: "password" | "webauthn";
+      assurance: AuthAssuranceEvidence;
       sub: string;
       methodResolvable: boolean;
     }

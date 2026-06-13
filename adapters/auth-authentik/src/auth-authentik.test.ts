@@ -136,7 +136,16 @@ describe("AC#2 · verifyAssertion happy path → {ok:true, authStrength} with th
     await provider.challenge(userId);
     await fake.stageValidLogin("code-xyz", { sub: "sub-abc", nonce: "no-1", amr: ["swk"] });
     const r = await provider.verifyAssertion(userId, { code: "code-xyz", state: "st-1" });
-    expect(r).toEqual({ ok: true, authStrength: "webauthn" });
+    expect(r).toEqual({
+      ok: true,
+      authStrength: "webauthn",
+      assurance: {
+        authStrength: "webauthn",
+        level: "phishing-resistant",
+        methodResolvable: true,
+        providerEvidence: { amr: ["swk"] },
+      },
+    });
     // The token endpoint received the confidential-client auth + PKCE verifier + the auth-code grant.
     expect(fake.lastTokenRequest).toMatchObject({
       grantType: "authorization_code",
@@ -155,7 +164,16 @@ describe("AC#2 · verifyAssertion happy path → {ok:true, authStrength} with th
     await provider.challenge(userId);
     await fake.stageValidLogin("code-pwd", { sub: "sub-abc", nonce: "no-1", amr: ["pwd"] });
     const r = await provider.verifyAssertion(userId, { code: "code-pwd", state: "st-1" });
-    expect(r).toEqual({ ok: true, authStrength: "password" });
+    expect(r).toEqual({
+      ok: true,
+      authStrength: "password",
+      assurance: {
+        authStrength: "password",
+        level: "password",
+        methodResolvable: true,
+        providerEvidence: { amr: ["pwd"] },
+      },
+    });
   });
 });
 
@@ -388,7 +406,16 @@ describe("AC#4 · finishEnrollment binds the authentik subject; step-up then enf
       amr: ["swk"],
     });
     const rec = await provider.finishEnrollment(userId, { code: "enroll-code", state: "en-1" });
-    expect(rec).toEqual({ credentialId: "sub-enrolled", authStrength: "webauthn" });
+    expect(rec).toEqual({
+      credentialId: "sub-enrolled",
+      authStrength: "webauthn",
+      assurance: {
+        authStrength: "webauthn",
+        level: "phishing-resistant",
+        methodResolvable: true,
+        providerEvidence: { amr: ["swk"] },
+      },
+    });
     // The durable binding now exists (the delegated analogue of a stored credential).
     expect(subjects.get(userId)).toEqual({ sub: "sub-enrolled" });
     expect(provider.isEnrolled(userId)).toBe(true);
@@ -420,7 +447,11 @@ describe("AC#4 · finishEnrollment binds the authentik subject; step-up then enf
     await provider.challenge(userId);
     await fake.stageValidLogin("auth-code", { sub: "sub-stable", nonce: "anon-1", amr: ["swk"] });
     const r = await provider.verifyAssertion(userId, { code: "auth-code", state: "au-1" });
-    expect(r).toEqual({ ok: true, authStrength: "webauthn" });
+    expect(r).toMatchObject({
+      ok: true,
+      authStrength: "webauthn",
+      assurance: { level: "phishing-resistant", methodResolvable: true },
+    });
     // The binding is the same stable sub throughout (doc §9 risk 3 — subject stability).
     expect(subjects.get(userId)?.sub).toBe("sub-stable");
   });
@@ -611,7 +642,11 @@ describe("FIX 1 · multi-audience id_token requires a matching `azp` (else azp_m
       azp: "gla-client",
     });
     const r = await provider.verifyAssertion(userId, { code: "c", state: "st-1" });
-    expect(r).toEqual({ ok: true, authStrength: "webauthn" });
+    expect(r).toMatchObject({
+      ok: true,
+      authStrength: "webauthn",
+      assurance: { level: "phishing-resistant", methodResolvable: true },
+    });
   });
 
   it("SINGLE-audience token is unaffected by the azp guard (no azp present, still ok) — behaves as before", async () => {
@@ -623,7 +658,11 @@ describe("FIX 1 · multi-audience id_token requires a matching `azp` (else azp_m
     // aud is the single client id (the default) — the guard (aud-array length > 1) never fires.
     await fake.stageValidLogin("c", { sub: "sub-abc", nonce: "no-1", amr: ["pwd"] });
     const r = await provider.verifyAssertion(userId, { code: "c", state: "st-1" });
-    expect(r).toEqual({ ok: true, authStrength: "password" });
+    expect(r).toMatchObject({
+      ok: true,
+      authStrength: "password",
+      assurance: { level: "password", methodResolvable: true },
+    });
   });
 });
 

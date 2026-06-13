@@ -4,11 +4,11 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build setup — follow-on hardening backlog GLA-077..094"
-branch: feature/authentik
+phase_name: "Autonomous build — GLA-078 provider-extensible auth assurance policy"
+branch: feature/authentik-task-078
 epic: authentik-hardening-077-094
-active_story: none
-review_cycle: 0
+active_story: GLA-078
+review_cycle: 1
 follow_on_scope:
   tasks: "GLA-077..GLA-094"
   branch_base: "feature/authentik"
@@ -115,4 +115,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-12"
+last_updated: "2026-06-13"

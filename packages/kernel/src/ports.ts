@@ -4,6 +4,7 @@
 // (it is `PolicyPort`, not `CedarPort`). These are the contracts the contract-tests enforce.
 
 import type { MountSpec, PartRef, ResolvedAssemblySpec } from "./assembly.js";
+import type { AuthAssuranceEvidence } from "./auth-assurance.js";
 import type { Iso8601, OpaqueToken, RecipientRef, Ref } from "./brands.js";
 import type { Capability } from "./capability.js";
 import type { ConfigSchema } from "./config-schema.js";
@@ -16,6 +17,31 @@ import type { ErrorCode } from "./errors.js";
 
 /** The strength of a recipient's current proof (§7). Authentication ≠ authorization. */
 export type AuthStrength = "none" | "password" | "webauthn";
+
+/** A provider-reported auth fact plus its provider-neutral assurance projection. */
+export interface AuthAssuranceFact {
+  authStrength: AuthStrength;
+  /**
+   * Provider-neutral assurance evidence. Legacy providers may omit this; consumers must then derive the
+   * compatibility projection from `authStrength` rather than assuming stronger evidence.
+   */
+  assurance?: AuthAssuranceEvidence;
+}
+
+/** The result of a provider enrollment ceremony. */
+export interface AuthProviderEnrollmentResult extends AuthAssuranceFact {
+  credentialId: string;
+}
+
+/** The result of a provider verification ceremony. Reports facts, not an allow/deny decision. */
+export interface AuthProviderVerificationResult extends AuthAssuranceFact {
+  ok: boolean;
+}
+
+/** The identity-level verification fact returned at the recipient boundary. */
+export interface IdentityVerificationResult extends AuthProviderVerificationResult {
+  userId: UserIdentity["id"];
+}
 
 /** A stable user identity across channels (§7). */
 export interface UserIdentity {
@@ -52,12 +78,9 @@ export interface IdentityPort {
   enroll(
     recipient: RecipientRef,
     discharge: OpaqueToken,
-  ): Promise<{ binding: RecipientBinding; authStrength: AuthStrength }>;
+  ): Promise<{ binding: RecipientBinding } & AuthAssuranceFact>;
   /** Verify a recipient at the edge; returns FACTS, not an allow/deny. */
-  verify(
-    recipient: RecipientRef,
-    assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }>;
+  verify(recipient: RecipientRef, assertion: unknown): Promise<IdentityVerificationResult>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,12 +112,12 @@ export interface AuthProviderPort {
   finishEnrollment(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ credentialId: string; authStrength: AuthStrength }>;
+  ): Promise<AuthProviderEnrollmentResult>;
   challenge(userId: UserIdentity["id"]): Promise<AuthChallenge>;
   verifyAssertion(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength }>;
+  ): Promise<AuthProviderVerificationResult>;
 }
 
 /** Opaque secret value + injection target (agent-blind; never inspected by the kernel). */
