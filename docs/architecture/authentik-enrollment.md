@@ -65,7 +65,7 @@ one-time OIDC round-trip that ends in a recorded **fact**, expressed entirely on
 | Step | Real call | What happens |
 |---|---|---|
 | **1. begin** | `IdentityService.enrollmentOptions(recipient, discharge)` → `provider.beginEnrollment(userId, discharge)` | the adapter mints PKCE + one-time `state`/`nonce`, stores a **`register`-kind** `PendingAttempt` keyed by `state`, and returns the opaque `RedirectChallenge` `{kind:"redirect", authorizeUrl}` (the authorization request to authentik's `/authorize`). `discharge` is the operator-discharge grant the gateway already verified; the adapter does **not** re-check it (`§4`). |
-| **2. authenticate at authentik** | *(browser, at authentik — not GLA)* | the operator-invited recipient authenticates **once** at authentik (passkey / password / MFA, authentik's own flow). GLA never sees the credential. authentik redirects back to the adapter callback with `?code&state`. |
+| **2. authenticate at authentik** | *(browser, at authentik — not GLA)* | the operator-invited recipient authenticates **once** at authentik (passkey / password / MFA, authentik's own flow). GLA never sees the credential. authentik redirects back to GLA's callback page with `?code&state`. |
 | **3. finish** | `IdentityService.enrollComplete(recipient, attestation)` → `provider.finishEnrollment(userId, attestation)` where `attestation = {code, state}` | the adapter consumes the `register` attempt by `state` (one-time), exchanges `code`+PKCE at the token endpoint, **validates** the `id_token` (signature via JWKS, `iss`, `aud`, `nonce`, `exp`/`iat`/`nbf`), and — **only on a verified token** — **atomically binds** the subject: `subjects.set(userId, {sub})`. Returns `{credentialId: sub, authStrength}`. On **any** failure it **throws and binds nothing** (the no-half-bound property). |
 | **4. record the fact** | `IdentityService.enrollComplete` writes the `EnrollmentRecord` | on the adapter's success the service records, keyed by `userId`, `EnrollmentRecord{ credentialId: sub, authStrength, enrolledAt }` — the identity-level **fact** that makes `isEnrolled(recipient)` true. It commits this **only after** the provider returns a verified result (atomic; `see packages/identity/src/index.ts` `enrollComplete`), so a failed ceremony leaves no half-bound identity. |
 
@@ -130,11 +130,10 @@ against the real gateway (`see packages/gateway/src/index.ts`):
 (`navigator.credentials.create` → POST the attestation). The OIDC flow adds an **authentik round-trip** (a
 top-level redirect to authentik and back). That round-trip **must NOT add a second public entry** — the
 **Access Gateway remains the sole public door** (`baseline.md §3`, `access-gateway.md`: *"the only door open
-to the public internet"*). The adapter's callback is therefore an **adapter-owned endpoint fronted by the same
-host Caddy** (never a new gateway route, never the local bridge), exactly as `authentik-integration.md §2`
-decided. **That callback listener + the step-up/enroll page redirect is GLA-072's deliverable**
-(`see authentik-integration.md §2`; and the adapter's own header note — *"the browser callback LISTENER +
-step-up-page redirect … are GLA-072"*). GLA-069/070 depend on it for the **browser** path but not for the
+to the public internet"*). The callback is therefore a **GLA-served provider-neutral page on the gateway
+origin** (never a local bridge endpoint), exactly as `authentik-integration.md §2` now specifies. That callback
+page plus the step-up/enroll page redirect is shared by authentik enrollment and handoff. GLA-069/070 depend on
+it for the **browser** path but not for the
 **service** path (`§7`, `§8`): the operator-discharge gate, the `/enroll` routes, and the single-public-entry
 invariant are all already satisfied and unchanged.
 
@@ -151,7 +150,7 @@ operator action is provider-agnostic (`see packages/app/src/index.ts`/`daemon.ts
 2. **Recipient completes the one-time authentik enrollment.** The recipient opens the link; the gateway
    verifies the grant and serves the enrollment page; the page (under the delegated provider) **redirects the
    recipient to authentik** (`authorizeUrl` from `beginEnrollment`); the recipient authenticates once at
-   authentik; authentik redirects back to the adapter callback; `enrollComplete(recipient, {code,state})`
+   authentik; authentik redirects back to GLA's callback page; `enrollComplete(recipient, {code,state})`
    validates and **binds the subject** (`§2`).
 3. **Bound.** `IdentityService.isEnrolled(recipient)` is now `true`; the recipient is verifiable for later
    handoffs. The grant is spent (single-use) — re-running needs a fresh invite (recovery = re-enrollment,
@@ -218,11 +217,11 @@ steps:
    is the `sub`. **No `IdentityService` change should be required** beyond confirming this; if any
    WebAuthn-specific assumption is found in the enrollment path, that is a defect to fix here.
 3. **Provide the enrollment round-trip path** — the begin (redirect) + the callback that delivers `{code,state}`
-   to `enrollComplete`. **This is shared with GLA-072's callback machinery** (`§4`, `§8`): GLA-070 must either
-   (a) consume the GLA-072 callback for the `register` case, or (b) if sequenced before it, test the
+   to `enrollComplete`. **This is shared with the gateway callback page** (`§4`, `§8`): GLA-070 must either
+   (a) consume the shared callback for the `register` case, or (b) if sequenced before it, test the
    service-layer binding directly against the adapter (the adapter's `beginEnrollment`/`finishEnrollment` +
    the `fake-authentik` test seam, `see adapters/auth-authentik/src/fake-authentik.ts`) and leave the
-   browser-callback wiring to 072. **Recommended:** build/test the *service* slice now (deterministic,
+   browser-callback wiring to the callback story. **Recommended:** build/test the *service* slice now (deterministic,
    no browser), and make the *browser* enrollment path land with 072's callback — coordinated, not duplicated.
 4. **Record the binding atomically.** Ensure the success path writes `subjects[userId]={sub}` (adapter) and
    `EnrollmentRecord[userId]` (identity) and the failure path writes **neither** (the adapter throws → the
@@ -248,7 +247,7 @@ existing enrollment/handoff E2E shape carries over with the provider swapped.
 |---|---|
 | `beginEnrollment(userId, discharge)` → `{kind:"redirect", authorizeUrl}` (`register` attempt) | the `packages/app` composition that selects+injects the authentik provider into the **enrollment** stack (§7.1) |
 | `finishEnrollment(userId, {code,state})` → atomic `subjects.set` → `{credentialId: sub, authStrength}` | confirming `IdentityService.enrollComplete` records the `sub`-fact correctly under the delegated provider (§7.2) and the no-half-bound proof (§7.4) |
-| the `subjects`/`attempts` stores, PKCE/state/nonce, id_token validation, `isEnrolled`/`getBoundSubject` | the enrollment **round-trip browser path** — coordinated with GLA-072's callback (§7.3, §8) — or the service-layer tests if sequenced first |
+| the `subjects`/`attempts` stores, PKCE/state/nonce, id_token validation, `isEnrolled`/`getBoundSubject` | the enrollment **round-trip browser path** — coordinated with the GLA-served callback page (§7.3, §8) — or the service-layer tests if sequenced first |
 | `fake-authentik` test seam for deterministic E2E | the GLA-070 **enrollment tests** that assert the external observables (§7.5) |
 
 ---
@@ -260,14 +259,14 @@ existing enrollment/handoff E2E shape carries over with the provider swapped.
    `provider.finishEnrollment(userId, attestation)`; the authentik adapter requires `attestation = {code,
    state}` (the OIDC callback params), **not** a WebAuthn `RegistrationResponseJSON`. But the gateway's
    **served `enrollPageHtml` posts a WebAuthn attestation** to `/enroll/verify`
-   (`see packages/gateway/src/enroll-page.ts`). So OIDC enrollment needs the **browser-redirect + adapter-owned
-   callback** that delivers `{code,state}` to `enrollComplete` — **the same machinery GLA-072 builds for
-   step-up** (`§4`; the adapter header: *"the browser callback LISTENER + … redirect … are GLA-072"*). The
+   (`see packages/gateway/src/enroll-page.ts`). So OIDC enrollment needs the **browser-redirect + GLA-served
+   callback page** that delivers `{code,state}` to `enrollComplete` — **the same machinery used for
+   step-up** (`§4`). The
    service-layer mapping is sound and provider-agnostic **today** (068's port shape); the **browser** path is
-   the open dependency. GLA-070 must **coordinate with GLA-072 rather than duplicate or fork** a callback, and
+   the open dependency. GLA-070 must **coordinate with the shared callback rather than duplicate or fork** it, and
    must **not** edit the gateway to special-case OIDC (that would touch the fixed core — a scope surface; stop
    and surface). The clean split: **070 owns the service slice + tests (deterministic), 072 owns the shared
-   browser callback** — and 070's browser-enrollment E2E lands on 072's callback.
+   callback landing page** — and 070's browser-enrollment E2E lands on the shared callback.
 2. **Backlog edge: 070 ← {068,069}, not 070 ← 072.** The dependency graph does **not** encode 070's reliance
    on 072's callback for the *browser* path. This is acceptable because 070's **acceptance evidence is the
    service-layer observables** (`isEnrolled`, the recorded `sub`-fact), provable with the `fake-authentik`
@@ -300,7 +299,7 @@ existing enrollment/handoff E2E shape carries over with the provider swapped.
    adapter binding (`§3`).
 3. The single-use operator-discharge grant **still** gates enrollment and is verified+consumed by the gateway
    before identity is reached; the gateway stays the **sole public entry**; the OIDC round-trip adds **no**
-   second public door (the callback is GLA-072's, adapter-owned, behind the same Caddy) (`§4`).
+   second public door (the callback is a gateway-served provider-neutral page behind the same Caddy) (`§4`).
 4. First-run: operator `enrollInvite` → recipient completes the one-time authentik enrollment → bound; before
    that, a step-up for an un-enrolled recipient is **denied** at gateway + identity + adapter (`§5`).
 5. All frozen invariants hold under delegation — verifiable-only-after-enrollment (subject binding), one-time +

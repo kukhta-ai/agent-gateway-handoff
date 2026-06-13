@@ -28,6 +28,11 @@ import {
 const userId = "user:tg:user:123" as UserIdentity["id"];
 const otherUserId = "user:tg:user:999" as UserIdentity["id"];
 const discharge = "discharge-token" as OpaqueToken;
+const forbiddenGlaGrants = [
+  "session-grant-sentinel",
+  "operator-discharge-grant-sentinel",
+  discharge,
+];
 
 /** A deterministic randomness seam so a test can predict the `state`/`nonce`/PKCE the adapter mints. */
 function fixedRandomness(seq: { state: string; nonce: string }[]): OidcRandomness {
@@ -84,6 +89,12 @@ function onlyAttempt(attempts: InMemoryKv<PendingAttempt>, state: string): Pendi
   return a;
 }
 
+function expectNoGlaGrant(value: string): void {
+  for (const grant of forbiddenGlaGrants) {
+    expect(value).not.toContain(String(grant));
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AC#2 — challenge() builds the OIDC authorization request; verify happy path returns the fact.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,14 +109,21 @@ describe("AC#2 · challenge() builds an OIDC authorization request", () => {
     const challenge = (await provider.challenge(userId)) as RedirectChallenge;
     expect(challenge.kind).toBe("redirect");
     const url = new URL(challenge.authorizeUrl);
+    const redirectUri = new URL(url.searchParams.get("redirect_uri") ?? "");
     expect(url.searchParams.get("response_type")).toBe("code");
     expect(url.searchParams.get("client_id")).toBe("gla-client");
     expect(url.searchParams.get("redirect_uri")).toBe("https://gla.example/auth/callback");
+    expect(redirectUri.origin).toBe("https://gla.example");
+    expect(redirectUri.pathname).toBe("/auth/callback");
+    expect(redirectUri.search).toBe("");
     expect(url.searchParams.get("scope")).toBe("openid profile");
     expect(url.searchParams.get("state")).toBe("st-1");
     expect(url.searchParams.get("nonce")).toBe("no-1");
     expect(url.searchParams.get("code_challenge")).toBe("challenge-0");
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(challenge.authorizeUrl).not.toContain("grant=");
+    expectNoGlaGrant(challenge.authorizeUrl);
+    expectNoGlaGrant(url.searchParams.get("redirect_uri") ?? "");
     // The pending attempt is stored keyed by state, kind=authenticate, with the PKCE verifier.
     const attempt = onlyAttempt(attempts, "st-1");
     expect(attempt).toMatchObject({ userId, state: "st-1", nonce: "no-1", kind: "authenticate" });
@@ -153,7 +171,9 @@ describe("AC#2 · verifyAssertion happy path → {ok:true, authStrength} with th
       clientId: "gla-client",
       hasClientSecret: true,
       hasCodeVerifier: true,
+      redirectUri: "https://gla.example/auth/callback",
     });
+    expectNoGlaGrant(JSON.stringify(fake.lastTokenRequest));
   });
 
   it("password amr (pwd) → ok:true, authStrength password", async () => {
