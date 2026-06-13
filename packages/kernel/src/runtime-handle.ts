@@ -1,12 +1,9 @@
 // K-runtime — the RuntimeHandle structured-payload convention (kernel-contracts.md §6, capsule.md).
 // A `RuntimeHandle` (entities.ts) is an opaque `Ref<"runtime">` the worker plane hands back from the
-// launcher. Its INTERNAL structure is a launcher concern, but the human-entrypoint and agent-connector
-// PORTS receive that same handle (`open(h)` / `attach(h)`) and must read well-known fields off it (the
-// CDP url, the noVNC endpoint, the launch mode). To keep those facts a SHARED contract — rather than
-// forcing one adapter to import another (the boundary lint forbids adapter→adapter) — the kernel owns a
-// tiny, generic codec: a structured handle is JSON with a few well-known OPTIONAL fields plus arbitrary
-// launcher extras. No process-specifics live here; the launcher writes the fields, the connector and
-// entrypoint read them, all through this one neutral codec.
+// launcher. Its internal process bookkeeping is a launcher concern, but adapter families still need a
+// shared way to discover runtime-owned resources without importing each other. The kernel therefore owns
+// only the neutral descriptor vocabulary: resource id, family, provider id, transport, and optional
+// client metadata. Concrete protocols and provider-specific payload fields remain adapter-owned.
 
 import type { ResolvedAssemblySpec } from "./assembly.js";
 import type { Ref } from "./brands.js";
@@ -15,23 +12,58 @@ import type { RuntimeHandle } from "./entities.js";
 /** A realized-workspace handle (kept structural — the worker/workspace/launcher agree on it). */
 export type WorkspaceHandleRef = Ref<"workspace">;
 
+/** A runtime-owned resource family that an adapter can attach to or expose. */
+export type RuntimeEndpointFamily = "agent-connector" | "human-entrypoint" | (string & {});
+
+/** A transport class. Provider adapters refine the exact protocol semantics locally. */
+export type RuntimeEndpointTransport =
+  | "websocket"
+  | "http"
+  | "tcp"
+  | "stdio"
+  | "file"
+  | (string & {});
+
+/** Browser-facing client requirements for a human-entrypoint provider. */
+export interface RuntimeClientDescriptor {
+  /** Provider-neutral client asset kind, e.g. a gateway page, a provider asset, or an external URL. */
+  kind: string;
+  /** Optional same-origin path, package asset id, or provider-local locator. */
+  ref?: string;
+  /** Non-secret bootstrap data needed by the browser client. */
+  bootstrap?: Record<string, unknown>;
+}
+
+/** A runtime endpoint/resource descriptor shared across launcher, connector, and entrypoint providers. */
+export interface RuntimeEndpointDescriptor {
+  /** Stable, provider-owned resource identity. Raw transport URLs are not resource identities. */
+  resourceId: string;
+  /** Which provider family consumes this descriptor. */
+  family: RuntimeEndpointFamily;
+  /** Provider id as registered in the operator-installed provider catalog. */
+  provider: string;
+  /** Transport class for the resource. */
+  transport: RuntimeEndpointTransport;
+  /** Adapter-owned address or locator. Core packages treat this as opaque transport data. */
+  address?: string;
+  /** Optional browser-client requirements for human-entrypoint providers. */
+  client?: RuntimeClientDescriptor;
+  /** Non-secret provider metadata for diagnostics or adapter-local selection. */
+  metadata?: Record<string, unknown>;
+}
+
 /**
- * The well-known fields a structured {@link RuntimeHandle} may carry (all OPTIONAL — a launcher
- * populates what applies to its tier). The agent-connector reads `cdpWebSocketUrl`; the human
- * entrypoint reads `novncEndpoint` + `mode`. A launcher MAY add its own private fields (pid, ports,
- * side-process ids) — they ride alongside via the index signature and are opaque to the ports.
+ * The well-known provider-neutral fields a structured {@link RuntimeHandle} may carry. A launcher MAY add its own
+ * private fields (pid, ports, side-process ids) via the index signature; core packages must only consume
+ * `endpoints` and opaque resource ids.
  *
- * **Carries no secret** — a runtime handle is bookkeeping (addresses + pids), never a credential. The
- * agent-blind `secret_ref` is minted separately by the CapabilityService (a capability reference), not
- * stored here.
+ * Carries no secret. Agent-blind `secret_ref` values are minted separately by the CapabilityService.
  */
 export interface RuntimeDescriptor {
-  /** The launch mode, e.g. "full" (headed + noVNC) or "headless" (CDP only). */
-  mode?: string;
-  /** The raw CDP `webSocketDebuggerUrl` (the agent connector), bound to loopback. */
-  cdpWebSocketUrl?: string;
-  /** The internal noVNC ws endpoint (the human entrypoint; absent in headless mode). */
-  novncEndpoint?: string;
+  /** Launcher-reported mode/status as a non-authorizing diagnostic hint. */
+  launchMode?: string;
+  /** Runtime-owned connector and entrypoint descriptors. */
+  endpoints?: RuntimeEndpointDescriptor[];
   /** Launcher-private extras (pid, ports, side-process ids) — opaque to the ports. */
   [k: string]: unknown;
 }
@@ -55,6 +87,30 @@ export function decodeRuntimeHandle(h: RuntimeHandle): RuntimeDescriptor | undef
   } catch {
     return undefined;
   }
+}
+
+/** Return the first runtime endpoint matching a family and optional provider/transport filter. */
+export function runtimeEndpoint(
+  descriptor: RuntimeDescriptor | undefined,
+  match: {
+    family: RuntimeEndpointFamily;
+    provider?: string;
+    transport?: RuntimeEndpointTransport;
+  },
+): RuntimeEndpointDescriptor | undefined {
+  for (const endpoint of descriptor?.endpoints ?? []) {
+    if (endpoint.family !== match.family) {
+      continue;
+    }
+    if (match.provider !== undefined && endpoint.provider !== match.provider) {
+      continue;
+    }
+    if (match.transport !== undefined && endpoint.transport !== match.transport) {
+      continue;
+    }
+    return endpoint;
+  }
+  return undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

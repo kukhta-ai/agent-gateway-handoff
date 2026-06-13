@@ -25,7 +25,6 @@
 import { type ChildProcess, spawn as spawnChild, spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import {
   type LauncherPort,
@@ -136,15 +135,22 @@ export class LauncherProcessAdapter implements LauncherPort {
    * typed `dependency.*` error — the worker's saga then compensates (no orphan).
    *
    * @param spec   the immutable resolved spec (read-only). The worker passes the realized workspace via
-   *               the kernel's `setSpawnContext` before this call; if absent, a throwaway profile under
-   *               tmpdir is used.
+   *               the kernel's `setSpawnContext` before this call; if absent, spawn fails closed before
+   *               mutating host state.
    * @param asUid  the agent's uid the capsule runs as (priv-esc off; docs/04 §6). Honored when the
    *               process has the privilege to setuid; in the single-operator profile the capsule runs
    *               as the operator already, so this is the same uid.
    */
   async spawn(spec: ResolvedAssemblySpec, asUid: number): Promise<RuntimeHandle> {
     const mode = this.resolveMode();
-    const profileDir = readWorkspaceProfileDir(spec) ?? freshThrowawayProfile();
+    const profileDir = readWorkspaceProfileDir(spec);
+    if (profileDir === undefined) {
+      throw glaError(
+        "dependency.unavailable",
+        "launcher-process missing realized workspace context before spawn",
+        { detail: { expected: "worker setSpawnContext with workspace profileDir" } },
+      );
+    }
     const cdpPort = await freePort();
 
     if (mode === "headless") {
@@ -293,11 +299,33 @@ export class LauncherProcessAdapter implements LauncherPort {
       if (ws !== undefined) {
         const pid = child.pid ?? -1;
         const runtime: ProcessRuntime = {
+          launchMode: base.mode,
           mode: base.mode,
           pid,
           cdpPort: base.cdpPort,
           cdpWebSocketUrl: ws,
+          endpoints: [
+            {
+              resourceId: `agent-connector:launcher-process:${base.cdpPort}`,
+              family: "agent-connector",
+              provider: "cdp",
+              transport: "websocket",
+              address: ws,
+              metadata: { port: base.cdpPort },
+            },
+          ],
         };
+        if (base.novncEndpoint !== undefined) {
+          runtime.endpoints?.push({
+            resourceId: `human-entrypoint:launcher-process:${base.novncEndpoint}`,
+            family: "human-entrypoint",
+            provider: "novnc",
+            transport: "websocket",
+            address: base.novncEndpoint,
+            client: { kind: "gateway-page", ref: "handoff" },
+            metadata: { mode: base.mode },
+          });
+        }
         return runtime;
       }
       await delay(150);
@@ -487,11 +515,6 @@ let displayCounter = 90;
 function pickDisplay(): number {
   displayCounter += 1;
   return displayCounter;
-}
-
-/** A throwaway profile under tmpdir when the worker did not pass a workspace handle (defensive). */
-function freshThrowawayProfile(): string {
-  return joinPath(tmpdir(), `gla-throwaway-${process.pid}-${Date.now()}`);
 }
 
 /** A small async delay. */

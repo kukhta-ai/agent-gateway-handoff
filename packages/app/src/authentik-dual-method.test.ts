@@ -221,11 +221,15 @@ function executeHandoffCallback(
 
 function mountReq(endpoint: string): RouteMountRequest {
   return {
-    routeId: "route_1" as RouteId,
-    path: ROUTE_PATH,
-    internalEndpoint: endpoint,
-    boundGrantId: GRANT_ID,
-    sessionId: SESS,
+    authorization: {
+      routeId: "route_1" as RouteId,
+      path: ROUTE_PATH,
+      boundGrantId: GRANT_ID,
+      sessionId: SESS,
+      entrypointResourceId: "entrypoint:authentik-test",
+    },
+    transport: { kind: "reverse-proxy", protocol: "websocket", upstream: endpoint },
+    client: { kind: "gateway-page", ref: "handoff" },
   };
 }
 

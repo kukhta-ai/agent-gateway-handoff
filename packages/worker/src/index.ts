@@ -25,11 +25,11 @@
 import {
   type AgentConnector,
   type AgentConnectorPort,
+  type HumanEntrypointBinding,
   type HumanEntrypointPort,
   type LauncherPort,
   type MountCapability,
   type MountSpec,
-  type PartRef,
   type ResolvedAssemblySpec,
   type RuntimeHandle,
   type WorkspaceHandle,
@@ -151,11 +151,23 @@ export class WorkspaceManager {
 
   /**
    * Realize the workspace for a session: the strategy (the resolved `workspace` part) + the agent's
-   * mounts, as the agent's uid. Returns the workspace handle (adapter-owned). The `strategy` defaults
-   * to a `browser-profile-temp` PartRef when the spec omits one (the template should have filled it).
+   * mounts, as the agent's uid. Returns the workspace handle (adapter-owned). A missing strategy fails
+   * closed here; defaulting belongs in catalog/admission before host-touching realization.
    */
   realize(spec: ResolvedAssemblySpec, asUid: number): Promise<WorkspaceHandle> {
-    const strategy: PartRef = spec.spec.workspace ?? { use: "browser-profile-temp" };
+    const strategy = spec.spec.workspace;
+    if (strategy === undefined) {
+      throw glaError(
+        "dependency.unavailable",
+        "resolved assembly is missing workspace strategy before realization",
+        {
+          detail: {
+            template: spec.spec.template,
+            expected: "catalog/admission resolved spec.spec.workspace",
+          },
+        },
+      );
+    }
     const mounts: MountSpec[] = spec.spec.mounts ?? [];
     return this.port.realize(strategy, mounts, asUid);
   }
@@ -427,8 +439,8 @@ export class CleanupReconciler {
 
 /**
  * Attach the agent connector to a live capsule via the kernel `AgentConnectorPort`. A thin pass-through
- * the session saga calls after a successful spawn — the port returns `{type, cdp_url|path, secret_ref}`
- * (agent-blind: `secret_ref` is a capability reference, never raw signing material; GLA-024/025).
+ * the session saga calls after a successful spawn. Adapter-owned DTO fields describe how that connector
+ * is driven; agent-blind `secret_ref` remains a capability reference, never raw signing material.
  */
 export async function attachConnector(
   port: AgentConnectorPort,
@@ -438,20 +450,19 @@ export async function attachConnector(
 }
 
 /**
- * Open the human entrypoint on a live capsule via the kernel `HumanEntrypointPort` — the internal
- * noVNC ws endpoint the gateway proxies in Slice 4. Returns `undefined` when the entrypoint is
- * unavailable (headless mode: no Xvfb/x11vnc/websockify), surfacing the degrade honestly rather than
- * throwing — provision still succeeds with a CDP-only capsule.
+ * Open the human entrypoint on a live capsule via the kernel `HumanEntrypointPort`. Returns `undefined`
+ * when the entrypoint is unavailable, surfacing the degrade honestly rather than throwing. Provision still
+ * succeeds with an agent-connector-only capsule.
  */
 export async function openHumanEntrypoint(
   port: HumanEntrypointPort,
   runtime: RuntimeHandle,
-): Promise<{ internalEndpoint: string } | undefined> {
+): Promise<HumanEntrypointBinding | undefined> {
   try {
     return await port.open(runtime);
   } catch {
-    // The entrypoint reports unavailable (e.g. headless: no human-view stack). Provision proceeds with
-    // a CDP-only capsule; the noVNC path is real in hermes-1 where the wpm human-view bundle is present.
+    // The entrypoint reports unavailable (e.g. headless: no human-view stack). Provision proceeds without a
+    // human surface; concrete human-view providers are supplied by installed bundles.
     return undefined;
   }
 }

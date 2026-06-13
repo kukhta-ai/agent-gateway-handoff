@@ -23,7 +23,13 @@ import { CapabilityService } from "@gla/capability";
 import { ChannelCli, type DeliverySink } from "@gla/channel-cli";
 import { AccessGateway } from "@gla/gateway";
 import { IdentityService } from "@gla/identity";
-import type { RecipientRef, RuntimeHandle, SessionId, TaskId } from "@gla/kernel";
+import type {
+  HumanEntrypointBinding,
+  RecipientRef,
+  RuntimeHandle,
+  SessionId,
+  TaskId,
+} from "@gla/kernel";
 import { RouteController } from "@gla/route";
 import { type HandoffDeps, SessionService } from "@gla/session";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
@@ -194,8 +200,17 @@ async function startHandoffStack(upstreamEndpoint: string): Promise<{
   const route = new RouteController({ gateway });
   // A stub entrypoint returning the stub WS upstream (real noVNC is gated for hermes-1).
   const stubEntrypoint = {
-    async open(_runtime: RuntimeHandle): Promise<{ internalEndpoint: string }> {
-      return { internalEndpoint: upstreamEndpoint };
+    async open(_runtime: RuntimeHandle): Promise<HumanEntrypointBinding> {
+      return {
+        resourceId: "entrypoint:fake-view:handoff-e2e",
+        provider: "fake-view",
+        client: { kind: "provider-asset", ref: "fake-viewer" },
+        transport: {
+          kind: "reverse-proxy",
+          protocol: "websocket",
+          upstream: upstreamEndpoint,
+        },
+      };
     },
   };
   const handoff: HandoffDeps = {

@@ -135,13 +135,16 @@ interface Capability {
 interface Route {
   id: `route_${string}`;
   path: string;                      // the public path the gateway exposes
-  internalEndpoint: string;          // the capsule's human-entrypoint address
+  entrypointResourceId: string;      // provider-owned human-entrypoint resource
+  client: HumanEntrypointClientBinding;
+  transport: ReverseProxyTransportBinding; // upstream transport, not authorization
   boundGrantId: Capability["id"];    // a route binds to exactly one grant
 }
 ```
 **Lifecycle:** a route **exists only while its window is open**, is bound to exactly one grant, and is force-
-unmounted (WebSocket closed) on window close/grant revoke. Reconciliation converges programmed routes to
-Session truth (one of the few reconcilers the design keeps).
+unmounted on window close/grant revoke. Route authorization state (`path`, `boundGrantId`, recipient/session scope)
+is separate from reverse-proxy transport state (`transport.upstream`, protocol, client asset). Reconciliation
+converges programmed routes to Session truth (one of the few reconcilers the design keeps).
 
 ### 1.6 Completion — normalized done-signal (`see completion-service.md`)
 
@@ -435,12 +438,43 @@ interface WorkspacePort {              // browser-profile-temp / staged-copy / p
   reap(h: WorkspaceHandle): Promise<void>;   // destroys OWN ephemeral materials only; host mounts survive
 }
 
-interface HumanEntrypointPort {        // noVNC / form / doc-editor are adapters
-  open(h: RuntimeHandle): Promise<{ internalEndpoint: string }>;   // the address the gateway proxies to
+interface RuntimeEndpointDescriptor {
+  resourceId: string;                  // stable provider-owned identity; never a raw upstream URL
+  family: "agent-connector" | "human-entrypoint" | string;
+  provider: string;
+  transport: "websocket" | "http" | "tcp" | "stdio" | "file" | string;
+  address?: string;                    // adapter-owned locator; core treats as opaque transport data
+  client?: { kind: string; ref?: string; bootstrap?: Record<string, unknown> };
+  metadata?: Record<string, unknown>;  // non-secret diagnostics only
+}
+
+interface RuntimeDescriptor {
+  launchMode?: string;                 // diagnostic hint, not an authorization input
+  endpoints?: RuntimeEndpointDescriptor[];
+  [launcherPrivate: string]: unknown;  // pid/ports/process data remain launcher-private
+}
+
+interface HumanEntrypointBinding {
+  resourceId: string;                  // provider-owned identity, stable for lifecycle/teardown
+  provider: string;
+  client: { kind: string; ref?: string; bootstrap?: Record<string, unknown> };
+  transport: { kind: "reverse-proxy"; protocol: string; upstream: string };
+}
+
+interface HumanEntrypointPort {
+  open(h: RuntimeHandle): Promise<HumanEntrypointBinding>;
 }                                       // GUARANTEE: agent-blind input path — human keystrokes reach the site, not the agent.
 
-interface AgentConnectorPort {         // CDP / fs-path / secret-ref are adapters
-  attach(h: RuntimeHandle): Promise<AgentConnector>;   // { type, cdp_url|path, secret_ref } — printed as data, driven off-gla
+interface AgentConnector {
+  type: string;                         // adapter-owned public connector DTO type
+  resourceId: string;                   // provider-owned identity for bind/unbind/reuse/teardown
+  provider?: string;
+  secret_ref?: Ref<"secret-ref">;       // capability reference, never raw secret
+  [providerField: string]: unknown;     // protocol-specific public fields stay adapter-owned
+}
+
+interface AgentConnectorPort {
+  attach(h: RuntimeHandle): Promise<AgentConnector>;   // printed as data, driven off-gla
 }
 
 interface CompletionDetectorPort {     // url-watcher / user-done / exit-code / dom-watcher are adapters

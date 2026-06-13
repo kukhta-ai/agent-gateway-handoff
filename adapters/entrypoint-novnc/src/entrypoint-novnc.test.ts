@@ -11,20 +11,28 @@ describe("EntrypointNovncAdapter.open — mode-aware human entrypoint (GLA-023)"
   it("FULL mode: returns the internal noVNC ws endpoint (the gateway proxies it in Slice 4)", async () => {
     const e = new EntrypointNovncAdapter();
     const runtime = encodeRuntimeHandle({
-      mode: "full",
-      cdpWebSocketUrl: "ws://127.0.0.1:9/x",
-      novncEndpoint: "ws://127.0.0.1:6080/",
+      launchMode: "full",
+      endpoints: [
+        {
+          resourceId: "entrypoint:novnc:test",
+          family: "human-entrypoint",
+          provider: "novnc",
+          transport: "websocket",
+          address: "ws://127.0.0.1:6080/",
+          client: { kind: "gateway-page", ref: "handoff" },
+        },
+      ],
     });
     const out = await e.open(runtime);
-    expect(out.internalEndpoint).toBe("ws://127.0.0.1:6080/");
+    expect(out.resourceId).toBe("entrypoint:novnc:test");
+    expect(out.transport.upstream).toBe("ws://127.0.0.1:6080/");
     expect(e.isAvailable(runtime)).toBe(true);
   });
 
   it("HEADLESS mode: open throws dependency.unavailable (no human-view stack)", async () => {
     const e = new EntrypointNovncAdapter();
     const runtime = encodeRuntimeHandle({
-      mode: "headless",
-      cdpWebSocketUrl: "ws://127.0.0.1:9/x",
+      launchMode: "headless",
     });
     await expect(e.open(runtime)).rejects.toMatchObject({ code: "dependency.unavailable" });
     expect(e.isAvailable(runtime)).toBe(false);
@@ -32,7 +40,7 @@ describe("EntrypointNovncAdapter.open — mode-aware human entrypoint (GLA-023)"
 
   it("full mode but NO noVNC endpoint on the handle → unavailable (defensive)", async () => {
     const e = new EntrypointNovncAdapter();
-    const runtime = encodeRuntimeHandle({ mode: "full", cdpWebSocketUrl: "ws://127.0.0.1:9/x" });
+    const runtime = encodeRuntimeHandle({ launchMode: "full" });
     await expect(e.open(runtime)).rejects.toMatchObject({ code: "dependency.unavailable" });
   });
 

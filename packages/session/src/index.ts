@@ -26,6 +26,7 @@ import {
   type HandoffId,
   type HandoffState,
   type HandoffWindow,
+  type HumanEntrypointBinding,
   type Iso8601,
   type OpaqueToken,
   type RawCompletionSignal,
@@ -120,10 +121,10 @@ export interface CapsuleWorkerPort {
  */
 export interface SessionConnectorPort {
   attach(runtime: RuntimeHandle): Promise<AgentConnector>;
-  /** Bind a freshly-minted `secret_ref` to a capsule (by its CDP url) so `attach` stamps it. */
-  bindSecretRef(cdpUrl: string, secretRef: Ref<"secret-ref">): void;
+  /** Bind a freshly-minted `secret_ref` to a connector resource so `attach` stamps it. */
+  bindSecretRef(resourceId: string, secretRef: Ref<"secret-ref">): void;
   /** Drop a capsule's bound `secret_ref` (on teardown). Idempotent. */
-  unbindSecretRef(cdpUrl: string): void;
+  unbindSecretRef(resourceId: string): void;
 }
 
 /** The capsule descriptor in the provision view (docs/05 §4: `capsule:{id, template}`). */
@@ -137,7 +138,7 @@ export interface ProvisionResult {
   session_id: SessionId;
   state: SessionState;
   capsule: CapsuleView;
-  /** The agent's connector: `{type, cdp_url|path, secret_ref}` (agent-blind; GLA-024/025). */
+  /** The agent's connector DTO (adapter-owned public payload plus provider-neutral resource identity). */
   connector: AgentConnector;
 }
 
@@ -205,7 +206,7 @@ export interface HandoffRoutePort {
   program(
     window: Pick<HandoffWindow, "id" | "sessionId">,
     grantId: CapabilityId,
-    capsuleEntrypoint: string,
+    entrypoint: HumanEntrypointBinding,
     path?: string,
   ): Promise<Route>;
   /** Unmount a window's route (force-closing any live WS bound to it). Idempotent. */
@@ -214,11 +215,11 @@ export interface HandoffRoutePort {
 
 /**
  * The human-entrypoint seam the saga needs (a subset of the kernel HumanEntrypointPort): resolve the capsule's
- * internal human-entrypoint address (the noVNC endpoint) the route proxies to. Injected.
+ * provider-owned entrypoint binding. Injected.
  */
 export interface HandoffEntrypointPort {
-  /** Resolve the capsule's internal human-entrypoint address for a live runtime (the gateway proxies to it). */
-  open(runtime: RuntimeHandle): Promise<{ internalEndpoint: string }>;
+  /** Resolve the capsule's provider-neutral human-entrypoint binding for a live runtime. */
+  open(runtime: RuntimeHandle): Promise<HumanEntrypointBinding>;
 }
 
 /**
@@ -280,16 +281,12 @@ export interface CompletionPort {
 }
 
 /**
- * The agent-connector SUSPEND/RESUME seam (the S-2 agent-blind enforcement — GLA-040/041). The agent's CDP is
- * tunnelled through a GLA-side broker (`adapters/connector-cdp`), so `suspend` **truly SEVERS the agent's
- * already-open socket** the instant a recipient-bound window opens (it does NOT merely refuse a fresh attach) — the
- * agent has NO live channel onto the capsule while the human enters a secret (the agent is *waiting* — scenario-01
- * Phase 7). `resume` re-allows connections; the agent re-attaches onto the SAME brokered url and drives again (Phase
- * 8/9, the agent learns the step completed and itself resumes). Injected — the session names no connector adapter.
- * Both are idempotent + best-effort (a suspend/resume failure must not break the saga).
+ * The agent-connector SUSPEND/RESUME seam (the S-2 agent-blind enforcement — GLA-040/041). The connector provider
+ * owns how a live agent channel is severed; session only decides when the human window makes that channel forbidden.
+ * Both operations are idempotent + best-effort (a suspend/resume failure must not break the saga).
  */
 export interface ConnectorControlPort {
-  /** SEVER the agent connector for a session's live capsule (destroy its live socket — no channel while a window is open). */
+  /** SEVER the agent connector for a session's live capsule (no channel while a window is open). */
   suspend(sessionId: SessionId): void;
   /** RESUME the agent connector for a session's live capsule (the window closed; the agent re-attaches). */
   resume(sessionId: SessionId): void;
@@ -365,7 +362,7 @@ export interface SessionTeardownDeps {
 export type ProvisionedSessionRecord = {
   capsuleId: string;
   connectorCapId: CapabilityId;
-  cdpUrl: string;
+  connectorResourceId: string;
   connectorParentRef?: CapabilityId;
 };
 
@@ -472,7 +469,7 @@ export class SessionService {
   private readonly sessions = new Map<SessionId, Session>();
   private readonly provisionDeps: ProvisionDeps | undefined;
   private readonly handoffDeps: HandoffDeps | undefined;
-  /** Per-session provision bookkeeping the saga + re-emit + teardown need (capsule id, connector cap, cdp url). */
+  /** Per-session provision bookkeeping the saga + re-emit + teardown need. */
   private readonly provisioned = new Map<SessionId, ProvisionedSessionRecord>();
   /** The handoff windows, by id (the recipient-bound views onto sessions). The session aggregate stays the truth. */
   private readonly handoffs = new Map<HandoffId, HandoffWindow>();
@@ -587,7 +584,7 @@ export class SessionService {
    * Steps (each with its compensation, run in reverse of what succeeded):
    *   1. mint the agent-connector capability      → revoke it
    *   2. spawn the capsule via the worker          → teardown (stop + reap)
-   *   3. attach the connector (read CDP + stamp ref)→ (no external effect)
+   *   3. attach the connector (resolve resource + stamp ref)→ (no external effect)
    *   4. advance `issued → active`, pin the runtime → (terminal-on-success)
    *
    * @throws GlaErrorException — provisioning not wired (no ProvisionDeps), or a typed step failure
@@ -615,7 +612,7 @@ export class SessionService {
     // Track which compensations are owed as each forward step succeeds.
     let connectorCapId: CapabilityId | undefined;
     let spawned: SpawnedCapsuleHandles | undefined;
-    let boundCdpUrl: string | undefined;
+    let boundConnectorResourceId: string | undefined;
     try {
       // ── Step 1 — mint the agent-connector capability (agent-blind secret-ref ref; GLA-024/025).
       //    It DESCENDS from the session's task capability (parentRef) so revoking the task cascades to
@@ -630,13 +627,20 @@ export class SessionService {
       //    partial capsule down); we still compensate the connector cap below.
       spawned = await deps.worker.spawn(id, session.spec);
 
-      // ── Step 3 — attach the connector: read the CDP url, bind the agent-blind secret_ref, attach.
+      // ── Step 3 — attach the connector: resolve the provider resource, bind the agent-blind secret_ref, attach.
       const probe = await deps.connector.attach(spawned.runtime);
-      const cdpUrl = probe.cdp_url ?? "";
-      if (cdpUrl.length > 0) {
-        deps.connector.bindSecretRef(cdpUrl, minted.secretRef);
-        boundCdpUrl = cdpUrl;
+      const connectorResourceId = probe.resourceId;
+      if (connectorResourceId.length === 0) {
+        throw glaError(
+          "dependency.unavailable",
+          "connector provider returned no resource identity",
+          {
+            detail: { sessionId: id, connectorType: probe.type },
+          },
+        );
       }
+      deps.connector.bindSecretRef(connectorResourceId, minted.secretRef);
+      boundConnectorResourceId = connectorResourceId;
       // Re-attach now that the secret_ref is bound, so the returned connector carries it (agent-blind).
       const connector = await deps.connector.attach(spawned.runtime);
 
@@ -649,9 +653,9 @@ export class SessionService {
       const rec: {
         capsuleId: string;
         connectorCapId: CapabilityId;
-        cdpUrl: string;
+        connectorResourceId: string;
         connectorParentRef?: CapabilityId;
-      } = { capsuleId, connectorCapId, cdpUrl };
+      } = { capsuleId, connectorCapId, connectorResourceId };
       if (minted.parentRef !== undefined) {
         rec.connectorParentRef = minted.parentRef;
       }
@@ -672,9 +676,9 @@ export class SessionService {
       }
       // (b) unbind + revoke the connector capability if it was minted. (Capture into locals so the
       // narrowing survives into the compensation closures.)
-      const cdpToUnbind = boundCdpUrl;
-      if (cdpToUnbind !== undefined) {
-        safeSync(() => deps.connector.unbindSecretRef(cdpToUnbind));
+      const resourceToUnbind = boundConnectorResourceId;
+      if (resourceToUnbind !== undefined) {
+        safeSync(() => deps.connector.unbindSecretRef(resourceToUnbind));
       }
       const capToRevoke = connectorCapId;
       if (capToRevoke !== undefined) {
@@ -690,7 +694,7 @@ export class SessionService {
 
   /**
    * Re-emit the agent-connector for a LIVE capsule (docs/05 `session connector`, GLA-025) — so a crashed
-   * agent re-attaches its CDP client. Prints a `secret_ref`, never a raw secret. A session with **no
+   * agent re-attaches its connector. Prints a `secret_ref`, never a raw secret. A session with **no
    * live capsule** is a catchable **`state.conflict` (exit 7)**, NOT a crash (GLA-025 AC#4).
    *
    * @throws GlaErrorException `state.not_found` (unknown id → exit 5) or `state.conflict` (no live
@@ -831,7 +835,7 @@ export class SessionService {
       const route = await deps.route.program(
         { id: handoffId, sessionId },
         grant.grantId,
-        entry.internalEndpoint,
+        entry,
         grant.scopePath,
       );
       routeProgrammed = true;
@@ -868,9 +872,9 @@ export class SessionService {
       this.handoffTimers.set(handoffId, { clear: timer.clear, grantId: grant.grantId });
 
       // ── S-2 agent-blind (GLA-040/041): SEVER the agent connector now this recipient-bound window is open — the
-      //    agent's CDP is brokered through GLA, so this DESTROYS its already-open socket (not merely refuses a fresh
-      //    attach), leaving NO agent-readable channel while the human enters a secret (keystrokes reach the site,
-      //    never the agent). The connector RESUMES on close (the close path). Best-effort + idempotent.
+      //    the connector provider severs any already-open agent channel, leaving NO agent-readable path while the
+      //    human enters a secret (keystrokes reach the site, never the agent). The connector RESUMES on close.
+      //    Best-effort + idempotent.
       this.completionDeps?.connectorControl?.suspend(sessionId);
 
       // ── Slice 5 completion: start WATCHING the declared detector (the url-watcher) for this window. A matched,
@@ -1274,19 +1278,22 @@ export class SessionService {
 
   /**
    * The connector-teardown facts for a provisioned session — the connector capability id (to revoke)
-   * and the capsule's CDP url (to unbind its agent-blind `secret_ref`) — or `undefined` if the session
-   * was never provisioned (or is already torn down). The terminal cleanup path (the Cleanup Reconciler,
-   * wired at `app`) reads this so a normally-reaped session revokes its connector cap AND drops its
-   * `secret_ref→cdpUrl` binding (no residual) — symmetric with the saga's failure compensation.
+   * and the provider-owned connector resource id (to unbind its agent-blind `secret_ref`) — or `undefined`
+   * if the session was never provisioned (or is already torn down). The terminal cleanup path (the Cleanup
+   * Reconciler, wired at `app`) reads this so a normally-reaped session revokes its connector cap AND drops
+   * its resource binding (no residual) — symmetric with the saga's failure compensation.
    */
   connectorTeardownInfo(
     id: SessionId,
-  ): { connectorCapId: CapabilityId; cdpUrl: string } | undefined {
+  ): { connectorCapId: CapabilityId; connectorResourceId: string } | undefined {
     const rec = this.provisioned.get(id);
     if (rec === undefined) {
       return undefined;
     }
-    return { connectorCapId: rec.connectorCapId, cdpUrl: rec.cdpUrl };
+    return {
+      connectorCapId: rec.connectorCapId,
+      connectorResourceId: rec.connectorResourceId,
+    };
   }
 
   /**
