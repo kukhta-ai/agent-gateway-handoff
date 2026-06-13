@@ -161,6 +161,42 @@ export type SessionGrantVerifyResult =
 /** The short default TTL for a handoff grant (kernel-contracts §2.1: a recipient-bound window is short-lived). */
 const DEFAULT_HANDOFF_GRANT_TTL_MS = 15 * 60 * 1000;
 
+/** Mutable string-set seam for small security caches such as spent enrollment nonces. */
+export interface StringSetStore {
+  has(value: string): boolean;
+  add(value: string): void;
+  delete(value: string): void;
+}
+
+/** Process-local default for {@link StringSetStore}. */
+export class InMemoryStringSetStore implements StringSetStore {
+  private readonly values = new Set<string>();
+
+  constructor(initial?: Iterable<string>) {
+    if (initial !== undefined) {
+      for (const value of initial) {
+        this.values.add(value);
+      }
+    }
+  }
+
+  has(value: string): boolean {
+    return this.values.has(value);
+  }
+
+  add(value: string): void {
+    this.values.add(value);
+  }
+
+  delete(value: string): void {
+    this.values.delete(value);
+  }
+
+  snapshot(): string[] {
+    return [...this.values].sort();
+  }
+}
+
 /**
  * Pull the single caveat of a kind out of a verified capability's caveat set, or undefined.
  * Used to read identity/profile/ops back from the *signed* chain — never from unsigned token bytes.
@@ -188,11 +224,15 @@ export class CapabilityService {
    * that service. A consumed nonce lands here after a successful enrollment; `verifyEnrollmentGrant` rejects any
    * grant whose nonce is already present. In-memory (process-local), mirroring the revocation cache's shape.
    */
-  private readonly spentNonces = new Set<string>();
+  private readonly spentNonces: StringSetStore;
 
   /** @param port The kernel capability port; defaults to the reference HMAC signer. */
-  constructor(port: CapabilityPort = new HmacCapabilitySigner()) {
+  constructor(
+    port: CapabilityPort = new HmacCapabilitySigner(),
+    opts: { spentNonces?: StringSetStore } = {},
+  ) {
     this.port = port;
+    this.spentNonces = opts.spentNonces ?? new InMemoryStringSetStore();
   }
 
   /**
