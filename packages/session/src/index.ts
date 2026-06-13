@@ -362,6 +362,27 @@ export interface SessionTeardownDeps {
   reconcile(sessionId: SessionId): Promise<void>;
 }
 
+export type ProvisionedSessionRecord = {
+  capsuleId: string;
+  connectorCapId: CapabilityId;
+  cdpUrl: string;
+  connectorParentRef?: CapabilityId;
+};
+
+/** Restart-safe snapshot of durable session-owned state. Timers/watchers/live sockets are intentionally excluded. */
+export interface SessionServiceSnapshot {
+  sessions: Session[];
+  provisioned: Array<[SessionId, ProvisionedSessionRecord]>;
+  handoffs: HandoffWindow[];
+  completions: Array<[HandoffId, CompletionEnvelope]>;
+}
+
+/** Store seam for session aggregates and handoff windows. Concrete storage is wired by `app`. */
+export interface SessionStateStore {
+  load(): SessionServiceSnapshot;
+  save(snapshot: SessionServiceSnapshot): void;
+}
+
 /** Options for {@link SessionService}. */
 export interface SessionServiceOptions {
   clock?: SessionClock;
@@ -377,6 +398,13 @@ export interface SessionServiceOptions {
    * and transitions the session terminal, but reaps no capsule (a bare bridge has no worker).
    */
   teardown?: SessionTeardownDeps;
+  /** Restart-safe session aggregate store. Defaults to process-local memory. */
+  store?: SessionStateStore;
+  /**
+   * Recovery behavior for persisted open handoff windows. Default `"safe-close"` because routes/live sockets cannot
+   * be trusted after process restart unless a caller explicitly restores them.
+   */
+  recoverOpenHandoffs?: "safe-close" | "preserve";
 }
 
 /** The public handoff view the Bridge/CLI emit on `handoff open` (docs/05 §4 shape). */
@@ -445,16 +473,7 @@ export class SessionService {
   private readonly provisionDeps: ProvisionDeps | undefined;
   private readonly handoffDeps: HandoffDeps | undefined;
   /** Per-session provision bookkeeping the saga + re-emit + teardown need (capsule id, connector cap, cdp url). */
-  private readonly provisioned = new Map<
-    SessionId,
-    {
-      capsuleId: string;
-      connectorCapId: CapabilityId;
-      cdpUrl: string;
-      /** The connector cap's lineage parent (the task cap id), if minted as a child (Finding #1). */
-      connectorParentRef?: CapabilityId;
-    }
-  >();
+  private readonly provisioned = new Map<SessionId, ProvisionedSessionRecord>();
   /** The handoff windows, by id (the recipient-bound views onto sessions). The session aggregate stays the truth. */
   private readonly handoffs = new Map<HandoffId, HandoffWindow>();
   /** Per-window TTL timer + bound grant id (so close/cancel/expiry can clear the timer + revoke the grant). */
@@ -470,6 +489,8 @@ export class SessionService {
   private readonly completions = new Map<HandoffId, CompletionEnvelope>();
   /** Per-window detector-watch abort flag, so a window close stops its in-flight `watchForCompletion` cleanly. */
   private readonly watchAborts = new Map<HandoffId, { aborted: boolean }>();
+  private readonly store: SessionStateStore | undefined;
+  private readonly recovery: Promise<void>;
 
   constructor(opts: SessionServiceOptions = {}) {
     this.clock = opts.clock ?? SYSTEM_CLOCK;
@@ -478,6 +499,33 @@ export class SessionService {
     this.handoffDeps = opts.handoff;
     this.completionDeps = opts.completion;
     this.teardownDeps = opts.teardown;
+    this.store = opts.store;
+    const snapshot = opts.store?.load();
+    if (snapshot !== undefined) {
+      for (const session of snapshot.sessions) {
+        this.sessions.set(session.id, structuredClone(session));
+      }
+      for (const [id, record] of snapshot.provisioned) {
+        this.provisioned.set(id, structuredClone(record));
+      }
+      for (const window of snapshot.handoffs) {
+        this.handoffs.set(window.id, structuredClone(window));
+      }
+      for (const [id, completion] of snapshot.completions) {
+        this.completions.set(id, structuredClone(completion));
+      }
+      this.recovery =
+        (opts.recoverOpenHandoffs ?? "safe-close") === "safe-close"
+          ? this.safeCloseRecoveredOpenHandoffs()
+          : Promise.resolve();
+    } else {
+      this.recovery = Promise.resolve();
+    }
+  }
+
+  /** Resolves after restart reconciliation has converged, or rejects so the app can fail closed before binding public traffic. */
+  recoveryComplete(): Promise<void> {
+    return this.recovery;
   }
 
   /**
@@ -504,6 +552,7 @@ export class SessionService {
       session.recipient = recipient;
     }
     this.sessions.set(id, session);
+    this.persist();
     return session;
   }
 
@@ -607,6 +656,7 @@ export class SessionService {
         rec.connectorParentRef = minted.parentRef;
       }
       this.provisioned.set(id, rec);
+      this.persist();
 
       return {
         session_id: id,
@@ -633,6 +683,7 @@ export class SessionService {
       // (c) set the session `failed` (the saga is contained to this step — session-service.md).
       session.state = sessionTransition(session.state, "failed");
       session.updatedAt = this.clock.now();
+      this.persist();
       throw asGlaError(e);
     }
   }
@@ -808,6 +859,7 @@ export class SessionService {
       session.route = route;
       session.state = sessionTransition(session.state, "opened");
       session.updatedAt = this.clock.now();
+      this.persist();
 
       // ── Arm the TTL timer: on expiry, expire the window (revoke grant, force-close WS, unmount route).
       const timer = newTimer(ttlMs, () => {
@@ -910,7 +962,9 @@ export class SessionService {
       const session = w !== undefined ? this.sessions.get(w.sessionId) : undefined;
       if (session !== undefined) {
         session.completion = envelope;
+        session.updatedAt = this.clock.now();
       }
+      this.persist();
     }
     return this.closeHandoff(windowId, "completed");
   }
@@ -1106,6 +1160,7 @@ export class SessionService {
     // ── S-2 agent-blind: RESUME the agent connector now the window is closed (the agent itself resumes —
     //    scenario-01 Phase 8/9). Best-effort + idempotent; the capsule is still running for the agent to drive.
     this.completionDeps?.connectorControl?.resume(w.sessionId);
+    this.persist();
     return SessionService.handoffToView(w, this.completions.get(windowId));
   }
 
@@ -1184,6 +1239,7 @@ export class SessionService {
       }
       session.updatedAt = this.clock.now();
     }
+    this.persist();
     return session.state;
   }
 
@@ -1240,6 +1296,7 @@ export class SessionService {
    */
   clearProvisioned(id: SessionId): void {
     this.provisioned.delete(id);
+    this.persist();
   }
 
   /**
@@ -1268,6 +1325,66 @@ export class SessionService {
       template: s.spec.spec.template,
     };
   }
+
+  private async safeCloseRecoveredOpenHandoffs(): Promise<void> {
+    let changed = false;
+    const failed: HandoffId[] = [];
+    for (const w of this.handoffs.values()) {
+      if (w.state !== "open") {
+        continue;
+      }
+      const deps = this.handoffDeps;
+      if (deps !== undefined) {
+        const grantId = w.grantRef as unknown as CapabilityId;
+        const forceClosed = safeSyncResult(() => deps.capability.forceCloseGrant(grantId));
+        const revoked = await safeResult(() => deps.capability.revoke(grantId));
+        const unmounted = await safeResult(() => deps.route.unmount(w.id));
+        if (!forceClosed || !revoked || !unmounted) {
+          failed.push(w.id);
+          continue;
+        }
+      }
+      w.state = handoffTransition(w.state, "expired");
+      const session = this.sessions.get(w.sessionId);
+      if (session !== undefined && session.state === "opened") {
+        session.state = sessionTransition(session.state, "active");
+        if (session.grantTokenRef !== undefined) {
+          // biome-ignore lint/performance/noDelete: clearing an optional field under exactOptionalPropertyTypes
+          delete session.grantTokenRef;
+        }
+        if (session.route !== undefined) {
+          // biome-ignore lint/performance/noDelete: clearing an optional field under exactOptionalPropertyTypes
+          delete session.route;
+        }
+        session.updatedAt = this.clock.now();
+      }
+      changed = true;
+    }
+    if (changed) {
+      this.persist();
+    }
+    if (failed.length > 0) {
+      throw glaError("state.conflict", "recovered open handoffs could not be safely closed", {
+        detail: { handoffIds: failed },
+        retryable: true,
+      });
+    }
+  }
+
+  private persist(): void {
+    this.store?.save({
+      sessions: [...this.sessions.values()].map((session) => structuredClone(session)),
+      provisioned: [...this.provisioned.entries()].map(([id, record]) => [
+        id,
+        structuredClone(record),
+      ]),
+      handoffs: [...this.handoffs.values()].map((window) => structuredClone(window)),
+      completions: [...this.completions.entries()].map(([id, completion]) => [
+        id,
+        structuredClone(completion),
+      ]),
+    });
+  }
 }
 
 /** Run an async compensation step, swallowing errors (compensation must converge — GLA-023 AC#3). */
@@ -1279,12 +1396,32 @@ async function safe(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/** Run an async recovery step and report convergence without exposing secrets in thrown adapter errors. */
+async function safeResult(fn: () => Promise<void>): Promise<boolean> {
+  try {
+    await fn();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Run a sync compensation step, swallowing errors. */
 function safeSync(fn: () => void): void {
   try {
     fn();
   } catch {
     // see safe()
+  }
+}
+
+/** Run a sync recovery step and report convergence without exposing secrets in thrown adapter errors. */
+function safeSyncResult(fn: () => void): boolean {
+  try {
+    fn();
+    return true;
+  } catch {
+    return false;
   }
 }
 

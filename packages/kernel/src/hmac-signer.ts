@@ -16,6 +16,7 @@ import {
   type CapabilityClass,
   type CapabilityPort,
   InMemoryRevocations,
+  type MutableRevocations,
   type RevocationSnapshot,
   type VerifyContext,
   type VerifyResult,
@@ -115,7 +116,7 @@ function freshCapabilityId(): CapabilityId {
  */
 export class HmacCapabilitySigner implements CapabilityPort {
   private readonly key: Buffer;
-  private readonly revocations: InMemoryRevocations;
+  private readonly revocations: MutableRevocations;
 
   /**
    * @param key       The root HMAC signing key. Defaults to 32 fresh random bytes (process-local).
@@ -123,7 +124,7 @@ export class HmacCapabilitySigner implements CapabilityPort {
    */
   constructor(
     key: Buffer = randomBytes(32),
-    revocations: InMemoryRevocations = new InMemoryRevocations(),
+    revocations: MutableRevocations = new InMemoryRevocations(),
   ) {
     this.key = key;
     this.revocations = revocations;

@@ -93,6 +93,10 @@ export interface ServeOptions {
   launcherMode?: "auto" | "full" | "headless";
   /** Override the workspace root (where ephemeral temp profiles are created). */
   workspaceRoot?: string;
+  /**
+   * Restart-safe daemon state root. Critical state is stored outside capsule workspaces with 0700/0600 permissions.
+   */
+  stateRoot?: string;
   /** A logger sink for the startup banner + doctor lines (default `process.stderr`, so stdout stays clean). */
   log?: (line: string) => void;
 }
@@ -207,6 +211,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   const stack = createProvisioningBridge({
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
+    ...(opts.stateRoot !== undefined ? { stateRoot: opts.stateRoot } : {}),
     handoff: {
       ...(opts.authProvider !== undefined ? { authProvider: opts.authProvider } : {}),
       ...(opts.authAssuranceProfile !== undefined
@@ -225,11 +230,18 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       completion: {},
     },
   });
+  try {
+    await stack.ready;
+  } catch (error) {
+    await stack.close().catch(() => {});
+    throw error;
+  }
 
   // ── Bind the Access Gateway on the PUBLIC host:port (the sole public entry, behind Caddy). The provisioning
   //    bridge constructed it but did not bind it — listen here so enrollment + step-up + the WS proxy are
   //    reachable. The actual bound port is read back (ephemeral when 0 was requested, for tests).
   if (stack.gateway === undefined) {
+    await stack.close().catch(() => {});
     throw new Error(
       "internal: handoff gateway was not wired (createProvisioningBridge handoff missing)",
     );
@@ -282,17 +294,10 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       return;
     }
     closed = true;
-    // (1) Tear down every LIVE capsule via the SAME idempotent reconciler the terminal path uses (no orphan).
-    //     `liveSessions()` is the worker's live-capsule truth; reconciling each stops the process group, reaps
-    //     the temp profile, and revokes the connector — restart-safe + idempotent.
-    for (const sessionId of stack.lifecycle.liveSessions()) {
-      await stack.reconciler.reconcile(sessionId).catch(() => {});
-    }
-    // (2) Close the connector broker (the CDP tunnel server) so no brokered socket lingers.
-    await stack.connector.close().catch(() => {});
-    // (3) Close the public gateway (severs any live proxied WS + releases the listener).
-    await stack.gateway?.close().catch(() => {});
-    // (4) Close the LOCAL bridge listener + remove the uds path so a restart can re-bind cleanly.
+    // (1) Close runtime resources owned by the provisioning stack: live capsules, connector broker,
+    //     public gateway, and daemon state-root owner lock.
+    await stack.close().catch(() => {});
+    // (2) Close the LOCAL bridge listener + remove the uds path so a restart can re-bind cleanly.
     await closeBridgeServer(ipc, bridgeEndpoint).catch(() => {});
   };
 
@@ -454,6 +459,7 @@ Usage:
   gla serve [--port <n>] [--host <h>] [--endpoint <path|host:port>] [--public-base-url <url>]
             [--trust-forwarded-prefix <true|false>]
             [--rp-id <id>] [--rp-name <name>] [--launcher <auto|full|headless>] [--workspace-root <dir>]
+            [--state-root <dir>]
             [--auth-provider <webauthn|authentik>] [--auth-assurance-policy <phishing-resistant|password-permitted>]
             [--authentik-issuer-url <url>] [--authentik-client-id <id>]
             [--authentik-client-secret <secret>] [--authentik-redirect-uri <url>] [--authentik-scopes <s>]
@@ -471,7 +477,8 @@ Auth assurance (--auth-assurance-policy, default phishing-resistant): unset dema
   evidence; password-permitted is the explicit policy that admits password-grade evidence.
 
 Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_TRUST_FORWARDED_PREFIX,
-  GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY,
+  GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_WORKSPACE_ROOT, GLA_STATE_ROOT,
+  GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY,
   GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET,
   GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
 
@@ -483,7 +490,8 @@ Then drive it from another shell with the daemon's bridge endpoint:
 /**
  * Parse `gla serve` argv (after the `serve` token) into {@link ServeOptions}, layering flags over env defaults
  * (flags win). `--help`/`-h` returns `{ help: true }`. Recognized flags: `--port`, `--host`, `--endpoint`,
- * `--public-base-url`, `--trust-forwarded-prefix`, `--rp-id`, `--rp-name`, `--launcher`, `--workspace-root`.
+ * `--public-base-url`, `--trust-forwarded-prefix`, `--rp-id`, `--rp-name`, `--launcher`, `--workspace-root`,
+ * `--state-root`.
  * Unknown flags are ignored (forward-compatible), an invalid `--port`/`--launcher`/boolean flag is a stable error
  * the caller surfaces.
  */
@@ -619,6 +627,10 @@ export function parseServeArgs(
   const workspaceRoot = str("workspace-root", "GLA_WORKSPACE_ROOT");
   if (workspaceRoot !== undefined) {
     options.workspaceRoot = workspaceRoot;
+  }
+  const stateRoot = str("state-root", "GLA_STATE_ROOT");
+  if (stateRoot !== undefined) {
+    options.stateRoot = stateRoot;
   }
   return { help: false, options };
 }
