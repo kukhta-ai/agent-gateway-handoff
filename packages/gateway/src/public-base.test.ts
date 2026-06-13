@@ -98,11 +98,13 @@ describe("public base paths in served page data", () => {
       authOptions: "/gla/handoff/auth/options",
       authVerify: "/gla/handoff/auth/verify",
       stream: "/gla/handoff/sess_1",
+      clientAssets: "/gla/handoff/client-assets",
     });
     expect(html).toContain('"path":"/handoff/sess_1"');
     expect(html).toContain('"streamPath":"/gla/handoff/sess_1"');
     expect(html).toContain('"authOptions":"/gla/handoff/auth/options"');
     expect(html).toContain('"authVerify":"/gla/handoff/auth/verify"');
+    expect(html).toContain('"clientAssets":"/gla/handoff/client-assets"');
     expect(html).toContain("fetch(cfg.paths.authOptions");
     expect(html).toContain("fetch(cfg.paths.authVerify");
 
@@ -111,8 +113,11 @@ describe("public base paths in served page data", () => {
       "/handoff/sess_1",
       "recipient",
       "/gla/handoff/sess_1",
+      undefined,
+      "/gla/handoff/client-assets",
     );
     expect(reused).toContain('"streamPath":"/gla/handoff/sess_1"');
-    expect(reused).toContain("cfg.streamPath");
+    expect(reused).toContain('"clientAssets":"/gla/handoff/client-assets"');
+    expect(reused).toContain("browserStreamUrl");
   });
 });

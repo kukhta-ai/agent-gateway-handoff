@@ -19,5 +19,8 @@
   },
   "dependencies": {
     "@gla/kernel": "workspace:*"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.60.0"
   }
 }

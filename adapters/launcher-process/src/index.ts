@@ -322,7 +322,16 @@ export class LauncherProcessAdapter implements LauncherPort {
             provider: "novnc",
             transport: "websocket",
             address: base.novncEndpoint,
-            client: { kind: "gateway-page", ref: "handoff" },
+            client: {
+              kind: "rfb-web-client",
+              ref: "novnc",
+              bootstrap: {
+                module: "core/rfb.js",
+                scaleViewport: true,
+                resizeSession: false,
+                viewOnly: false,
+              },
+            },
             metadata: { mode: base.mode },
           });
         }
@@ -510,8 +519,11 @@ async function freePort(): Promise<number> {
   });
 }
 
-/** A monotonic-ish X display number picker (full mode). Starts high to avoid a real :0. */
-let displayCounter = 90;
+/**
+ * A monotonic-ish X display number picker (full mode). Vitest can run full-mode launcher tests in
+ * different worker processes, so seed from the pid; a module-local counter alone collides at `:91`.
+ */
+let displayCounter = 90 + (process.pid % 1000);
 function pickDisplay(): number {
   displayCounter += 1;
   return displayCounter;
