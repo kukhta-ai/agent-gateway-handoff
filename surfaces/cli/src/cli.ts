@@ -52,6 +52,7 @@ const NOUNS = [
   "task",
   "session",
   "handoff",
+  "auth",
   "help",
 ] as const;
 
@@ -82,6 +83,7 @@ Nouns:
   handoff get <id>            read a window's state (open/completed/expired/cancelled)
   handoff list [--session <id>]  list windows for a session
   handoff cancel <id>         close the window early (revoke grant, unmount route)
+  auth diagnostics [--recipient <ref>]  read provider/enrollment-method diagnostics from the local daemon
   version                     print client (+ server when connected) version
   help                        print this usage
 
@@ -500,6 +502,32 @@ export async function run(
         );
       }
 
+      case "auth": {
+        if (verb !== "diagnostics") {
+          return usageError(out, "usage: gla auth diagnostics [--recipient <ref>]");
+        }
+        const recipient = parsed.flags.get("recipient");
+        if (recipient === true) {
+          return usageError(out, "usage: gla auth diagnostics [--recipient <ref>]");
+        }
+        const request = operatorRequest(services.bridge);
+        if (request === undefined) {
+          throw glaError(
+            "dependency.unavailable",
+            "gla auth diagnostics requires a running daemon; set GLA_ENDPOINT or pass --endpoint to the app binary",
+            { detail: { operation: "authDiagnostics" }, retryable: true },
+          );
+        }
+        // Auth diagnostics are already sanitized at the daemon boundary. The generic handoff redactor would
+        // erase safe policy keys such as `credentialSetupStages`, making the operator diagnostic unusable.
+        out.emit(
+          await request("authDiagnostics", [
+            ...(typeof recipient === "string" ? [{ recipient }] : []),
+          ]),
+        );
+        return ExitCode.OK;
+      }
+
       default:
         return usageError(out, `unknown command: '${noun}'`);
     }
@@ -519,6 +547,18 @@ export async function run(
     });
     return ExitCode.INTERNAL;
   }
+}
+
+function operatorRequest(
+  bridge: BridgeLike,
+): (<T = unknown>(op: string, args?: unknown[]) => Promise<T>) | undefined {
+  const maybe = bridge as BridgeLike & {
+    request?: <T = unknown>(op: string, args?: unknown[]) => Promise<T>;
+  };
+  if (typeof maybe.request === "function") {
+    return maybe.request.bind(maybe);
+  }
+  return undefined;
 }
 
 /**

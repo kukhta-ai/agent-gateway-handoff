@@ -30,6 +30,46 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type DaemonHandle, endpointIsLocal, parseServeArgs, serve } from "./daemon.js";
 
 const recipient = "tg:user:123" as RecipientRef;
+const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
+  provider: "authentik",
+  declared: true,
+  enrollmentFlow: "gla-invitation-enrollment",
+  authenticationFlow: "gla-login-passkey-or-password",
+  invitationStage: "gla-invitation-stage",
+  userWriteStage: "gla-user-write-stage",
+  userLoginStage: "gla-user-login-stage",
+  credentialSetupStages: [
+    {
+      method: "password",
+      stage: "gla-password-prompt",
+      authStrength: "password",
+      assuranceLevel: "password",
+      choiceGroup: "primary-credential",
+      providerEvidence: { amr: ["pwd"] },
+    },
+    {
+      method: "webauthn-passkey",
+      stage: "gla-webauthn-setup",
+      authStrength: "webauthn",
+      assuranceLevel: "phishing-resistant",
+      choiceGroup: "primary-credential",
+      providerEvidence: { amr: ["swk"] },
+    },
+  ],
+  externalSources: [
+    {
+      kind: "oauth",
+      name: "github",
+      source: "github-oauth",
+      choiceGroup: "primary-credential",
+      assuranceLevel: "password",
+    },
+  ],
+  mfaRecoveryMethods: [{ method: "totp", stage: "gla-totp-setup", purpose: "mfa" }],
+  optionalRecipientChoices: [
+    { id: "primary-credential", choices: ["password", "webauthn-passkey", "oauth:github"] },
+  ],
+});
 
 function chromiumAvailable(): boolean {
   try {
@@ -362,6 +402,85 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     expect(text).toContain("phishing-resistant");
     expect(text).not.toContain(secret);
     expect(text).not.toContain("grant=");
+  });
+
+  it("auth diagnostics over the local daemon socket expose the declared authentik enrollment policy", async () => {
+    const secret = "CLIENT_SECRET_CANARY_085";
+    const handle = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: join(scratch("gla-auth-diagnostics-"), "gla.sock"),
+      publicBaseUrl: "https://gla.example/team-a/",
+      authProvider: "authentik",
+      authAssuranceProfile: "phishing-resistant",
+      authentikIssuerUrl: "https://idp.example/application/o/gla/",
+      authentikClientId: "gla-client-canary",
+      authentikClientSecret: secret,
+      authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+      authEnrollmentPolicyJson: AUTHENTIK_ENROLLMENT_POLICY_JSON,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: () => {},
+    });
+    liveHandles.push(handle);
+
+    const diag = await cliOverDaemon(handle.bridgeEndpoint, ["auth", "diagnostics"]);
+    expect(diag.code, diag.stderr).toBe(0);
+    const body = JSON.parse(diag.stdout) as {
+      authProvider?: string;
+      concerns?: string[];
+      enrollmentPolicy?: {
+        enrollmentFlow?: string;
+        credentialSetupStages?: Array<{ method: string }>;
+        externalSources?: Array<{ kind: string; name: string }>;
+        optionalRecipientChoices?: Array<{ choices: string[] }>;
+      };
+      bindingSemantics?: { providerAccount?: string; glaBinding?: string };
+    };
+    expect(body.authProvider).toBe("authentik");
+    expect(body.concerns).toEqual([]);
+    expect(body.enrollmentPolicy?.enrollmentFlow).toBe("gla-invitation-enrollment");
+    expect(body.enrollmentPolicy?.credentialSetupStages?.map((s) => s.method)).toEqual([
+      "password",
+      "webauthn-passkey",
+    ]);
+    expect(body.enrollmentPolicy?.externalSources?.map((s) => `${s.kind}:${s.name}`)).toEqual([
+      "oauth:github",
+    ]);
+    expect(body.enrollmentPolicy?.optionalRecipientChoices?.[0]?.choices).toContain(
+      "webauthn-passkey",
+    );
+    expect(body.bindingSemantics?.providerAccount).toMatch(/not a GLA enrollment/i);
+    expect(diag.stdout).not.toContain(secret);
+
+    const scoped = await cliOverDaemon(handle.bridgeEndpoint, [
+      "auth",
+      "diagnostics",
+      "--recipient",
+      recipient,
+    ]);
+    expect(scoped.code, scoped.stderr).toBe(0);
+    const scopedBody = JSON.parse(scoped.stdout) as {
+      recipientBinding?: {
+        recipient?: string;
+        glaEnrolled?: boolean;
+        authStrength?: string;
+        subjectBinding?: string;
+        providerAccount?: string;
+        handoffPrecondition?: string;
+      };
+    };
+    expect(scopedBody.recipientBinding).toMatchObject({
+      recipient,
+      glaEnrolled: false,
+      authStrength: "none",
+      subjectBinding: "absent",
+      handoffPrecondition: "missing-gla-binding",
+    });
+    expect(scopedBody.recipientBinding?.providerAccount).toMatch(
+      /does not make this recipient enrolled/i,
+    );
+    expect(scoped.stdout).not.toContain(secret);
   });
 
   it("graceful shutdown closes BOTH listeners (gateway HTTP + bridge socket) and is idempotent", async () => {
