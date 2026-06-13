@@ -36,8 +36,25 @@ import {
   authAssurancePolicyFromRequiredAuthStrength,
   authAssuranceSufficient,
 } from "@gla/kernel";
+import { authCallbackPageHtml } from "./callback-page.js";
 import { enrollPageHtml, refusalPageHtml } from "./enroll-page.js";
 import { handoffPageHtml, handoffRefusalHtml, handoffReusedPageHtml } from "./handoff-page.js";
+import {
+  type PublicBase,
+  internalPathForPublicRequest,
+  parsePublicBaseUrl,
+  publicPath,
+  publicUrl,
+} from "./public-base.js";
+
+export {
+  PublicBaseUrlError,
+  internalPathForPublicRequest,
+  parsePublicBaseUrl,
+  publicPath,
+  publicUrl,
+} from "./public-base.js";
+export type { PublicBase } from "./public-base.js";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
 export const GATEWAY_MODULE = "@gla/gateway" as const;
@@ -218,6 +235,19 @@ export interface GatewayOptions {
    */
   authReuseTtlMs?: number;
   /**
+   * The externally reachable public base URL. When it contains a non-root path, generated links and browser
+   * same-origin calls use that public prefix while internal route scope paths remain root-shaped.
+   */
+  publicBaseUrl?: string;
+  /**
+   * Trust `X-Forwarded-Prefix` as proof that a stripping reverse proxy received the configured public prefix.
+   *
+   * Default false: prefix-preserving proxying works without trusting client-supplied headers, and a direct client
+   * cannot publish unprefixed aliases by spoofing the header. Enable only behind an edge that overwrites or strips
+   * incoming `X-Forwarded-Prefix` before forwarding to GLA.
+   */
+  trustForwardedPrefix?: boolean;
+  /**
    * The bind host. Default `0.0.0.0` (the hermes-1 deployment target, behind host Caddy). Tests pass `127.0.0.1`
    * with an ephemeral port.
    */
@@ -301,6 +331,10 @@ export class AccessGateway {
   >();
   /** The auth-reuse TTL (ms) — how long a step-up stays valid for reuse on a later window. 0 disables reuse. */
   private readonly authReuseTtlMs: number;
+  /** The public URL/path contract used for links, page calls, and inbound prefix normalization. */
+  private readonly publicBase: PublicBase;
+  /** Whether to trust `X-Forwarded-Prefix` for strip-prefix proxy mode. */
+  private readonly trustForwardedPrefix: boolean;
   /** Live proxied sockets per grant id, so a revoke/force-close can sever them (GLA-039 AC#3). */
   private readonly liveSockets = new Map<CapabilityId, Set<Socket>>();
   /** The WS-proxy upstream connect timeout (ms) — a stalled dial cannot pin an fd waiting on `connect`. */
@@ -319,10 +353,12 @@ export class AccessGateway {
         ? authAssurancePolicyFromRequiredAuthStrength(opts.requiredAuthStrength)
         : authAssurancePolicyFromProfile());
     this.authReuseTtlMs = opts.authReuseTtlMs ?? 15 * 60 * 1000;
+    this.publicBase = parsePublicBaseUrl(opts.publicBaseUrl ?? "http://localhost/");
     this.host = opts.host ?? "0.0.0.0";
     this.port = opts.port ?? 3000;
     this.proxyConnectTimeoutMs = opts.proxyConnectTimeoutMs ?? 10_000;
     this.proxyIdleTimeoutMs = opts.proxyIdleTimeoutMs ?? 120_000;
+    this.trustForwardedPrefix = opts.trustForwardedPrefix ?? false;
   }
 
   /** Start listening. Returns the actual bound `{ host, port }` (port is the ephemeral one when 0 was requested). */
@@ -384,16 +420,12 @@ export class AccessGateway {
 
   /** Build an enrollment invite link for a recipient's grant token, given the public base URL. */
   static enrollLink(baseUrl: string, grant: OpaqueToken): string {
-    const u = new URL("/enroll", baseUrl);
-    u.searchParams.set("grant", grant);
-    return u.toString();
+    return publicUrl(baseUrl, "/enroll", { grant });
   }
 
   /** Build a recipient-bound handoff link for a grant token + the route path, given the public base URL. */
   static handoffLink(baseUrl: string, path: string, grant: OpaqueToken): string {
-    const u = new URL(path, baseUrl);
-    u.searchParams.set("grant", grant);
-    return u.toString();
+    return publicUrl(baseUrl, path, { grant });
   }
 
   // ── RouteGatewayPort — the Route controller programs the gateway (Slice 4b, GLA-033) ──────────────────────
@@ -447,7 +479,11 @@ export class AccessGateway {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      const path = url.pathname;
+      const path = this.internalRequestPath(url.pathname, req);
+      if (path === undefined) {
+        this.sendJson(res, 404, { error: { code: "catalog.unknown", message: "not found" } });
+        return;
+      }
       const method = (req.method ?? "GET").toUpperCase();
 
       // ── Phase E — enrollment (Slice 4a). Only wired when the enrollment seams are present. ──
@@ -464,6 +500,20 @@ export class AccessGateway {
           await this.handleEnrollVerify(req, res);
           return;
         }
+      }
+
+      // ── Delegated-auth callback landing. Provider-neutral: it restores same-origin GLA state and re-POSTs
+      // `{code,state}` to the unchanged verify routes. The IdP never receives the GLA grant.
+      if (method === "GET" && path === "/auth/callback") {
+        this.sendHtml(
+          res,
+          200,
+          authCallbackPageHtml({
+            enrollVerify: this.publicPath("/enroll/verify"),
+            handoffVerify: this.publicPath("/handoff/auth/verify"),
+          }),
+        );
+        return;
       }
 
       // ── Phase 6/12 — handoff (Slice 4b). Verify the recipient-bound grant + require the bound identity. ──
@@ -513,7 +563,14 @@ export class AccessGateway {
       return;
     }
     // The recipient label is display-only; the binding is the verified grant's recipient caveat.
-    this.sendHtml(res, 200, enrollPageHtml(grant, String(verified.recipient)));
+    this.sendHtml(
+      res,
+      200,
+      enrollPageHtml(grant, String(verified.recipient), {
+        options: this.publicPath("/enroll/options"),
+        verify: this.publicPath("/enroll/verify"),
+      }),
+    );
   }
 
   /**
@@ -663,11 +720,28 @@ export class AccessGateway {
     //    verified above (not bypassable). An expired/absent validity falls through to the full step-up page (Phase 6).
     if (this.recipientAuthValid(verified.recipient)) {
       this.authorizedGrants.add(verified.capability.id as CapabilityId);
-      this.sendHtml(res, 200, handoffReusedPageHtml(grant, route.path, String(verified.recipient)));
+      this.sendHtml(
+        res,
+        200,
+        handoffReusedPageHtml(
+          grant,
+          route.path,
+          String(verified.recipient),
+          this.publicPath(route.path),
+        ),
+      );
       return;
     }
     // Serve the step-up page (runs navigator.credentials.get against the recipient's registered credential).
-    this.sendHtml(res, 200, handoffPageHtml(grant, route.path, String(verified.recipient)));
+    this.sendHtml(
+      res,
+      200,
+      handoffPageHtml(grant, route.path, String(verified.recipient), {
+        authOptions: this.publicPath("/handoff/auth/options"),
+        authVerify: this.publicPath("/handoff/auth/verify"),
+        stream: this.publicPath(route.path),
+      }),
+    );
   }
 
   /**
@@ -788,7 +862,8 @@ export class AccessGateway {
   private handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      const route = this.routes.get(url.pathname);
+      const path = this.internalRequestPath(url.pathname, req);
+      const route = path !== undefined ? this.routes.get(path) : undefined;
       const sessionGrants = this.sessionGrants;
       if (route === undefined || sessionGrants === undefined) {
         // No such route is publicly reachable (the route exists only while its window is open — GLA-039 AC#2).
@@ -874,6 +949,22 @@ export class AccessGateway {
   }
 
   // ── handoff helpers ───────────────────────────────────────────────────────────────────────────────────
+
+  /** Public same-origin path for an internal gateway route path. */
+  private publicPath(routePath: string): string {
+    return publicPath(this.publicBase, routePath);
+  }
+
+  /** Map an inbound request path to the internal route table path, or undefined if outside the public base. */
+  private internalRequestPath(pathname: string, req: IncomingMessage): string | undefined {
+    const forwardedPrefix = firstHeader(req.headers["x-forwarded-prefix"]);
+    return internalPathForPublicRequest(
+      this.publicBase,
+      pathname,
+      forwardedPrefix,
+      this.trustForwardedPrefix,
+    );
+  }
 
   /**
    * Verify a presented handoff grant against a route — the stateless edge check (GLA-035). Delegates to the injected
@@ -1176,4 +1267,11 @@ function isCoded(e: unknown): e is { code: ErrorCode } {
     "code" in e &&
     typeof (e as { code: unknown }).code === "string"
   );
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
 }

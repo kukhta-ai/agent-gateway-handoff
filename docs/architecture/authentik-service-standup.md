@@ -207,8 +207,11 @@ Provider and GLA must **agree on one origin** — the same origin GLA's gateway 
 these resolve to / agree with **`GLA_PUBLIC_BASE_URL`** (in hermes-1, `https://203.0.113.10/`):
 
 - **The OIDC `redirect_uri`** (`GLA_AUTHENTIK_REDIRECT_URI`, `see authentik-integration.md §7`) is a URL on
-  **GLA's public origin** — the **callback path GLA serves** (the same-origin return-detection page,
-  `§5.1`), e.g. `https://203.0.113.10/auth/callback`. The authentik RP app's allowed redirect URI **equals**
+  **GLA's public origin and under `GLA_PUBLIC_BASE_URL`'s public path prefix** — the **callback path GLA
+  serves** (the same-origin return-detection page, `§5.1`), e.g.
+  `https://203.0.113.10/auth/callback` for a root deployment or
+  `https://gla.example/team-a/auth/callback` when
+  `GLA_PUBLIC_BASE_URL=https://gla.example/team-a/`. The authentik RP app's allowed redirect URI **equals**
   this exact value (authentik exact-matches it).
 - **The authentik issuer** (`GLA_AUTHENTIK_ISSUER_URL`) is wherever authentik answers (a host/subdomain reached
   over the network — `§1`). It need not be the *same* origin as GLA, but the adapter validates the `id_token`
@@ -235,6 +238,15 @@ verify route (`see authentik-dual-method-flow.md §5.2`). GLA-074's Caddy/route 
   authentik sees only the OIDC `code`/`state`, never the GLA grant. The callback path is on GLA's origin,
   **not** authentik's, and is **not** the local bridge (S-6). This is the one piece of routing GLA-074 wires
   that is specific to the authentik path (the gateway/`:3000` mapping already exists).
+
+For subpath/custom-base deployments, the public base path is part of this same agreement. A recommended Caddy
+shape is `handle_path /team-a/*` → `reverse_proxy <gla-upstream>` with `X-Forwarded-Prefix: /team-a`, so
+recipient URLs are `/team-a/enroll`, `/team-a/handoff/...`, and `/team-a/auth/callback` while GLA receives its
+root-shaped internal routes. This strip-prefix shape requires `GLA_TRUST_FORWARDED_PREFIX=true` **only behind an
+edge that overwrites/sanitizes client-supplied `X-Forwarded-Prefix`**; otherwise a client could spoof an unprefixed
+alias. Existing exposure layers that preserve the prefix are also valid when `GLA_PUBLIC_BASE_URL` contains the
+same prefix and do not need the trust flag. In both cases Caddy is transport/path routing only; the Access Gateway
+remains the authorization membrane for grants, recipient caveats, auth assurance, and WebSocket reach.
 
 > **No grant leak:** the OIDC `state`/`nonce`/`code` flow to/from authentik; the **GLA grant** is confined to
 > GLA's own origin (handoff page → callback → `/handoff/auth/verify`). authentik never receives it. (This is

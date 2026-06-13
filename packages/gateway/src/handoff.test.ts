@@ -244,12 +244,16 @@ function openUpgrade(
   port: number,
   path: string,
   grant: string,
+  headers: Readonly<Record<string, string>> = {},
 ): Promise<{ firstChunk: string; socket: Socket; closed: Promise<void> }> {
   return new Promise((resolve, reject) => {
     const socket = netConnect({ host, port }, () => {
       const target = `${path}?grant=${encodeURIComponent(grant)}`;
+      const extraHeaders = Object.entries(headers)
+        .map(([k, v]) => `${k}: ${v}\r\n`)
+        .join("");
       socket.write(
-        `GET ${target} HTTP/1.1\r\nHost: ${host}:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+        `GET ${target} HTTP/1.1\r\nHost: ${host}:${port}\r\n${extraHeaders}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
       );
     });
     let firstChunk = "";
@@ -306,6 +310,27 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     const html = await res.text();
     expect(html).toMatch(/Verify with passkey/);
     expect(html).toMatch(/navigator\.credentials\.get/);
+  });
+
+  it("serves handoff under a configured public base path while keeping the internal scope path unchanged", async () => {
+    const { base, gateway, close } = await bootHandoffGateway(
+      new StubSessionGrants(),
+      new StubStepUp(),
+      { publicBaseUrl: "https://gla.example/gla/" },
+    );
+    closers.push(close);
+    await gateway.mount(mountReq("ws://127.0.0.1:1/"));
+
+    const res = await fetch(`${base}/gla${ROUTE_PATH}?grant=valid`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain(`"path":"${ROUTE_PATH}"`);
+    expect(html).toContain(`"streamPath":"/gla${ROUTE_PATH}"`);
+    expect(html).toContain('"authOptions":"/gla/handoff/auth/options"');
+    expect(html).toContain('"authVerify":"/gla/handoff/auth/verify"');
+
+    const rootAlias = await fetch(`${base}${ROUTE_PATH}?grant=valid`);
+    expect(rootAlias.status).toBe(404);
   });
 
   it("ABSENT grant on a mounted route → 400, the refusal page", async () => {
@@ -419,6 +444,35 @@ describe("Access Gateway — handoff step-up options + verify decision (GLA-035)
     expect(res.status).toBe(200);
     expect(((await res.json()) as { authorized?: boolean }).authorized).toBe(true);
     expect(gateway.isGrantAuthorized(GRANT_ID)).toBe(true);
+  });
+
+  it("POST /handoff/auth/verify works through the public prefix but verifies the internal route scope", async () => {
+    const grants = new StubSessionGrants();
+    const stepUp = new StubStepUp();
+    const { base, gateway, close } = await bootHandoffGateway(grants, stepUp, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+    await gateway.mount(mountReq("ws://127.0.0.1:1/"));
+
+    const res = await fetch(`${base}/gla/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(res.status).toBe(200);
+    expect(gateway.isGrantAuthorized(GRANT_ID)).toBe(true);
+
+    const publicPathInBody = await fetch(`${base}/gla/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grant: "valid",
+        path: `/gla${ROUTE_PATH}`,
+        assertion: { fake: true },
+      }),
+    });
+    expect(publicPathInBody.status).toBe(400);
   });
 
   it("POST /handoff/auth/verify with a FAILED assertion → 403, the grant is NOT authorized", async () => {
@@ -558,6 +612,86 @@ describe("Access Gateway — WS upgrade proxy to the capsule (GLA-038/039)", () 
     });
     expect(got).toContain("ECHO:PING");
     up.socket.destroy();
+  });
+
+  it("an AUTHORIZED prefixed public WebSocket upgrade is proxied to the capsule endpoint", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const grants = new StubSessionGrants();
+    const stepUp = new StubStepUp();
+    const { base, host, port, gateway, close } = await bootHandoffGateway(grants, stepUp, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+    await gateway.mount(mountReq(upstream.endpoint));
+
+    const verRes = await fetch(`${base}/gla/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(verRes.status).toBe(200);
+
+    const up = await openUpgrade(host, port, `/gla${ROUTE_PATH}`, "valid");
+    expect(up.firstChunk).toMatch(/101 Switching Protocols/);
+    expect(up.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+    up.socket.destroy();
+  });
+
+  it("an AUTHORIZED strip-prefix proxy WebSocket upgrade is accepted only with the matching forwarded prefix", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const grants = new StubSessionGrants();
+    const stepUp = new StubStepUp();
+    const { base, host, port, gateway, close } = await bootHandoffGateway(grants, stepUp, {
+      publicBaseUrl: "https://gla.example/gla/",
+      trustForwardedPrefix: true,
+    });
+    closers.push(close);
+    await gateway.mount(mountReq(upstream.endpoint));
+
+    const verRes = await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-prefix": "/gla" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(verRes.status).toBe(200);
+
+    const refused = await openUpgrade(host, port, ROUTE_PATH, "valid");
+    expect(refused.firstChunk).toMatch(/404 Not Found/);
+    refused.socket.destroy();
+
+    const proxied = await openUpgrade(host, port, ROUTE_PATH, "valid", {
+      "X-Forwarded-Prefix": "/gla",
+    });
+    expect(proxied.firstChunk).toMatch(/101 Switching Protocols/);
+    expect(proxied.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+    proxied.socket.destroy();
+  });
+
+  it("does not trust spoofed X-Forwarded-Prefix for unprefixed handoff routes by default", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const grants = new StubSessionGrants();
+    const stepUp = new StubStepUp();
+    const { base, host, port, gateway, close } = await bootHandoffGateway(grants, stepUp, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+    await gateway.mount(mountReq(upstream.endpoint));
+
+    const verRes = await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-prefix": "/gla" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(verRes.status).toBe(404);
+
+    const refused = await openUpgrade(host, port, ROUTE_PATH, "valid", {
+      "X-Forwarded-Prefix": "/gla",
+    });
+    expect(refused.firstChunk).toMatch(/404 Not Found/);
+    refused.socket.destroy();
   });
 
   it("an UN-AUTHORIZED grant upgrade is REFUSED (resolves onward to nothing — GLA-035 AC#2)", async () => {
