@@ -182,12 +182,12 @@ is a **one-time, provider-agnostic generalization**, not authentik logic.
    (`navigator.credentials.create` ↔ `location.assign(authorizeUrl)`), since delegated **enrollment** needs
    the identical redirect (this is the shared browser path `authentik-enrollment.md §8` flagged — GLA-072
    builds it once, GLA-070's service slice consumes it).
-3. **The adapter-owned callback listener** — a small HTTP endpoint **owned by `@gla/auth-authentik` and stood
-   up in `packages/app` composition**, fronted by the **same host Caddy** at a distinct path (e.g.
-   `/auth/callback`), **NOT a new gateway route** (`§8`). It receives `?code&state` and **re-POSTs
-   `{code,state}` to the gateway's existing `/handoff/auth/verify`** (for step-up) or `/enroll/verify` (for
-   enrollment) **as the opaque `assertion`/`attestation`** — i.e. **option (i)**. After the gateway authorizes
-   the grant, the callback bounces the browser back to the handoff route so the existing WS-open path resumes.
+3. **The gateway-served callback landing page** — a small provider-neutral page on GLA's public origin (for
+   example `/auth/callback`, and under the configured public base path for subpath deployments). It receives
+   `?code&state`, restores the original GLA grant from same-origin sessionStorage, and **re-POSTs `{code,state}`
+   to the gateway's existing `/handoff/auth/verify`** (for step-up) or `/enroll/verify` (for enrollment) **as
+   the opaque `assertion`/`attestation`** — i.e. **option (i)**. After the gateway authorizes the grant, the page
+   opens the existing handoff stream path so the WS-open path resumes.
 
 **The gateway's verify path stays UNCHANGED.** `POST /handoff/auth/verify` already takes `body.assertion` as
 **opaque `unknown`** and passes it straight to `stepUp.verifyAuthentication(recipient, body.assertion)`
@@ -211,14 +211,18 @@ payload** — **none of the security-critical paths** (`docs/components/access-g
 `docs/01-architecture-overview.md §6`):
 
 - **Sole public entry — preserved.** The gateway remains the only door; the callback is an **adapter-owned**
-  endpoint behind the **same** Caddy, not a second gateway door and **never** the local bridge
+   endpoint behind the **same** Caddy, not a second gateway door and **never** the local bridge
   (`daemon.ts`'s S-6 guard keeps the bridge local). It is a *new public surface* — the one genuinely new thing
   — so `§8` treats it as a first-class review target.
 - **Grant-verify-every-request — preserved.** The page change cannot bypass anything: `/handoff/auth/options`,
   `/handoff/auth/verify`, and **every WS upgrade** still verify the recipient-bound grant statelessly
   (signature, recipient caveat, TTL, scope, revocation) **before** anything else, exactly as today. The
-  callback's re-POST to `/handoff/auth/verify` **carries the grant** and is verified like any other request —
-  it is not a privileged path.
+  callback's same-origin re-POST to the public-base-aware `/handoff/auth/verify` path **carries the grant** and
+  is verified like any other request — it is not a privileged path. Under a non-root `GLA_PUBLIC_BASE_URL`, the
+  browser path is prefixed (for example `/team-a/handoff/auth/verify`) while the gateway normalizes to the same
+  internal verify route before enforcing the grant. Strip-prefix proxying is supported only when the deployment
+  explicitly trusts `X-Forwarded-Prefix` behind a sanitizing edge; prefix-preserving proxying needs no trusted
+  forwarded header.
 - **SSRF-closed WS proxy — preserved.** The proxy still opens only to a **mounted route's** `internalEndpoint`,
   replays only handshake-relevant headers (dropping `Cookie`/`Authorization`/`X-Forwarded-*`), with connect +
   idle timeouts. The page generalization touches none of this.
@@ -289,11 +293,11 @@ machinery, with the two acceptance properties observable. Concrete steps:
 1. **Generalize the served pages (provider-agnostic).** In `handoff-page.ts` and `enroll-page.ts`, branch on
    the opaque options' shape: `kind:"redirect"` → `location.assign(authorizeUrl)`; else the existing in-page
    WebAuthn ceremony (`§5.2`). No provider name enters the gateway.
-2. **Build the adapter-owned callback** (in `@gla/auth-authentik` + `packages/app` composition): a small public
-   endpoint behind the same Caddy that takes `?code&state` and **re-POSTs `{code,state}`** to the **existing**
-   `/handoff/auth/verify` (step-up) or `/enroll/verify` (enroll) as the opaque assertion, then bounces the
-   browser to the handoff route (`§5.2`, option (i)). This is the **shared** callback `authentik-enrollment.md
-   §8` flagged — built once here, consumed by both step-up and enrollment.
+2. **Serve the gateway callback landing page**: a small public page behind the same Caddy that takes
+   `?code&state`, restores same-origin GLA state, and **re-POSTs `{code,state}`** to the **existing**
+   `/handoff/auth/verify` (step-up) or `/enroll/verify` (enroll) as the opaque assertion, then opens the existing
+   handoff stream path (`§5.2`, option (i)). This is the **shared** callback `authentik-enrollment.md §8`
+   flagged — built once here, consumed by both step-up and enrollment.
 3. **Make the `/enroll/verify` response echo the recorded strength** (`index.ts:592`), provider-agnostically
    (`§5.2.4`).
 4. **Wire the policy.** Confirm `GLA_AUTH_ASSURANCE_POLICY` / `authAssuranceProfile` flows from composition
@@ -326,7 +330,7 @@ machinery, with the two acceptance properties observable. Concrete steps:
 | Already provided (GLA-068 adapter / GLA-070 service) | GLA-072 builds |
 |---|---|
 | `challenge`→`{kind:"redirect",authorizeUrl}`, `verifyAssertion({code,state})`→`{ok,authStrength,assurance?}`, the `amr`/`acr`→assurance map (`strength.ts`), `FakeAuthentik` | the **generic page branch** in `handoff-page.ts`/`enroll-page.ts` (provider-agnostic) |
-| the gateway's provider-neutral `AuthAssurancePolicy` / `strengthSufficient` gating | the **adapter-owned callback** that re-POSTs `{code,state}` to the unchanged verify routes (shared with enroll) |
+| the gateway's provider-neutral `AuthAssurancePolicy` / `strengthSufficient` gating | the **gateway-served callback page** that re-POSTs `{code,state}` to the unchanged verify routes (shared with enroll) |
 | service-layer enrollment + `isEnrolled` (GLA-070) | the **`/enroll/verify` strength-echo** fix (`:592`) + the dual-method E2E tests |
 
 ---
@@ -386,7 +390,7 @@ concentrated in the **redirect/callback realization** — the review must prove 
 4. **Finalized page mechanism = option (i) + a minimal generic (ii):** GLA-072 generalizes
    `handoff-page.ts`/`enroll-page.ts` to branch on the opaque options' `kind` (`redirect` →
    `location.assign(authorizeUrl)`; else the in-page WebAuthn ceremony) — **provider-agnostic** — and builds
-   an **adapter-owned callback** that re-POSTs `{code,state}` to the **unchanged** `/handoff/auth/verify` and
+   a **gateway-served callback page** that re-POSTs `{code,state}` to the **unchanged** `/handoff/auth/verify` and
    `/enroll/verify`; the gateway verify path is byte-for-byte unchanged; the security invariants hold; the
    review gates on the generalization being genuinely generic (`§5`, `§8`).
 5. The recipient chooses a method at authentik; no-passkey uses the password stage; a failed attempt → a

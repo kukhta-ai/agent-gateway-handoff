@@ -23,16 +23,43 @@
 //   • the browser-side redirect/return path is exercised end-to-end by the GLA-076 E2E; the gateway tests drive the
 //     UNCHANGED verify route in-process.
 
+/** Same-origin public paths the handoff page calls back into. */
+export interface HandoffPagePaths {
+  /** Same-origin path for the step-up options request. */
+  readonly authOptions: string;
+  /** Same-origin path for the step-up completion request. */
+  readonly authVerify: string;
+  /** Same-origin path for the WebSocket upgrade route as seen by the recipient's browser. */
+  readonly stream: string;
+}
+
+const ROOT_HANDOFF_PATHS = (routePath: string): HandoffPagePaths => ({
+  authOptions: "/handoff/auth/options",
+  authVerify: "/handoff/auth/verify",
+  stream: routePath,
+});
+
 /**
- * Render the handoff step-up page HTML. The grant token + the route path are embedded so the page's fetches and the
- * WS upgrade carry them; both are still verified server-side on every request (the page cannot bypass the grant
- * check — GLA-035). `recipientLabel` is a display-only hint (the binding is the grant's recipient caveat the server
- * reads from the signed grant).
+ * Render the handoff step-up page HTML. The grant token + the INTERNAL route path are embedded so auth POST bodies
+ * preserve the grant scope; `paths.stream` is the PUBLIC same-origin route path the browser connects to. Both are
+ * still verified server-side on every request (the page cannot bypass the grant check — GLA-035). `recipientLabel`
+ * is a display-only hint (the binding is the grant's recipient caveat the server reads from the signed grant).
  */
-export function handoffPageHtml(grant: string, routePath: string, recipientLabel: string): string {
+export function handoffPageHtml(
+  grant: string,
+  routePath: string,
+  recipientLabel: string,
+  paths: HandoffPagePaths = ROOT_HANDOFF_PATHS(routePath),
+): string {
   // JSON-encoded data island (safe: JSON.stringify escapes quotes; the values are a base64url token, an opaque
   // path, and an opaque recipient ref — none containing `</script`).
-  const data = JSON.stringify({ grant, path: routePath, recipient: recipientLabel });
+  const data = JSON.stringify({
+    grant,
+    path: routePath,
+    streamPath: paths.stream,
+    recipient: recipientLabel,
+    paths,
+  });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -109,7 +136,8 @@ export function handoffPageHtml(grant: string, routePath: string, recipientLabel
   const openStreamFor = (ctx) => {
     const c = ctx || cfg;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = proto + "//" + location.host + c.path + "?grant=" + encodeURIComponent(c.grant);
+    const streamPath = c.streamPath || c.path;
+    const url = proto + "//" + location.host + streamPath + "?grant=" + encodeURIComponent(c.grant);
     try {
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
@@ -126,7 +154,7 @@ export function handoffPageHtml(grant: string, routePath: string, recipientLabel
   const submitAssertion = async (assertion, ctx) => {
     const c = ctx || cfg;
     say("Verifying…");
-    const verRes = await fetch("/handoff/auth/verify", {
+    const verRes = await fetch(cfg.paths.authVerify, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ grant: c.grant, path: c.path, assertion: assertion }),
@@ -169,7 +197,7 @@ export function handoffPageHtml(grant: string, routePath: string, recipientLabel
     btn.disabled = true;
     say("Requesting a verification challenge…");
     try {
-      const optRes = await fetch("/handoff/auth/options", {
+      const optRes = await fetch(cfg.paths.authOptions, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ grant: cfg.grant, path: cfg.path }),
@@ -184,7 +212,7 @@ export function handoffPageHtml(grant: string, routePath: string, recipientLabel
       // have no kind and fall through to the UNCHANGED in-page ceremony below.
       if (options && options.kind === "redirect") {
         // Preserve the grant/path SAME-ORIGIN across the top-level redirect (NOT in the redirect_uri the provider sees).
-        try { sessionStorage.setItem("gla.handoff", JSON.stringify({ grant: cfg.grant, path: cfg.path })); } catch (e) {}
+        try { sessionStorage.setItem("gla.handoff", JSON.stringify({ grant: cfg.grant, path: cfg.path, streamPath: cfg.streamPath })); } catch (e) {}
         say("Redirecting you to sign in…");
         // Navigate ONLY to the server-built authorizeUrl (operator config + fixed redirect_uri) — no request input.
         location.assign(options.authorizeUrl);
@@ -218,8 +246,9 @@ export function handoffReusedPageHtml(
   grant: string,
   routePath: string,
   recipientLabel: string,
+  streamPath: string = routePath,
 ): string {
-  const data = JSON.stringify({ grant, path: routePath, recipient: recipientLabel });
+  const data = JSON.stringify({ grant, path: routePath, streamPath, recipient: recipientLabel });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -246,7 +275,7 @@ export function handoffReusedPageHtml(
   const say = (msg, cls) => { status.textContent = msg; status.className = cls || ""; };
   // No ceremony — auth was reused. Open the noVNC stream over the gateway's already-authorized WS upgrade directly.
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = proto + "//" + location.host + cfg.path + "?grant=" + encodeURIComponent(cfg.grant);
+  const url = proto + "//" + location.host + cfg.streamPath + "?grant=" + encodeURIComponent(cfg.grant);
   try {
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";

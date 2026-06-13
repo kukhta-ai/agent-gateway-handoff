@@ -11,6 +11,12 @@
 # GLA's own GLA_PUBLIC_BASE_URL (gla-core's env) MUST equal the public URL served here, because handoff and
 # enrollment links are built against it and must resolve, through this proxy, back to the same daemon.
 #
+# Supported public-base shapes:
+#   • dedicated root:  GLA_PUBLIC_BASE_URL=https://gla.example/
+#   • subpath mount:   GLA_PUBLIC_BASE_URL=https://gla.example/team-a/
+# The Access Gateway remains the authorization membrane in both cases. Caddy terminates TLS and routes bytes
+# (including WebSocket upgrades); GLA still verifies grants, recipients, auth strength, and mounted route scope.
+#
 # ── The upstream: point at whatever actually reaches GLA's :3000 on THIS topology ──────────────────────────
 #   • Caddy and GLA on the SAME host (or same container)        → reverse_proxy 127.0.0.1:3000
 #   • Caddy on the HOST, GLA in a CONTAINER (the hermes-1 case) → reverse_proxy to the host-side forward, NOT
@@ -37,3 +43,27 @@
 	# Optional: keep the access log so a failed handoff can be traced at the edge.
 	log
 }
+
+# ── Subpath / custom-base variant ────────────────────────────────────────────────────────────────────────
+# Use this shape when GLA is mounted under an existing site prefix (example: https://gla.example/team-a/).
+# Set gla-core's env to:
+#   GLA_PUBLIC_BASE_URL=https://gla.example/team-a/
+#
+# `handle_path` strips /team-a before proxying to GLA's root-shaped internal routes (/enroll,
+# /handoff/auth/*, /handoff/<id>). `X-Forwarded-Prefix` records the stripped public prefix so GLA can verify
+# the request belongs to the configured public base. Because this header is trusted by GLA only when explicitly
+# enabled, gla-core must also set GLA_TRUST_FORWARDED_PREFIX=true and this edge must overwrite/sanitize any
+# client-supplied X-Forwarded-Prefix before proxying. WebSocket upgrades through /team-a/handoff/<id> are still
+# proxied by Caddy and authorized by GLA, not by Caddy.
+#
+# ⟨gla.example.com⟩ {
+# 	handle_path /team-a/* {
+# 		header_up X-Forwarded-Prefix /team-a
+# 		reverse_proxy ⟨127.0.0.1:13000⟩
+# 	}
+# 	log
+# }
+#
+# Existing/custom reverse proxies that preserve the prefix instead of stripping it are also supported by GLA
+# when GLA_PUBLIC_BASE_URL contains that same prefix; they should forward /team-a/enroll and /team-a/handoff/*
+# unchanged to the gateway and do not need GLA_TRUST_FORWARDED_PREFIX.
