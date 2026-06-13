@@ -708,6 +708,17 @@ describe("/enroll/verify echoes the recorded strength (provider-agnostic, no har
       if (v.ok) this.spent = true;
       return v;
     }
+    verifyConsumedEnrollmentGrantToken(t: OpaqueToken): EnrollmentGrantVerifyResult {
+      if (String(t) !== this.token || !this.spent) {
+        return { ok: false, reason: "auth.revoked" };
+      }
+      return {
+        ok: true,
+        capability: { id: "cap_enroll1" as CapabilityId, cls: "session", caveats: [] },
+        recipient,
+        nonce: this.nonce,
+      };
+    }
     unspend(): void {
       this.spent = false;
     }

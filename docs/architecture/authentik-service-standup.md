@@ -157,7 +157,25 @@ what the **real adapter** requires (`adapters/auth-authentik/src/{index.ts,oidc.
   every later step-up checks `id_token.sub === that sub`. A mutable `sub` would silently break re-verification,
   so **immutable-`sub`** is a required outcome, verified by GLA-074 (enroll → re-auth → same `sub`).
 
-> All three are **outcomes the bundle verifies**, not a script. The exact authentik UI/API path is the
+### §3.4 · A declared invitation enrollment method policy (GLA-085)
+- The bundle records the active authentik invitation/enrollment method policy as
+  `GLA_AUTH_ENROLLMENT_POLICY_JSON` (or equivalent structured receipt data rendered into that env value). This is
+  **not** a secret and not an authorization decision; it is the operator-visible descriptor `gla auth diagnostics`
+  reads.
+- The descriptor names the enrollment flow, authentication flow, invitation stage, User Write stage, and User Login
+  stage where present. It also lists credential setup stages, external OAuth/SAML sources, MFA/recovery factors,
+  required method ids, and optional recipient choice groups.
+- Every optional choice and required method id must be backed by a declared credential setup stage, external
+  source, or MFA/recovery method. Unsupported choices are a diagnostic concern, not a silently advertised option.
+- Recipient-owned password setup is recorded as password-grade; WebAuthn/passkey setup is recorded as
+  phishing-resistant/passkey-grade; external sources are recorded as source evidence unless the provider evidence
+  explicitly maps them higher. TOTP/email/SMS/static/Duo-style factors are recorded as MFA/recovery/provider
+  evidence, not automatic passkey-grade GLA assurance.
+- The verify step runs `gla auth diagnostics` after writing the descriptor, and
+  `gla auth diagnostics --recipient <recipient-ref>` when checking a concrete recipient binding. A descriptor that
+  cannot satisfy the selected `GLA_AUTH_ASSURANCE_POLICY` is a **degraded/concern** receipt, not a silent success.
+
+> These are **outcomes the bundle verifies**, not a script. The exact authentik UI/API path is the
 > installer agent's to discover (the docs deliberately enumerate few fields — see Sources — which is *why* the
 > bundle is agent-native verify-driven, `§4`/`§7`).
 
@@ -234,10 +252,12 @@ verify route (`see authentik-dual-method-flow.md §5.2`). GLA-074's Caddy/route 
   proxies to the host-level authentik stack (`§1`).
 - **The `redirect_uri` callback** served **by GLA on GLA's origin** (the gateway callback page,
   `authentik-dual-method-flow.md §5.2`) — so it is **same-origin** with the gateway (sessionStorage/state work)
-  and the **grant never leaks to authentik**: the grant rides only between GLA's page and GLA's verify route;
-  authentik sees only the OIDC `code`/`state`, never the GLA grant. The callback path is on GLA's origin,
-  **not** authentik's, and is **not** the local bridge (S-6). This is the one piece of routing GLA-074 wires
-  that is specific to the authentik path (the gateway/`:3000` mapping already exists).
+  and the **grant never leaks to authentik**: the grant rides only between GLA's page and GLA's options/verify
+  routes; redirect-shaped enrollment consumes the grant before leaving GLA's origin; GLA HTML sets
+  `Referrer-Policy: no-referrer`/`Cache-Control: no-store`; authentik sees only OIDC values, never the GLA
+  grant. The callback path is on GLA's origin, **not** authentik's, and is **not** the local bridge (S-6). This
+  is the one piece of routing GLA-074 wires that is specific to the authentik path (the gateway/`:3000` mapping
+  already exists).
 
 For subpath/custom-base deployments, the public base path is part of this same agreement. A recommended Caddy
 shape is `handle_path /team-a/*` → `reverse_proxy <gla-upstream>` with `X-Forwarded-Prefix: /team-a`, so
@@ -249,8 +269,9 @@ same prefix and do not need the trust flag. In both cases Caddy is transport/pat
 remains the authorization membrane for grants, recipient caveats, auth assurance, and WebSocket reach.
 
 > **No grant leak:** the OIDC `state`/`nonce`/`code` flow to/from authentik; the **GLA grant** is confined to
-> GLA's own origin (handoff page → callback → `/handoff/auth/verify`). authentik never receives it. (This is
-> the security property `authentik-dual-method-flow.md §8.3/§8.5` requires the review to confirm.)
+> GLA's own origin (enroll/handoff page → GLA options/verify routes → callback page). authentik never receives
+> it, and browser referrers are disabled on GLA HTML. (This is the security property
+> `authentik-dual-method-flow.md §8.3/§8.5` requires the review to confirm.)
 
 ---
 
