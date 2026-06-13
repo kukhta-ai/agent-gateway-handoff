@@ -179,6 +179,37 @@ what the **real adapter** requires (`adapters/auth-authentik/src/{index.ts,oidc.
   `gla auth diagnostics --recipient <recipient-ref>` when checking a concrete recipient binding. A descriptor that
   cannot satisfy the selected `GLA_AUTH_ASSURANCE_POLICY` is a **degraded/concern** receipt, not a silent success.
 
+### §3.5 · Deployed login-method proof (GLA-086)
+
+The enrollment descriptor says what the deployment intends to configure. GLA-086 adds the **observed proof**
+that the running authentik application actually presents those choices and emits evidence GLA can map. The
+identity-provider bundle records this as sanitized `loginMethodProofs[]` in the `DependencyBinding.lastProbe.detail`
+and/or the rendered `GLA_AUTH_ENROLLMENT_POLICY_JSON` read by `gla auth diagnostics`.
+
+When a proof is rendered into `GLA_AUTH_ENROLLMENT_POLICY_JSON`, it uses the daemon descriptor shape:
+`method`, `kind`, `label`, `stage`, `source`, `status`, `authStrength`, `assuranceLevel`, `observedAt`,
+`subjectStable`, `evidence`, and `diagnostics`. Richer WPM-only fields such as `loginChoiceVisible`,
+`observedClaims`, `assuranceOutcome`, or `eligiblePolicies` belong only in `DependencyBinding.lastProbe.detail`
+unless the daemon parser grows those fields later.
+
+Each proof is a redacted fact record, not a token capture:
+
+- **password**: the password path is visible, the stage/source name is recorded, safe claim metadata such as
+  `evidence:{amr:["pwd"],gla_uv:false}` is observed, and the GLA mapping is `authStrength:"password"` /
+  `assuranceLevel:"password"` (eligible only under the explicit `password-permitted` policy).
+- **WebAuthn/passkey**: a recipient with an enrolled compatible authenticator can use the passkey path, the
+  authentik validation stage requires user verification, safe claim metadata such as `amr:["swk"]` and
+  `evidence:{amr:["swk"],gla_uv:true,recipientBound:true,replayResistant:true}` is observed, and the GLA mapping
+  is `authStrength:"webauthn"` / `assuranceLevel:"phishing-resistant"`.
+- **external/social/enterprise source**: the source appears as a login choice, enroll and re-auth produce a
+  stable source subject / authentik `sub` (`subjectStable:true`), and the GLA mapping is recorded as source
+  evidence unless explicit provider evidence maps it higher.
+
+Missing, stale, deferred, ambiguous, or unverified proofs are **degraded/insufficient**, never "available." A
+password-only authentik screen is therefore not automatically broken, but it means the default
+`phishing-resistant` GLA policy cannot be satisfied until a UV-proven passkey path or equivalent configured
+evidence is observed.
+
 > These are **outcomes the bundle verifies**, not a script. The exact authentik UI/API path is the
 > installer agent's to discover (the docs deliberately enumerate few fields — see Sources — which is *why* the
 > bundle is agent-native verify-driven, `§4`/`§7`).
@@ -206,7 +237,7 @@ the authentik path under the **same detect → setup → verify → record** loo
   connection:    { issuer, clientId, redirectUri /*, scopes, amrMap?, uvClaim? */ }   // clientSecret NOT in the receipt — a secret-ref (§8)
   installed:     false   // local/remote-external = adopted; true only for a Managed standup (carries inverseOp)
   inverseOp:     <uninstall/teardown step>   // Managed only — the wpm receipt for what it installed
-  lastProbe:     { at, result: "available"|"degraded"|"unavailable", detail }
+  lastProbe:     { at, result: "available"|"degraded"|"unavailable", detail: { checks, loginMethodProofs, redaction } }
   ```
   GLA's runtime **reads** this binding and re-verifies it (`doctor`/`probe`); **availability is system-derived**
   from the latest probe — a down authentik shows `unavailable` and admission/step-up fails closed
@@ -362,6 +393,7 @@ The verify step is **probe-driven** (the bundle's "verify before record"):
 | **The provider answers** | `GET <issuer>/.well-known/openid-configuration` responds 200 with a valid OIDC discovery doc; the advertised **token** + **JWKS** endpoints answer (JWKS returns keys). |
 | **The RP application exists** | an authorization request to `/authorize` with GLA's `client_id` + `redirect_uri` is **accepted** (authentik recognizes the client + redirect URI), not rejected as unknown-client/bad-redirect. |
 | **The passkey/password flow exists + emits distinguishing method + UV evidence** | an **end-to-end auth** (via the bundle's smoke test, or `FakeAuthentik` for the deterministic unit layer): a passkey login yields an `id_token` whose `amr` maps to **`webauthn`** and whose `gla_uv` is **true**; a password login yields one mapping to **`password`** without UV proof — proving the flow offers both, the strength map separates them, and only verified passkey evidence satisfies phishing-resistant assurance (`§3.2`). |
+| **The visible login choices match the deployed application** | `loginMethodProofs[]` records which choices were observed: password, WebAuthn/passkey for an enrolled compatible authenticator, and every configured external/social/enterprise source. Each proof records current/degraded/deferred status and the GLA assurance mapping without storing tokens or secrets. |
 | **Stable `sub`** | enrolling then re-authenticating the same user yields the **same `sub`** (the subject is immutable — `§3.3`). |
 | **GLA agrees on the binding** | GLA's `doctor`/`probe` **reads the `DependencyBinding`** and reports the `identity-provider` dependency **available** (system-derived from the probe) — closing the loop that the runtime adapter can actually reach what the bundle stood up. |
 
@@ -394,25 +426,30 @@ with authentik-specific probes.
    instance** (a real passkey login → `webauthn` + UV true, a real password login → `password` + no UV proof) and
    tune `GLA_AUTHENTIK_AMR_MAP` to the actual labels — not assume defaults. If the flow cannot emit both, the
    integration **safely degrades to `password`-only** (never up-maps), and the operator must be warned.
-3. **authentik version drift — Redis present or not.** ≥2025.10 **removes Redis** (`§2` A4); older versions
+3. **Password-only screens and source visibility can be misread.** A password-only authentik screen usually means
+   the Identification/authentication flow, WebAuthn validation stage, resident credential/user enrollment,
+   source attachment, browser/HTTPS conditions, or evidence-emission mapping is incomplete for that recipient.
+   GLA-086 must make this visible in `loginMethodProofs[]` and diagnostics; it must not infer passkey/source
+   availability from templates, seeded defaults, or the existence of a setup stage alone.
+4. **authentik version drift — Redis present or not.** ≥2025.10 **removes Redis** (`§2` A4); older versions
    require it. GLA-074 must branch the stack composition on the detected/target version (include Redis only
    when needed) and not hard-require a Redis the version doesn't use.
-4. **Stable-`sub` configuration.** The subject mode must be immutable (UUID/hashed-id, not email/username —
+5. **Stable-`sub` configuration.** The subject mode must be immutable (UUID/hashed-id, not email/username —
    `§3.3`); a mis-set subject mode silently breaks re-verification. Verify enroll-then-reauth yields the same
    `sub`.
-5. **The client secret handling.** `GLA_AUTHENTIK_CLIENT_SECRET` is `sensitive` — recorded as a **secret-ref**,
+6. **The client secret handling.** `GLA_AUTHENTIK_CLIENT_SECRET` is `sensitive` — recorded as a **secret-ref**,
    **never** in the `DependencyBinding.connection` literal, the receipt, or any log (`see
    authentik-integration.md §9`; `kernel-contracts.md §1.7` redaction). GLA-074 routes it through the secret
    seam.
-6. **The `redirect_uri` / origin agreement + no grant leak (`§5`).** The callback must land **same-origin** on
+7. **The `redirect_uri` / origin agreement + no grant leak (`§5`).** The callback must land **same-origin** on
    GLA (so state works) and the grant must **never** reach authentik. A mis-set `redirect_uri` (wrong origin,
    or pointed at authentik) breaks the callback **and** risks leaking the grant — GLA-074's Caddy wiring + the
    exact `redirect_uri` agreement is the guard (and the GLA-072 review property to re-confirm at deploy).
-7. **Reachability over the LXD/host network.** Local-External means GLA-in-hermes-1 reaches host-level
+8. **Reachability over the LXD/host network.** Local-External means GLA-in-hermes-1 reaches host-level
    authentik over the LXD bridge/host IP; GLA-074 must record the **reachable** issuer address (not a
    host-only `localhost` that the container cannot resolve) and verify the container can actually dial it (the
    `doctor` probe).
-8. **Heavyweight footprint (`§1`).** authentik + Postgres (+ Redis) is a real resource cost; under the
+9. **Heavyweight footprint (`§1`).** authentik + Postgres (+ Redis) is a real resource cost; under the
    reference it lands on the **host**, not hermes-1 — GLA-074 must not co-locate it in the GLA container (both
    the Docker constraint and the resource budget forbid it).
 
@@ -427,17 +464,17 @@ with authentik-specific probes.
    **auth flow offering passkey AND password** that **emits distinguishing `amr`/`acr` plus `gla_uv`** (→
    `webauthn` only when UV is true, otherwise `password`/degraded); a **stable immutable `sub`** (`§3`).
 3. The standup is the **`wpm` `identity-provider` bundle's authentik branch** — **detect-before-change**,
-   **records a `DependencyBinding`** (issuer/clientId/redirectUri/ownershipMode/installed/inverseOp), **idempotent**
-   detect→setup→verify→record (`§4`).
+   **records a `DependencyBinding`** (issuer/clientId/redirectUri/ownershipMode/installed/inverseOp plus redacted
+   `loginMethodProofs[]`), **idempotent** detect→setup→verify→record (`§4`).
 4. The RP identity **ties to `GLA_PUBLIC_BASE_URL`**: the `redirect_uri` callback is served by **GLA on GLA's
    origin** (same-origin, no grant leak), the issuer/`iss` agree with what GLA is configured with, all on one
    agreed origin (`§5`).
 5. The **in-tree WebAuthn default needs NONE of it** (the bundle just sets `GLA_RP_ID`); authentik is required
    **only** when `GLA_AUTH_PROVIDER=authentik` (`§6`).
-6. GLA-074 builds the bundle's authentik branch; "**provider answers + RP app + flow exist**" is observed by
-   the discovery doc + token/JWKS answering, an authorization request accepted for GLA's client/redirect, an
-   end-to-end passkey→`webauthn` / password→`password` proof, a same-`sub` re-auth, and GLA's `doctor` reading
-   the binding as available (`§7`).
+6. GLA-074/086 builds the bundle's authentik branch and deployment proof; "**provider answers + RP app + flow
+   exist**" is observed by the discovery doc + token/JWKS answering, an authorization request accepted for GLA's
+   client/redirect, redacted `loginMethodProofs[]` for password, passkey/WebAuthn+UV, and configured sources, a
+   same-`sub` re-auth, and GLA's `doctor` reading the binding as available (`§7`).
 
 ## Sources
 
