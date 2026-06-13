@@ -24,7 +24,14 @@ import { dirname } from "node:path";
 import type { AgentBridge } from "@gla/bridge";
 import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
-import type { OpaqueToken, RecipientRef } from "@gla/kernel";
+import {
+  AUTH_ASSURANCE_PROFILE_VALUES,
+  type AuthAssuranceProfile,
+  DEFAULT_AUTH_ASSURANCE_PROFILE,
+  type OpaqueToken,
+  type RecipientRef,
+  parseAuthAssuranceProfile,
+} from "@gla/kernel";
 import { type AuthentikConfig, createProvisioningBridge } from "./index.js";
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
@@ -50,6 +57,11 @@ export interface ServeOptions {
    * to opt into the delegated OIDC provider; then the `authentik*` OIDC config below is required.
    */
   authProvider?: "webauthn" | "authentik";
+  /**
+   * Provider-neutral assurance policy for handoff auth. Default `phishing-resistant`; set
+   * `password-permitted` only when password-grade evidence is an intentional deployment policy.
+   */
+  authAssuranceProfile?: AuthAssuranceProfile;
   /** The authentik OIDC issuer (only when `authProvider=authentik`), e.g. `https://idp.example/application/o/gla/`. */
   authentikIssuerUrl?: string;
   /** The authentik OIDC client/application id (the id_token audience). */
@@ -134,6 +146,23 @@ export function endpointIsLocal(endpoint: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
+/** Operator-facing diagnostic for whether the selected provider can satisfy the selected assurance profile. */
+export function authAssuranceProviderDiagnostic(opts: {
+  authProvider?: "webauthn" | "authentik";
+  authAssuranceProfile?: AuthAssuranceProfile;
+}): string {
+  const provider = opts.authProvider ?? "webauthn";
+  const profile = opts.authAssuranceProfile ?? DEFAULT_AUTH_ASSURANCE_PROFILE;
+  if (provider === "webauthn") {
+    return profile === "password-permitted"
+      ? "webauthn reports phishing-resistant assurance, which satisfies password-permitted; no password fallback is available from this provider"
+      : "webauthn reports phishing-resistant assurance and satisfies the selected policy";
+  }
+  return profile === "password-permitted"
+    ? "authentik can satisfy password-permitted when OIDC amr/acr maps to password or phishing-resistant evidence; installer/doctor must verify the mapping"
+    : "authentik can satisfy phishing-resistant only when OIDC amr/acr maps to passkey-grade evidence; installer/doctor must verify the mapping";
+}
+
 /**
  * Boot the `gla serve` daemon: compose ONE shared provisioning+handoff app state, bind the Access Gateway on
  * the PUBLIC `host:port`, bind the Agent Bridge on a LOCAL endpoint, print the startup banner + the S-6 doctor
@@ -172,6 +201,9 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
     handoff: {
       ...(opts.authProvider !== undefined ? { authProvider: opts.authProvider } : {}),
+      ...(opts.authAssuranceProfile !== undefined
+        ? { authAssuranceProfile: opts.authAssuranceProfile }
+        : {}),
       ...(authentikConfig !== undefined ? { authentik: authentikConfig } : {}),
       rpID: opts.rpID ?? "localhost",
       rpName: opts.rpName ?? "GLA",
@@ -227,6 +259,8 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       authentikConfig !== undefined ? `  (issuer ${authentikConfig.issuerUrl})` : ""
     }`,
   );
+  log(`  auth assurance   : ${opts.authAssuranceProfile ?? DEFAULT_AUTH_ASSURANCE_PROFILE}`);
+  log(`  auth capability  : ${authAssuranceProviderDiagnostic(opts)}`);
   log(`  public base url  : ${publicBaseUrl}  (handoff/enroll links use this)`);
   log(
     `  doctor           : bridge endpoint is ${bridgeIsLocal ? "LOCAL ✓ (not 0.0.0.0)" : "NON-LOCAL ✗ — REFUSED"} (S-6 single-public-entry)`,
@@ -401,7 +435,7 @@ const SERVE_USAGE = `gla serve — run the long-running GLA daemon (the :3000 de
 Usage:
   gla serve [--port <n>] [--host <h>] [--endpoint <path|host:port>] [--public-base-url <url>]
             [--rp-id <id>] [--rp-name <name>] [--launcher <auto|full|headless>] [--workspace-root <dir>]
-            [--auth-provider <webauthn|authentik>]
+            [--auth-provider <webauthn|authentik>] [--auth-assurance-policy <phishing-resistant|password-permitted>]
             [--authentik-issuer-url <url>] [--authentik-client-id <id>]
             [--authentik-client-secret <secret>] [--authentik-redirect-uri <url>] [--authentik-scopes <s>]
 
@@ -414,9 +448,12 @@ Auth provider (--auth-provider, default webauthn): the in-tree WebAuthn passkey 
   set authentik to delegate step-up to a self-hosted authentik over OIDC (then the GLA_AUTHENTIK_* config
   below is required). The client secret is sensitive and is never logged.
 
+Auth assurance (--auth-assurance-policy, default phishing-resistant): unset demands passkey/phishing-resistant
+  evidence; password-permitted is the explicit policy that admits password-grade evidence.
+
 Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE,
-  GLA_AUTH_PROVIDER, GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET,
-  GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
+  GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY, GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID,
+  GLA_AUTHENTIK_CLIENT_SECRET, GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
 
 Then drive it from another shell with the daemon's bridge endpoint:
   GLA_ENDPOINT=<endpoint> gla whoami
@@ -499,6 +536,16 @@ export function parseServeArgs(
       throw new Error(`invalid --auth-provider "${authProvider}" (expected webauthn|authentik)`);
     }
     options.authProvider = authProvider;
+  }
+  const authAssurancePolicy = str("auth-assurance-policy", "GLA_AUTH_ASSURANCE_POLICY");
+  if (authAssurancePolicy !== undefined) {
+    const parsed = parseAuthAssuranceProfile(authAssurancePolicy);
+    if (!parsed.ok) {
+      throw new Error(
+        `invalid --auth-assurance-policy "${parsed.value}" (expected ${AUTH_ASSURANCE_PROFILE_VALUES.join("|")})`,
+      );
+    }
+    options.authAssuranceProfile = parsed.profile;
   }
   const authentikIssuerUrl = str("authentik-issuer-url", "GLA_AUTHENTIK_ISSUER_URL");
   if (authentikIssuerUrl !== undefined) {

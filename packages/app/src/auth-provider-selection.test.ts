@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { AUTH_AUTHENTIK_MODULE } from "@gla/auth-authentik";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
 import { describe, expect, it } from "vitest";
-import { parseServeArgs } from "./daemon.js";
+import { authAssuranceProviderDiagnostic, parseServeArgs } from "./daemon.js";
 import { type AuthentikConfig, createEnrollmentStack, createProvisioningBridge } from "./index.js";
 
 const AUTHENTIK: AuthentikConfig = {
@@ -30,6 +30,11 @@ const ENROLL_BASE = {
   port: 0,
   deliverySink: { write: () => {} },
 };
+
+function repoRootFromHere(): string {
+  const here = fileURLToPath(import.meta.url);
+  return here.replace(/\/packages\/app\/(dist|src)\/.*$/, "");
+}
 
 describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unchanged)", () => {
   it("createEnrollmentStack() with no authProvider wires @gla/auth-webauthn", () => {
@@ -145,6 +150,33 @@ describe("AC#6 · daemon parseServeArgs threads the provider switch + the authen
     );
   });
 
+  it("parses --auth-assurance-policy as a profile-shaped deployment contract", () => {
+    const parsed = parseServeArgs(
+      ["--auth-assurance-policy", "password-permitted"],
+      {} as NodeJS.ProcessEnv,
+    );
+    expect(parsed.help).toBe(false);
+    if (!parsed.help) {
+      expect(parsed.options.authAssuranceProfile).toBe("password-permitted");
+    }
+  });
+
+  it("falls back to env (GLA_AUTH_ASSURANCE_POLICY); a flag overrides env", () => {
+    const parsed = parseServeArgs(["--auth-assurance-policy", "password-permitted"], {
+      GLA_AUTH_ASSURANCE_POLICY: "phishing-resistant",
+    } as NodeJS.ProcessEnv);
+    expect(parsed.help).toBe(false);
+    if (!parsed.help) {
+      expect(parsed.options.authAssuranceProfile).toBe("password-permitted");
+    }
+  });
+
+  it("an invalid --auth-assurance-policy throws a stable actionable error", () => {
+    expect(() =>
+      parseServeArgs(["--auth-assurance-policy", "totp"], {} as NodeJS.ProcessEnv),
+    ).toThrow(/auth-assurance-policy.*phishing-resistant.*password-permitted/i);
+  });
+
   it("the default (no GLA_AUTH_PROVIDER) leaves authProvider unset — the default boot path is untouched", () => {
     const parsed = parseServeArgs([], {} as NodeJS.ProcessEnv);
     expect(parsed.help).toBe(false);
@@ -154,13 +186,36 @@ describe("AC#6 · daemon parseServeArgs threads the provider switch + the authen
   });
 });
 
+describe("AC#6 · WPM env template exposes the selected assurance policy", () => {
+  it("ships the secure phishing-resistant default and names the explicit password-permitted profile", () => {
+    const tmpl = readFileSync(
+      `${repoRootFromHere()}/wpm/wip/bundles/gla-core/payload/templates/gla.env.tmpl`,
+      "utf8",
+    );
+    expect(tmpl).toContain("GLA_AUTH_ASSURANCE_POLICY=phishing-resistant");
+    expect(tmpl).toMatch(/password-permitted/);
+  });
+});
+
+describe("AC#6/#7 · operator diagnostics report provider ability to satisfy policy", () => {
+  it("reports that the default WebAuthn provider satisfies phishing-resistant assurance", () => {
+    expect(authAssuranceProviderDiagnostic({})).toMatch(/webauthn.*satisfies the selected policy/i);
+  });
+
+  it("reports that authentik needs method-map verification before relying on handoff", () => {
+    expect(
+      authAssuranceProviderDiagnostic({
+        authProvider: "authentik",
+        authAssuranceProfile: "phishing-resistant",
+      }),
+    ).toMatch(/authentik.*passkey-grade.*doctor.*verify/i);
+  });
+});
+
 describe("AC#1 · structural: selecting authentik changes only the adapter + app (no gateway/kernel edit)", () => {
   /** Read a package.json's dependency names (relative to this test file's compiled location). */
   function deps(relFromRepoRoot: string): string[] {
-    const here = fileURLToPath(import.meta.url);
-    // .../packages/app/dist/auth-provider-selection.test.js (or src/ under vitest) → repo root is 3 up from packages/app.
-    const repoRoot = here.replace(/\/packages\/app\/(dist|src)\/.*$/, "");
-    const pkg = JSON.parse(readFileSync(`${repoRoot}/${relFromRepoRoot}`, "utf8")) as {
+    const pkg = JSON.parse(readFileSync(`${repoRootFromHere()}/${relFromRepoRoot}`, "utf8")) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
     };

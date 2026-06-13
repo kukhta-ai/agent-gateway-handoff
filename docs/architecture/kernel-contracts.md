@@ -411,10 +411,10 @@ interface PolicyPort {                 // Cedar is one adapter; forbid-wins, det
 
 interface AuthProviderPort {           // WebAuthn / authentik / OIDC are adapters
   beginEnrollment(userId: UserIdentity["id"], discharge: OpaqueToken): Promise<EnrollmentChallenge>;
-  finishEnrollment(userId: UserIdentity["id"], assertion: unknown): Promise<{ credentialId: string; authStrength: AuthStrength }>;
+  finishEnrollment(userId: UserIdentity["id"], assertion: unknown): Promise<{ credentialId: string; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence }>;
   challenge(userId: UserIdentity["id"]): Promise<AuthChallenge>;
-  verifyAssertion(userId: UserIdentity["id"], assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength }>;
-}                                       // GUARANTEE: reports FACTS (ok + auth_strength), never an access decision.
+  verifyAssertion(userId: UserIdentity["id"], assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence }>;
+}                                       // GUARANTEE: reports FACTS (ok + auth_strength + optional assurance evidence), never an access decision.
 
 interface SecretStorePort {            // Vault/OpenBao/file are adapters; agent-blind
   put(value: SecretValue, audience: string): Promise<Ref<"secret-ref">>;   // returns a ref, never echoes the value
@@ -464,6 +464,11 @@ interface CatalogPort {                // the registry read interface — Store�
 `DockerPort`). The kernel depends on the *shape*; `app` wires the adapter. This is exactly what makes horizontal
 extension change no core code (`baseline.md §6`).
 
+Auth providers also project verified provider evidence into the common auth-assurance contract before an
+enforcement point evaluates sufficiency. `AuthStrength` remains the stable compatibility fact on the port
+result; provider vocabulary such as `amr`, `acr`, factor, source, or future provider claims stays adapter-local
+and diagnostic-only.
+
 ---
 
 ## §7 · Recipient-identity & enrollment model (AC #7)
@@ -474,6 +479,21 @@ docs/components/identity-and-auth.md`). Authentication ≠ authorization, never 
 
 ```ts
 type AuthStrength = "none" | "password" | "webauthn";
+
+type AuthAssuranceLevel = "none" | "password" | "phishing-resistant";
+type AuthAssuranceProfile = "phishing-resistant" | "password-permitted";
+
+interface AuthAssuranceEvidence {
+  authStrength: AuthStrength;          // compatibility fact; webauthn ⇒ phishing-resistant
+  level: AuthAssuranceLevel;           // provider-neutral assurance tier
+  methodResolvable?: boolean;          // false when a valid token degraded to the safe floor
+  providerEvidence?: Record<string, unknown>; // diagnostic only; never used directly by the gateway
+}
+
+interface AuthAssurancePolicy {
+  profile: AuthAssuranceProfile;       // stable deployment surface
+  minimumLevel: "password" | "phishing-resistant";
+}
 
 interface UserIdentity {
   id: string;                          // stable across channels
@@ -495,6 +515,10 @@ interface IdentityPort {
   verify(recipient: RecipientRef, assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }>;
 }
 ```
+**Policy profiles:** unset policy resolves to `phishing-resistant`, which demands passkey/phishing-resistant
+assurance. `password-permitted` is the explicit profile that admits password-grade evidence. Unknown profile
+values are usage errors with stable diagnostics; they never silently fall back to a weaker policy.
+
 **Invariants (frozen, `identity-and-auth.md`):** a recipient can be verified **only if previously enrolled**;
 **enrollment is one-time and operator-initiated**, authorized by a single-use `operator-discharge` grant the
 gateway verifies like any other — it is **never a per-task or per-handoff step**. Recipient-binding originates

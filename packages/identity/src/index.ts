@@ -22,11 +22,15 @@
 // here (GLA-013 AC#5; the import-boundary lint proves it).
 
 import {
+  type AuthAssuranceEvidence,
   type AuthChallenge,
+  type AuthProviderEnrollmentResult,
   type AuthProviderPort,
+  type AuthProviderVerificationResult,
   type AuthStrength,
   type EnrollmentChallenge,
   type IdentityPort,
+  type IdentityVerificationResult,
   type OpaqueToken,
   type RecipientBinding,
   type RecipientRef,
@@ -50,6 +54,8 @@ export interface EnrollmentRecord {
   credentialId: string;
   /** The strength established at enrollment (webauthn for a passkey). */
   authStrength: AuthStrength;
+  /** Provider-neutral assurance established at enrollment, when the provider reported it. */
+  authAssurance?: AuthAssuranceEvidence;
   /** ISO-8601 instant enrollment completed (for audit/observability). */
   enrolledAt: string;
 }
@@ -168,7 +174,7 @@ export class IdentityService implements IdentityPort {
   async enrollComplete(recipient: RecipientRef, attestation: unknown): Promise<EnrollmentRecord> {
     const provider = this.requireProvider();
     const userId = deriveUserId(recipient);
-    let finished: { credentialId: string; authStrength: AuthStrength };
+    let finished: AuthProviderEnrollmentResult;
     try {
       finished = await provider.finishEnrollment(userId, attestation);
     } catch (e) {
@@ -182,6 +188,7 @@ export class IdentityService implements IdentityPort {
       userId,
       credentialId: finished.credentialId,
       authStrength: finished.authStrength,
+      ...(finished.assurance !== undefined ? { authAssurance: finished.assurance } : {}),
       enrolledAt: new Date().toISOString(),
     };
     // Commit the identity-level fact only now (after a verified ceremony). Idempotent re-enrollment REPLACES the
@@ -231,15 +238,23 @@ export class IdentityService implements IdentityPort {
   async verifyAuthentication(
     recipient: RecipientRef,
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }> {
+  ): Promise<IdentityVerificationResult> {
     const userId = deriveUserId(recipient);
     if (!this.isEnrolled(recipient)) {
       // UN-ENROLLED ⇒ DENY: there is no credential to verify (identity-and-auth.md failure mode).
       return { ok: false, authStrength: "none", userId };
     }
     const provider = this.requireProvider();
-    const result = await provider.verifyAssertion(userId, assertion);
-    return { ok: result.ok, authStrength: result.authStrength, userId };
+    const result: AuthProviderVerificationResult = await provider.verifyAssertion(
+      userId,
+      assertion,
+    );
+    return {
+      ok: result.ok,
+      authStrength: result.authStrength,
+      userId,
+      ...(result.assurance !== undefined ? { assurance: result.assurance } : {}),
+    };
   }
 
   // ── Kernel IdentityPort `enroll`/`verify` (the formal port shape) ───────────────────────────────────
@@ -266,10 +281,7 @@ export class IdentityService implements IdentityPort {
    * Kernel {@link IdentityPort.verify}: verify a recipient at the edge — delegates to {@link verifyAuthentication}
    * (FACTS, not a decision). An un-enrolled recipient denies.
    */
-  async verify(
-    recipient: RecipientRef,
-    assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }> {
+  async verify(recipient: RecipientRef, assertion: unknown): Promise<IdentityVerificationResult> {
     return this.verifyAuthentication(recipient, assertion);
   }
 

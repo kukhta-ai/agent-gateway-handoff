@@ -8,10 +8,10 @@
 // It MIRRORS the WebAuthn adapter's structure (injectable `KvStore` seams, in-memory defaults, atomic-on-
 // verified, returns FACTS not decisions, this header style), substituting OIDC for WebAuthn:
 //   challenge(userId)                   → build the OIDC authorization request → {kind:"redirect", authorizeUrl}
-//   verifyAssertion(userId,{code,state})→ exchange + validate the id_token + check `sub` vs the binding → {ok, authStrength}
+//   verifyAssertion(userId,{code,state})→ exchange + validate the id_token + check `sub` vs the binding
 //   beginEnrollment(userId, discharge)  → the same authorization request (kind:"register")
-//   finishEnrollment(userId,{code,state})→ exchange + validate → ATOMICALLY bind the `sub` → {credentialId:sub, authStrength}
-// It reports FACTS (ok + auth_strength), never an access decision (the port's guarantee). The human
+//   finishEnrollment(userId,{code,state})→ exchange + validate → ATOMICALLY bind the `sub`
+// It reports FACTS (ok + auth_strength + optional assurance evidence), never an access decision. The human
 // authenticates AT authentik (passkey/password/MFA) — GLA never sees the credential; authentik holds it
 // (§5). What GLA stores instead is the STABLE OIDC `sub` the recipient is bound to.
 //
@@ -39,8 +39,9 @@
 
 import type {
   AuthChallenge,
+  AuthProviderEnrollmentResult,
   AuthProviderPort,
-  AuthStrength,
+  AuthProviderVerificationResult,
   EnrollmentChallenge,
   OpaqueToken,
   UserIdentity,
@@ -66,7 +67,7 @@ import {
   type PendingAttempt,
   type VerifyOutcome,
 } from "./stores.js";
-import { type MethodMaps, mapMethodToStrength, methodMaps, methodResolvable } from "./strength.js";
+import { type MethodMaps, mapMethodToAssurance, methodMaps } from "./strength.js";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
 export const AUTH_AUTHENTIK_MODULE = "@gla/auth-authentik" as const;
@@ -144,8 +145,8 @@ export interface AuthAuthentikOptions {
  * secret / redirect uri) and optionally shared stores + deterministic seams. It runs the real OIDC
  * authorization-code + PKCE ceremony against authentik: build the authorization request → (the human
  * authenticates at authentik) → exchange the code → validate the id_token → check the `sub` against the
- * recipient's binding → report `{ok, authStrength}`. It is the heavyweight ALTERNATIVE identity provider
- * behind the same port the in-tree WebAuthn default implements.
+ * recipient's binding → report `{ok, authStrength, assurance?}`. It is the heavyweight ALTERNATIVE identity
+ * provider behind the same port the in-tree WebAuthn default implements.
  */
 export class AuthAuthentikProvider implements AuthProviderPort {
   private readonly issuerUrl: string;
@@ -208,18 +209,18 @@ export class AuthAuthentikProvider implements AuthProviderPort {
 
   /**
    * Verify a step-up assertion (kernel `AuthProviderPort.verifyAssertion`): the OIDC callback's `{code,state}`.
-   * Returns FACTS — `{ok, authStrength}` — never an allow/deny. Internally classifies every rejection with a
-   * typed {@link AuthFailReason} (surfaced via {@link AuthAuthentikOptions.onVerifyOutcome} + {@link verifyAssertionDetailed}).
-   * On ANY failure → `{ok:false, authStrength:"none"}` and NOTHING is bound. On success the attempt is consumed
-   * (one-time) and `{ok:true, authStrength}` is returned (the same fact `auth-webauthn` returns).
+   * Returns FACTS — `{ok, authStrength, assurance?}` — never an allow/deny. Internally classifies every rejection
+   * with a typed {@link AuthFailReason} (surfaced via {@link AuthAuthentikOptions.onVerifyOutcome} +
+   * {@link verifyAssertionDetailed}). On ANY failure → `{ok:false, authStrength:"none"}` and NOTHING is bound. On
+   * success the attempt is consumed (one-time) and `{ok:true, authStrength, assurance}` is returned.
    */
   async verifyAssertion(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength }> {
+  ): Promise<AuthProviderVerificationResult> {
     const outcome = await this.verifyAssertionDetailed(userId, assertion);
     return outcome.ok
-      ? { ok: true, authStrength: outcome.authStrength }
+      ? { ok: true, authStrength: outcome.authStrength, assurance: outcome.assurance }
       : { ok: false, authStrength: "none" };
   }
 
@@ -276,12 +277,12 @@ export class AuthAuthentikProvider implements AuthProviderPort {
    * as {@link verifyAssertion} (steps a–d), then **bind** the resolved subject ATOMICALLY — `subjects.set(userId,
    * {sub})` only AFTER a verified id_token (doc §5). **No half-bound:** on ANY failure it THROWS and stores
    * nothing (mirroring auth-webauthn's atomic `finishEnrollment`, so the identity service records no enrollment
-   * fact). Returns `{credentialId: sub, authStrength}` — the `sub` IS the credential id under this provider (§5).
+   * fact). Returns `{credentialId: sub, authStrength, assurance}` — the `sub` IS the credential id under this provider (§5).
    */
   async finishEnrollment(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ credentialId: string; authStrength: AuthStrength }> {
+  ): Promise<AuthProviderEnrollmentResult> {
     // The `register` attempt validates with no prior binding (the subject is being established now).
     const outcome = await this.runVerify(userId, assertion, "register", () => undefined);
     if (!outcome.ok) {
@@ -290,7 +291,11 @@ export class AuthAuthentikProvider implements AuthProviderPort {
     }
     // Commit only now (after a verified id_token) — the atomic bind.
     this.subjects.set(userId, { sub: outcome.sub });
-    return { credentialId: outcome.sub, authStrength: outcome.authStrength };
+    return {
+      credentialId: outcome.sub,
+      authStrength: outcome.authStrength,
+      assurance: outcome.assurance,
+    };
   }
 
   // ── Inspection (mirrors auth-webauthn's isEnrolled/getStoredCredential; never a secret) ──────────────
@@ -424,21 +429,15 @@ export class AuthAuthentikProvider implements AuthProviderPort {
       return this.fail(expectedKind, bindingReason);
     }
 
-    // (f) Derive the strength fact from the method claims (never up-mapped; strength.ts).
-    const authStrength = mapMethodToStrength(
-      {
-        ...(claims.amr !== undefined ? { amr: claims.amr } : {}),
-        ...(claims.acr !== undefined ? { acr: claims.acr } : {}),
-      },
-      this.maps,
-    ) as "password" | "webauthn";
-    const resolvable = methodResolvable(
+    // (f) Derive provider-neutral assurance from method claims (never up-mapped; strength.ts).
+    const assurance = mapMethodToAssurance(
       {
         ...(claims.amr !== undefined ? { amr: claims.amr } : {}),
         ...(claims.acr !== undefined ? { acr: claims.acr } : {}),
       },
       this.maps,
     );
+    const authStrength = assurance.authStrength as "password" | "webauthn";
 
     // Success. The attempt was already consumed at CLAIM time (FIX 2), so a replay of the same `{code,state}`
     // already finds nothing — no further delete needed here.
@@ -446,8 +445,9 @@ export class AuthAuthentikProvider implements AuthProviderPort {
       ok: true,
       kind: expectedKind,
       authStrength,
+      assurance,
       sub: claims.sub,
-      methodResolvable: resolvable,
+      methodResolvable: assurance.methodResolvable ?? false,
     };
     this.emit(outcome);
     return outcome;
@@ -522,6 +522,7 @@ export {
   type MethodMaps,
   type MethodClaims,
   DEFAULT_METHOD_MAPS,
+  mapMethodToAssurance,
   mapMethodToStrength,
   methodMaps,
   methodResolvable,

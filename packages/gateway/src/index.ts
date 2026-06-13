@@ -21,15 +21,20 @@
 
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
-import type {
-  AuthStrength,
-  Capability,
-  CapabilityId,
-  ErrorCode,
-  OpaqueToken,
-  RecipientRef,
-  RouteId,
-  SessionId,
+import {
+  type AuthAssuranceEvidence,
+  type AuthAssurancePolicy,
+  type AuthStrength,
+  type Capability,
+  type CapabilityId,
+  type ErrorCode,
+  type OpaqueToken,
+  type RecipientRef,
+  type RouteId,
+  type SessionId,
+  authAssurancePolicyFromProfile,
+  authAssurancePolicyFromRequiredAuthStrength,
+  authAssuranceSufficient,
 } from "@gla/kernel";
 import { enrollPageHtml, refusalPageHtml } from "./enroll-page.js";
 import { handoffPageHtml, handoffRefusalHtml, handoffReusedPageHtml } from "./handoff-page.js";
@@ -140,10 +145,15 @@ export interface IdentityStepUpPort {
   verifyAuthentication(
     recipient: RecipientRef,
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength; userId: string }>;
+  ): Promise<{
+    ok: boolean;
+    authStrength: AuthStrength;
+    assurance?: AuthAssuranceEvidence;
+    userId: string;
+  }>;
 }
 
-/** The auth strength the gateway requires of the bound recipient before forwarding to the capsule. */
+/** Deprecated compatibility input for deployments that still pass the pre-policy strength floor. */
 export type RequiredAuthStrength = Exclude<AuthStrength, "none">;
 
 /**
@@ -182,20 +192,25 @@ export interface GatewayOptions {
    */
   sessionGrants?: SessionGrantPort;
   /**
-   * The identity step-up seam (the Identity service; Slice 4b / Phase 6). The gateway triggers WebAuthn step-up
-   * when the bound recipient's `auth_strength` is insufficient. Optional in an enrollment-only gateway.
+   * The identity step-up seam (the Identity service; Slice 4b / Phase 6). The gateway triggers provider-backed
+   * step-up when the bound recipient's assurance is insufficient. Optional in an enrollment-only gateway.
    */
   stepUp?: IdentityStepUpPort;
   /**
-   * The auth strength a handoff requires of the bound recipient (default `webauthn`). When the recipient's
-   * step-up reaches this strength, the WS upgrade is authorized; below it, step-up is triggered.
+   * The provider-neutral assurance policy a handoff requires of the bound recipient. Defaults to the secure
+   * phishing-resistant profile. Gateway decisions consult this common contract, not provider method names.
+   */
+  authAssurancePolicy?: AuthAssurancePolicy;
+  /**
+   * Deprecated compatibility input. Prefer {@link authAssurancePolicy}. `"webauthn"` maps to the default
+   * phishing-resistant profile; `"password"` maps to the explicit password-permitted profile.
    */
   requiredAuthStrength?: RequiredAuthStrength;
   /**
    * The **auth-reuse TTL** (ms) — how long a successful recipient step-up stays valid for REUSE across a LATER
    * handoff window for the SAME recipient (scenario-01 Phase 12: "auth still valid, no re-prompt"). On a successful
    * step-up the gateway records a short-lived `{recipient, auth_strength, expiresAt}` validity; a SECOND window's
-   * grant for the SAME recipient, while that validity is unexpired AND meets the required strength, is authorized
+   * grant for the SAME recipient, while that validity is unexpired AND satisfies the selected policy, is authorized
    * WITHOUT a fresh WebAuthn ceremony (no re-prompt). An expired/absent validity, or a DIFFERENT recipient, falls
    * back to a full step-up (Phase 6 behaviour). The grant is STILL verified cryptographically on every request +
    * upgrade — reuse only skips the interactive ceremony, never the grant check (recipient-specific, TTL-bounded,
@@ -259,14 +274,14 @@ export class AccessGateway {
   private readonly identity: IdentityEnrollPort | undefined;
   private readonly sessionGrants: SessionGrantPort | undefined;
   private readonly stepUp: IdentityStepUpPort | undefined;
-  private readonly requiredAuthStrength: RequiredAuthStrength;
+  private readonly authAssurancePolicy: AuthAssurancePolicy;
   private readonly host: string;
   private readonly port: number;
   private server: Server | undefined;
   /** The route table programmed by the Route controller, keyed by public path. A route binds to one grant. */
   private readonly routes = new Map<string, ProgrammedRoute>();
   /**
-   * The per-grant step-up marker: a grant id whose bound recipient has authenticated to the required strength
+   * The per-grant step-up marker: a grant id whose bound recipient has authenticated to the selected policy
    * (so the next WS upgrade for that grant is authorized). It is the small mutable edge state the step-up needs —
    * the WS upgrade still verifies the grant STATELESSLY (signature/recipient/TTL/scope/revocation) AND checks this
    * marker. Cleared on the grant's revoke/force-close so a revoked grant cannot reach the capsule.
@@ -282,7 +297,7 @@ export class AccessGateway {
    */
   private readonly recipientAuth = new Map<
     RecipientRef,
-    { authStrength: AuthStrength; expiresAt: number }
+    { assurance: AuthAssuranceEvidence | AuthStrength; expiresAt: number }
   >();
   /** The auth-reuse TTL (ms) — how long a step-up stays valid for reuse on a later window. 0 disables reuse. */
   private readonly authReuseTtlMs: number;
@@ -298,7 +313,11 @@ export class AccessGateway {
     this.identity = opts.identity;
     this.sessionGrants = opts.sessionGrants;
     this.stepUp = opts.stepUp;
-    this.requiredAuthStrength = opts.requiredAuthStrength ?? "webauthn";
+    this.authAssurancePolicy =
+      opts.authAssurancePolicy ??
+      (opts.requiredAuthStrength !== undefined
+        ? authAssurancePolicyFromRequiredAuthStrength(opts.requiredAuthStrength)
+        : authAssurancePolicyFromProfile());
     this.authReuseTtlMs = opts.authReuseTtlMs ?? 15 * 60 * 1000;
     this.host = opts.host ?? "0.0.0.0";
     this.port = opts.port ?? 3000;
@@ -652,7 +671,7 @@ export class AccessGateway {
   }
 
   /**
-   * `POST /handoff/auth/options` — re-verify the grant (every request, no bypass), then return WebAuthn step-up
+   * `POST /handoff/auth/options` — re-verify the grant (every request, no bypass), then return step-up
    * options for the bound recipient. The route the grant is scoped to is resolved by the grant's scope path; an
    * un-enrolled recipient is refused (a recipient is verifiable only if enrolled — GLA-035 AC#4).
    */
@@ -730,28 +749,32 @@ export class AccessGateway {
       this.sendJson(res, 403, this.errBody("auth.insufficient", "recipient is not enrolled"));
       return;
     }
-    let factResult: { ok: boolean; authStrength: AuthStrength };
+    let factResult: { ok: boolean; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence };
     try {
       factResult = await stepUp.verifyAuthentication(verified.recipient, body.assertion);
     } catch {
       this.sendJson(res, 403, this.errBody("auth.insufficient", "step-up verification failed"));
       return;
     }
-    if (!factResult.ok || !this.strengthSufficient(factResult.authStrength)) {
+    const assurance = factResult.assurance ?? factResult.authStrength;
+    if (!factResult.ok || !this.strengthSufficient(assurance)) {
       // A failed assertion or an insufficient strength → refused, the grant is NOT authorized (GLA-035 AC#…).
       this.sendJson(
         res,
         403,
-        this.errBody("auth.insufficient", "step-up did not satisfy the required strength"),
+        this.errBody(
+          "auth.insufficient",
+          "step-up did not satisfy the selected auth assurance policy",
+        ),
       );
       return;
     }
-    // The bound recipient authenticated to the required strength: authorize the grant so its WS upgrade proxies.
+    // The bound recipient satisfied the selected policy: authorize the grant so its WS upgrade proxies.
     this.authorizedGrants.add(verified.capability.id as CapabilityId);
     // Record the RECIPIENT-level auth validity for REUSE on a later window (scenario-01 Phase 12, GLA-050/051) —
     // keyed by the recipient from the SIGNED grant, TTL-bounded. A second window's grant for THIS recipient, while
     // unexpired + sufficient, skips the ceremony. Disabled when the reuse TTL is 0.
-    this.recordRecipientAuth(verified.recipient, factResult.authStrength);
+    this.recordRecipientAuth(verified.recipient, assurance);
     this.sendJson(res, 200, { authorized: true, auth_strength: factResult.authStrength });
   }
 
@@ -876,10 +899,9 @@ export class AccessGateway {
     return this.routes.get(body.path);
   }
 
-  /** Is a step-up's reported strength at least the required strength? (`webauthn` ⊇ `password` ⊇ `none`.) */
-  private strengthSufficient(strength: AuthStrength): boolean {
-    const rank: Record<AuthStrength, number> = { none: 0, password: 1, webauthn: 2 };
-    return rank[strength] >= rank[this.requiredAuthStrength];
+  /** Is a step-up's reported fact sufficient for the selected provider-neutral assurance policy? */
+  private strengthSufficient(assurance: AuthAssuranceEvidence | AuthStrength): boolean {
+    return authAssuranceSufficient(assurance, this.authAssurancePolicy);
   }
 
   /**
@@ -907,12 +929,15 @@ export class AccessGateway {
    * from now. Keyed by the recipient READ FROM THE SIGNED GRANT (recipient-specific). A 0 TTL disables reuse (records
    * nothing → every window re-prompts).
    */
-  private recordRecipientAuth(recipient: RecipientRef, authStrength: AuthStrength): void {
+  private recordRecipientAuth(
+    recipient: RecipientRef,
+    assurance: AuthAssuranceEvidence | AuthStrength,
+  ): void {
     if (this.authReuseTtlMs <= 0) {
       return; // reuse disabled — never re-prompt-free.
     }
     this.recipientAuth.set(recipient, {
-      authStrength,
+      assurance,
       expiresAt: Date.now() + this.authReuseTtlMs,
     });
   }
@@ -936,7 +961,7 @@ export class AccessGateway {
       this.recipientAuth.delete(recipient);
       return false;
     }
-    return this.strengthSufficient(rec.authStrength);
+    return this.strengthSufficient(rec.assurance);
   }
 
   /**
