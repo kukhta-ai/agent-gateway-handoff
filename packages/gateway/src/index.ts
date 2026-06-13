@@ -140,6 +140,15 @@ export interface SessionGrantPort {
     token: OpaqueToken,
     args: { scopePath: string; now?: string },
   ): SessionGrantVerifyResult;
+  /**
+   * Non-authorizing stale-link classifier: proves a refused token is signature-valid, session-class, and route-scoped
+   * while ignoring TTL/revocation. The gateway uses this only after normal verification already refused the token, so
+   * expired/revoked tokens from other routes cannot reveal recently retired route history.
+   */
+  proveStaleSessionGrantRoute?(
+    token: OpaqueToken,
+    args: { scopePath: string; now?: string },
+  ): SessionGrantVerifyResult;
 }
 
 /**
@@ -185,6 +194,10 @@ interface ProgrammedRoute {
   internalEndpoint: string;
   boundGrantId: CapabilityId;
   sessionId: SessionId;
+}
+
+interface RetiredRoute extends ProgrammedRoute {
+  retiredAt: number;
 }
 
 /** What a `mount` request from the Route controller carries (mirrors `@gla/route`'s RouteMount — kept structural). */
@@ -295,6 +308,10 @@ function statusForReason(reason: ErrorCode): number {
   }
 }
 
+function staleGrantReasonProvesIssuedLink(reason: ErrorCode): boolean {
+  return reason === "auth.expired" || reason === "auth.revoked" || reason === "auth.not_yet_valid";
+}
+
 /**
  * The Access Gateway HTTP server. The SOLE public entry; for Phase E it serves the grant-verified enrollment
  * flow. Construct with the grant + identity seams (and an optional host/port), then `listen()`.
@@ -310,6 +327,8 @@ export class AccessGateway {
   private server: Server | undefined;
   /** The route table programmed by the Route controller, keyed by public path. A route binds to one grant. */
   private readonly routes = new Map<string, ProgrammedRoute>();
+  /** Recently-unmounted handoff paths, retained only to classify stale links as typed auth refusals. */
+  private readonly retiredRoutes = new Map<string, RetiredRoute>();
   /**
    * The per-grant step-up marker: a grant id whose bound recipient has authenticated to the selected policy
    * (so the next WS upgrade for that grant is authorized). It is the small mutable edge state the step-up needs —
@@ -436,6 +455,7 @@ export class AccessGateway {
    * statelessly and requires the bound identity. Replacing an existing route on the same path re-binds it.
    */
   async mount(route: RouteMountRequest): Promise<void> {
+    this.retiredRoutes.delete(route.path);
     this.routes.set(route.path, { ...route });
   }
 
@@ -447,6 +467,7 @@ export class AccessGateway {
     for (const [path, route] of [...this.routes.entries()]) {
       if (route.routeId === routeId) {
         this.routes.delete(path);
+        this.rememberRetiredRoute(route);
         // Force-close the live WS + drop the auth marker so the capsule is no longer reachable via this grant.
         this.forceCloseGrant(route.boundGrantId);
         this.authorizedGrants.delete(route.boundGrantId);
@@ -530,6 +551,11 @@ export class AccessGateway {
       const route = this.routes.get(path);
       if (method === "GET" && route !== undefined) {
         await this.handleHandoffPage(url, route, res);
+        return;
+      }
+      const retiredRoute = this.retiredRouteForPath(path);
+      if (method === "GET" && retiredRoute !== undefined) {
+        this.handleStaleHandoffPage(url, retiredRoute, res);
         return;
       }
 
@@ -699,7 +725,11 @@ export class AccessGateway {
     }
     const verified = this.verifyHandoffGrant(grant as OpaqueToken, route);
     if (!verified.ok) {
-      this.sendHtml(res, statusForReason(verified.reason), handoffRefusalHtml(verified.reason));
+      this.sendJson(
+        res,
+        statusForReason(verified.reason),
+        this.errBody(verified.reason, "handoff grant rejected"),
+      );
       return;
     }
     // Require the bound identity: an UN-ENROLLED recipient gets a catchable refusal page, never a crash.
@@ -759,7 +789,18 @@ export class AccessGateway {
     const body = await this.readJson(req);
     const grant = body.grant;
     const route = this.routeForBody(body);
-    if (typeof grant !== "string" || grant.length === 0 || route === undefined) {
+    if (typeof grant !== "string" || grant.length === 0) {
+      this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
+      return;
+    }
+    if (route === undefined) {
+      const retiredRoute = this.retiredRouteForBody(body);
+      if (
+        retiredRoute !== undefined &&
+        this.sendStaleHandoffJson(res, grant as OpaqueToken, retiredRoute)
+      ) {
+        return;
+      }
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
       return;
     }
@@ -802,7 +843,18 @@ export class AccessGateway {
     const body = await this.readJson(req);
     const grant = body.grant;
     const route = this.routeForBody(body);
-    if (typeof grant !== "string" || grant.length === 0 || route === undefined) {
+    if (typeof grant !== "string" || grant.length === 0) {
+      this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
+      return;
+    }
+    if (route === undefined) {
+      const retiredRoute = this.retiredRouteForBody(body);
+      if (
+        retiredRoute !== undefined &&
+        this.sendStaleHandoffJson(res, grant as OpaqueToken, retiredRoute)
+      ) {
+        return;
+      }
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
       return;
     }
@@ -864,8 +916,23 @@ export class AccessGateway {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       const path = this.internalRequestPath(url.pathname, req);
       const route = path !== undefined ? this.routes.get(path) : undefined;
+      const retiredRoute = path !== undefined ? this.retiredRouteForPath(path) : undefined;
       const sessionGrants = this.sessionGrants;
       if (route === undefined || sessionGrants === undefined) {
+        if (retiredRoute !== undefined && sessionGrants !== undefined) {
+          const grant = url.searchParams.get("grant");
+          if (grant === null || grant.length === 0) {
+            this.refuseUpgrade(socket, 404);
+            return;
+          }
+          const refusal = this.staleHandoffRefusal(grant as OpaqueToken, retiredRoute);
+          if (refusal === undefined) {
+            this.refuseUpgrade(socket, 404);
+            return;
+          }
+          this.refuseUpgrade(socket, statusForReason(refusal.code));
+          return;
+        }
         // No such route is publicly reachable (the route exists only while its window is open — GLA-039 AC#2).
         this.refuseUpgrade(socket, 404);
         return;
@@ -988,6 +1055,88 @@ export class AccessGateway {
       return undefined;
     }
     return this.routes.get(body.path);
+  }
+
+  private retiredRouteForBody(body: EnrollBody): RetiredRoute | undefined {
+    if (typeof body.path !== "string" || body.path.length === 0) {
+      return undefined;
+    }
+    return this.retiredRouteForPath(body.path);
+  }
+
+  private retiredRouteForPath(path: string): RetiredRoute | undefined {
+    const route = this.retiredRoutes.get(path);
+    if (route === undefined) {
+      return undefined;
+    }
+    const maxAgeMs = 15 * 60 * 1000;
+    if (Date.now() - route.retiredAt > maxAgeMs) {
+      this.retiredRoutes.delete(path);
+      return undefined;
+    }
+    return route;
+  }
+
+  private rememberRetiredRoute(route: ProgrammedRoute): void {
+    const maxRetiredRoutes = 128;
+    this.retiredRoutes.set(route.path, { ...route, retiredAt: Date.now() });
+    while (this.retiredRoutes.size > maxRetiredRoutes) {
+      const oldest = this.retiredRoutes.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        return;
+      }
+      this.retiredRoutes.delete(oldest);
+    }
+  }
+
+  private handleStaleHandoffPage(url: URL, route: RetiredRoute, res: ServerResponse): void {
+    const grant = url.searchParams.get("grant");
+    if (grant === null || grant.length === 0) {
+      this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+      return;
+    }
+    if (!this.sendStaleHandoffJson(res, grant as OpaqueToken, route)) {
+      this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+    }
+  }
+
+  private sendStaleHandoffJson(
+    res: ServerResponse,
+    grant: OpaqueToken,
+    route: RetiredRoute,
+  ): boolean {
+    const refusal = this.staleHandoffRefusal(grant, route);
+    if (refusal === undefined) {
+      return false;
+    }
+    this.sendJson(res, statusForReason(refusal.code), this.errBody(refusal.code, refusal.message));
+    return true;
+  }
+
+  private staleHandoffRefusal(
+    grant: OpaqueToken,
+    route: RetiredRoute,
+  ): { code: ErrorCode; message: string } | undefined {
+    const verified = this.verifyHandoffGrant(grant, route);
+    if (!verified.ok) {
+      if (!staleGrantReasonProvesIssuedLink(verified.reason)) {
+        return undefined;
+      }
+      if (!this.staleGrantMatchesRoute(grant, route)) {
+        return undefined;
+      }
+      return { code: verified.reason, message: "handoff grant rejected" };
+    }
+    return { code: "auth.revoked", message: "handoff window is no longer open" };
+  }
+
+  private staleGrantMatchesRoute(grant: OpaqueToken, route: RetiredRoute): boolean {
+    const sessionGrants = this.sessionGrants;
+    const prove = sessionGrants?.proveStaleSessionGrantRoute;
+    if (sessionGrants === undefined || prove === undefined) {
+      return false;
+    }
+    return prove.call(sessionGrants, grant, { scopePath: route.path }).ok;
   }
 
   /** Is a step-up's reported fact sufficient for the selected provider-neutral assurance policy? */

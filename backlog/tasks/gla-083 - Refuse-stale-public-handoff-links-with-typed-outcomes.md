@@ -1,9 +1,10 @@
 ---
 id: GLA-083
 title: Refuse stale public handoff links with typed outcomes
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-12 20:03'
+updated_date: '2026-06-13 16:19'
 labels:
   - hardening
   - gateway
@@ -42,26 +43,38 @@ Boundaries: this task does not expose route history for arbitrary paths and does
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A valid open handoff link still serves the normal handoff page and reaches the capsule only after required authorization.
-- [ ] #2 An expired public handoff link returns a machine-readable handoff or auth refusal outcome and never returns catalog.unknown.
-- [ ] #3 A revoked, completed, cancelled, or torn-down handoff link returns a machine-readable handoff or auth refusal outcome and never returns catalog.unknown.
-- [ ] #4 Browser follow-up calls from a stale handoff page, including handoff auth options and verify, return the same typed refusal family rather than catalog.unknown or a generic unknown-route usage error.
-- [ ] #5 A WebSocket upgrade using a stale handoff link is rejected before any upstream capsule connection is opened or retained.
-- [ ] #6 Unrelated unknown public paths still return generic not-found without exposing handoff route history.
+- [x] #1 A valid open handoff link still serves the normal handoff page and reaches the capsule only after required authorization.
+- [x] #2 An expired public handoff link returns a machine-readable handoff or auth refusal outcome and never returns catalog.unknown.
+- [x] #3 A revoked, completed, cancelled, or torn-down handoff link returns a machine-readable handoff or auth refusal outcome and never returns catalog.unknown.
+- [x] #4 Browser follow-up calls from a stale handoff page, including handoff auth options and verify, return the same typed refusal family rather than catalog.unknown or a generic unknown-route usage error.
+- [x] #5 A WebSocket upgrade using a stale handoff link is rejected before any upstream capsule connection is opened or retained.
+- [x] #6 Unrelated unknown public paths still return generic not-found without exposing handoff route history.
 <!-- AC:END -->
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Prepared from the transcript comparison and independent subagent draft: Pascal/stale-link.
+Implemented bounded retired-route stale handoff classification plus non-authorizing route-bound stale grant proof. Dirac ran BMAD story/dev fallback; Helmholtz TEA found and rechecked the expired/revoked cross-route oracle fix; Wegener final review approved. Verification: focused gateway+capability tests passed 52 tests; full pnpm gate passed 57 files, 618 tests, 12 skipped with only known wpm/CLAUDE.md symlink warning.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Typecheck passes with no errors.
-- [ ] #2 Linter passes clean.
-- [ ] #3 Tests are added for the change and the full suite is green.
-- [ ] #4 Public functions and exported types are documented.
-- [ ] #5 No dead code or unused exports are introduced.
-- [ ] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
+- [x] #1 Typecheck passes with no errors.
+- [x] #2 Linter passes clean.
+- [x] #3 Tests are added for the change and the full suite is green.
+- [x] #4 Public functions and exported types are documented.
+- [x] #5 No dead code or unused exports are introduced.
+- [x] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
 <!-- DOD:END -->
