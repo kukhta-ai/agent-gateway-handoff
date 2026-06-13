@@ -301,7 +301,12 @@ async function dualHarness(opts: {
     // Enroll the recipient (bind the subject) via the real service path — the precondition for any step-up.
     const challenge = await identity.enrollmentOptions(recipient, "discharge" as OpaqueToken);
     const { state, nonce } = redirectParams(challenge);
-    await fake.stageValidLogin(`enroll-${state}`, { sub: boundSub, nonce, amr: ["swk"] });
+    await fake.stageValidLogin(`enroll-${state}`, {
+      sub: boundSub,
+      nonce,
+      amr: ["swk"],
+      userVerified: true,
+    });
     await identity.enrollComplete(recipient, { code: `enroll-${state}`, state });
   }
   const gatewayOpts: GatewayOptions = {
@@ -354,7 +359,7 @@ function redirectParams(challenge: unknown): { state: string; nonce: string } {
  */
 async function stepUpWith(
   h: DualHarness,
-  opts: { amr?: string[]; sub?: string; mint?: "valid" | "bad-nonce" },
+  opts: { amr?: string[]; sub?: string; mint?: "valid" | "bad-nonce"; userVerified?: boolean },
 ): Promise<Response> {
   const optRes = await fetch(`${h.base}/handoff/auth/options`, {
     method: "POST",
@@ -371,6 +376,7 @@ async function stepUpWith(
     sub: opts.sub ?? h.boundSub,
     nonce: tokenNonce,
     ...(opts.amr !== undefined ? { amr: opts.amr } : {}),
+    ...(opts.userVerified !== undefined ? { userVerified: opts.userVerified } : {}),
   });
   return fetch(`${h.base}/handoff/auth/verify`, {
     method: "POST",
@@ -399,7 +405,12 @@ async function beginCallbackStepUp(
   const state = authorizeUrl.searchParams.get("state") ?? "";
   const nonce = authorizeUrl.searchParams.get("nonce") ?? "";
   const code = `callback-${state}`;
-  await h.fake.stageValidLogin(code, { sub: h.boundSub, nonce, amr: ["swk"] });
+  await h.fake.stageValidLogin(code, {
+    sub: h.boundSub,
+    nonce,
+    amr: ["swk"],
+    userVerified: true,
+  });
   return { authorizeUrl, code, state, bootstrapCookie };
 }
 
@@ -499,7 +510,7 @@ describe("AC#1/#2/#5 · both methods satisfy password-permitted policy (passkey�
       authAssuranceProfile: "password-permitted",
       upstream: upstream.endpoint,
     });
-    const res = await stepUpWith(h, { amr: ["swk"] });
+    const res = await stepUpWith(h, { amr: ["swk"], userVerified: true });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { authorized?: boolean; auth_strength?: string };
     expect(body.authorized).toBe(true);
@@ -569,7 +580,7 @@ describe("AC#3 · phishing-resistant policy admits the passkey but rejects the p
       authAssuranceProfile: "phishing-resistant",
       upstream: upstream.endpoint,
     });
-    const res = await stepUpWith(h, { amr: ["swk"] });
+    const res = await stepUpWith(h, { amr: ["swk"], userVerified: true });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { authorized?: boolean }).authorized).toBe(true);
     expect(h.gateway.isGrantAuthorized(GRANT_ID)).toBe(true);
@@ -586,7 +597,7 @@ describe("AC#3 · phishing-resistant policy admits the passkey but rejects the p
 describe("AC#4 · a failed assertion is refused with a typed reason and authorizes no one", () => {
   it("a NONCE-MISMATCH id_token → {ok:false} → 403 auth.insufficient, grant NOT authorized", async () => {
     const h = await dualHarness({ authAssuranceProfile: "password-permitted" });
-    const res = await stepUpWith(h, { amr: ["swk"], mint: "bad-nonce" });
+    const res = await stepUpWith(h, { amr: ["swk"], mint: "bad-nonce", userVerified: true });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe(
       "auth.insufficient",
@@ -596,7 +607,11 @@ describe("AC#4 · a failed assertion is refused with a typed reason and authoriz
 
   it("a SUBJECT-MISMATCH id_token (a valid login for the WRONG sub) → refused, nothing authorized", async () => {
     const h = await dualHarness({ authAssuranceProfile: "password-permitted" });
-    const res = await stepUpWith(h, { amr: ["swk"], sub: "sub-IMPOSTOR" });
+    const res = await stepUpWith(h, {
+      amr: ["swk"],
+      sub: "sub-IMPOSTOR",
+      userVerified: true,
+    });
     expect(res.status).toBe(403);
     expect(h.gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
   });
@@ -619,7 +634,12 @@ describe("AC#4 · a failed assertion is refused with a typed reason and authoriz
     subjects.set(`user:${recipient}`, { sub: "sub-x" });
     const challenge = await provider.challenge(`user:${recipient}`);
     const { state, nonce } = redirectParams(challenge);
-    await fake.stageValidLogin(`c-${state}`, { sub: "sub-x", nonce: "WRONG", amr: ["swk"] });
+    await fake.stageValidLogin(`c-${state}`, {
+      sub: "sub-x",
+      nonce: "WRONG",
+      amr: ["swk"],
+      userVerified: true,
+    });
     void nonce;
     const out = await provider.verifyAssertionDetailed(`user:${recipient}`, {
       code: `c-${state}`,
@@ -804,6 +824,7 @@ describe("/enroll/verify echoes the recorded strength (provider-agnostic, no har
   async function enrollVerify(
     h: { base: string; fake: FakeAuthentik },
     amr: string[],
+    userVerified?: boolean,
   ): Promise<Response> {
     const optRes = await fetch(`${h.base}/enroll/options`, {
       method: "POST",
@@ -815,7 +836,12 @@ describe("/enroll/verify echoes the recorded strength (provider-agnostic, no har
     const url = new URL(c.authorizeUrl ?? "");
     const state = url.searchParams.get("state") ?? "";
     const nonce = url.searchParams.get("nonce") ?? "";
-    await h.fake.stageValidLogin(`code-${state}`, { sub: "sub-e", nonce, amr });
+    await h.fake.stageValidLogin(`code-${state}`, {
+      sub: "sub-e",
+      nonce,
+      amr,
+      ...(userVerified !== undefined ? { userVerified } : {}),
+    });
     return fetch(`${h.base}/enroll/verify`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -835,7 +861,7 @@ describe("/enroll/verify echoes the recorded strength (provider-agnostic, no har
 
   it("a PASSKEY-grade delegated enroll → the response reports auth_strength webauthn", async () => {
     const h = await enrollHarness();
-    const res = await enrollVerify(h, ["swk"]);
+    const res = await enrollVerify(h, ["swk"], true);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { auth_strength?: string }).auth_strength).toBe("webauthn");
   });

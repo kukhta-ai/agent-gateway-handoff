@@ -33,12 +33,13 @@ hands a session off (docs/03 §4). It has **two branches**, walked by the instal
 - **Inverse op only for what we installed.** An adopted authentik (Local-/Remote-External) carries **no**
   service inverse op; a `Managed` stack carries the teardown (`docker compose … down -v`). Record
   installed-vs-adopted either way.
-- **The `amr` scope mapping is required and version-sensitive.** authentik 2025.10 emits an **empty `amr`** and
-  does not distinguish passkey from password out of the box. Apply this bundle's **proven**
+- **The `amr` + `gla_uv` scope mapping is required and version-sensitive.** authentik 2025.10 emits an **empty
+  `amr`** and does not distinguish passkey from password out of the box. Apply this bundle's **proven**
   `payload/templates/amr-scope-mapping.py` (with `amr-scope-mapping.md`) as a custom OAuth2 provider scope
-  mapping; it matches GLA's default amr map (no adapter change, no `GLA_AUTHENTIK_AMR_MAP` override). Without it
-  the integration **safely degrades to password-only** (the adapter never up-maps) — **warn the operator**, and
-  **verify the emitted `amr` against the running instance**.
+  mapping; it matches GLA's default method map and emits `gla_uv:true` only for a UV-required passkey stage (no
+  adapter change, no `GLA_AUTHENTIK_AMR_MAP` override). Without it the integration **safely degrades to
+  password-only** (the adapter never up-maps) — **warn the operator**, and **verify the emitted `amr` and `gla_uv`
+  against the running instance**.
 - **Same-origin callback; no grant leak.** The `redirect_uri` must resolve to a **GLA-served page on GLA's own
   origin** (merge `payload/templates/caddy-authentik-callback.snippet` into the edge-proxy site block) so the
   OIDC `code`/`state` return to GLA and the **GLA grant never travels to authentik**.
@@ -47,9 +48,9 @@ hands a session off (docs/03 §4). It has **two branches**, walked by the instal
   (`payload/templates/dependency-binding.example.json` is the receipt shape; the whole authentik stack is **one**
   dependency from GLA's view).
 - **Honest deferral.** A real authentik cannot run in a constrained build; where one is not available to probe,
-  record the end-to-end method-distinguishing and immutable-`sub` proofs as **deferred to the real deployment**
-  rather than marking them satisfied. The deterministic strength mapping is already covered by
-  `installer-scripts/smoke-amr-strength.mjs`; the real passkey→`webauthn` round-trip lands at the deploy.
+  record the end-to-end method-distinguishing, UV-proof, and immutable-`sub` proofs as **deferred to the real
+  deployment** rather than marking them satisfied. The deterministic strength mapping is already covered by
+  `installer-scripts/smoke-amr-strength.mjs`; the real UV-proven passkey→`webauthn` round-trip lands at the deploy.
 
 ## What this bundle is
 

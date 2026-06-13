@@ -219,7 +219,12 @@ export function defaultWebauthnEnrollmentPolicy(): AuthEnrollmentMethodPolicy {
         authStrength: "webauthn",
         assuranceLevel: "phishing-resistant",
         required: true,
-        providerEvidence: { adapter: "@gla/auth-webauthn" },
+        providerEvidence: {
+          adapter: "@gla/auth-webauthn",
+          userVerified: true,
+          recipientBound: true,
+          replayResistant: true,
+        },
       },
     ],
     externalSources: [],
@@ -402,6 +407,15 @@ export function authEnrollmentDiagnostics(opts: {
     );
   }
 
+  for (const stage of phishingResistantStagesMissingProof(enrollmentPolicy)) {
+    concerns.push(
+      `credential setup method "${stage.method}" claims phishing-resistant assurance without explicit user-verification, recipient-binding, and replay-resistant evidence`,
+    );
+    actions.push(
+      `Configure and verify "${stage.method}" to emit provider-neutral UV/binding/replay proof, or lower it to password-grade assurance.`,
+    );
+  }
+
   for (const source of sourceClaimsWithoutEvidence(enrollmentPolicy)) {
     concerns.push(
       `external source "${source.kind}:${source.name}" claims phishing-resistant assurance without explicit provider evidence`,
@@ -556,6 +570,15 @@ function overstatedCredentialStages(
   );
 }
 
+function phishingResistantStagesMissingProof(
+  policy: AuthEnrollmentMethodPolicy,
+): EnrollmentCredentialSetup[] {
+  return policy.credentialSetupStages.filter(
+    (stage) =>
+      stage.assuranceLevel === "phishing-resistant" && !credentialDeclaresPhishingProof(stage),
+  );
+}
+
 function sourceClaimsWithoutEvidence(
   policy: AuthEnrollmentMethodPolicy,
 ): EnrollmentExternalSource[] {
@@ -568,9 +591,23 @@ function sourceClaimsWithoutEvidence(
 
 function effectiveCredentialAssuranceLevel(stage: EnrollmentCredentialSetup): AuthAssuranceLevel {
   const strengthLevel = levelFromStrength(stage.authStrength);
-  return LEVEL_RANK[stage.assuranceLevel] <= LEVEL_RANK[strengthLevel]
-    ? stage.assuranceLevel
-    : strengthLevel;
+  const capped =
+    LEVEL_RANK[stage.assuranceLevel] <= LEVEL_RANK[strengthLevel]
+      ? stage.assuranceLevel
+      : strengthLevel;
+  if (capped === "phishing-resistant" && !credentialDeclaresPhishingProof(stage)) {
+    return "password";
+  }
+  return capped;
+}
+
+function credentialDeclaresPhishingProof(stage: EnrollmentCredentialSetup): boolean {
+  const evidence = stage.providerEvidence;
+  return (
+    evidence?.userVerified === true &&
+    evidence.recipientBound === true &&
+    evidence.replayResistant === true
+  );
 }
 
 function effectiveSourceAssuranceLevel(source: EnrollmentExternalSource): AuthAssuranceLevel {

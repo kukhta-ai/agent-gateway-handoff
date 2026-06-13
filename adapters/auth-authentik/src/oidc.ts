@@ -242,12 +242,16 @@ export async function exchangeCode(
 
 // ── id_token validation (the heart of verifyAssertion / finishEnrollment) ─────────────────────────────
 
-/** The validated id_token claims the adapter acts on: the subject + the method claims (`amr`/`acr`) + nonce. */
+/**
+ * The validated id_token claims the adapter acts on: the subject, method claims (`amr`/`acr`), nonce, and GLA's
+ * configured user-verification proof claim (`gla_uv`).
+ */
 export interface ValidatedIdToken {
   sub: string;
   amr?: string[];
   acr?: string;
   nonce?: string;
+  userVerified?: boolean;
 }
 
 /** A discriminated id_token validation result: the validated claims, or a typed failure reason. */
@@ -374,6 +378,7 @@ export async function validateIdToken(
     ? payload.amr.filter((m): m is string => typeof m === "string")
     : undefined;
   const acr = typeof payload.acr === "string" ? payload.acr : undefined;
+  const userVerified = typeof payload.gla_uv === "boolean" ? payload.gla_uv : undefined;
   const claims: ValidatedIdToken = { sub: payload.sub };
   if (amr !== undefined) {
     claims.amr = amr;
@@ -383,6 +388,9 @@ export async function validateIdToken(
   }
   if (nonce !== undefined) {
     claims.nonce = nonce;
+  }
+  if (userVerified !== undefined) {
+    claims.userVerified = userVerified;
   }
   return { ok: true, claims };
 }

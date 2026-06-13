@@ -93,7 +93,13 @@ class FakeAuthProvider implements AuthProviderPort {
     return {
       credentialId: `cred:${userId}`,
       authStrength: "webauthn",
-      assurance: { authStrength: "webauthn", level: "phishing-resistant" },
+      assurance: {
+        authStrength: "webauthn",
+        level: "phishing-resistant",
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
     };
   }
 
@@ -108,7 +114,13 @@ class FakeAuthProvider implements AuthProviderPort {
     return {
       ok: true,
       authStrength: "webauthn",
-      assurance: { authStrength: "webauthn", level: "phishing-resistant" },
+      assurance: {
+        authStrength: "webauthn",
+        level: "phishing-resistant",
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
     };
   }
 }
@@ -465,6 +477,7 @@ describe("restart-safe security state wiring", () => {
       sub: "authentik-sub",
       nonce: "nonce-step",
       amr: ["swk"],
+      userVerified: true,
     });
 
     const afterStepUpRestart = provider(DaemonStateRoot.open({ root }), fixedOidc("x", "y"));

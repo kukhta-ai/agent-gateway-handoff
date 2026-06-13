@@ -32,7 +32,7 @@ deployment + OIDC docs consulted** to ground the config-outcomes (see Sources). 
 | AC | What it fixes | Section |
 |---|---|---|
 | #1 | Host footprint enumerated + classified by ownership mode | **§2** |
-| #2 | The configuration as **outcomes** (RP app + passkey/password flow + `amr`/`acr` + stable `sub`) | **§3** |
+| #2 | The configuration as **outcomes** (RP app + passkey/password flow + `amr`/`acr` + `gla_uv` + stable `sub`) | **§3** |
 | #3 | Lives in a wpm package: detect-before-change, receipt (`DependencyBinding`), idempotent | **§4** |
 | #4 | RP identity ties to the operator's public URL (issuer / `redirect_uri` / origin all agree) | **§5** |
 | #5 | The in-tree WebAuthn default needs NONE of it; authentik only when selected | **§6** |
@@ -130,25 +130,29 @@ what the **real adapter** requires (`adapters/auth-authentik/src/{index.ts,oidc.
   (`see adapters/auth-authentik/src/oidc.ts` `resolveEndpoints`/`buildAuthorizeUrl`). The discovered `issuer`
   must equal what GLA is configured with (`GLA_AUTHENTIK_ISSUER_URL`), since the adapter validates the
   `id_token` `iss` against it.
-- **`id_token` carries the needed claims:** "include claims in id_token" is on, so `sub`, `amr`/`acr`, and any
-  `nonce`/`aud`/`exp` the adapter validates are present in the **`id_token`** itself (the adapter validates the
-  `id_token`, not a userinfo round-trip). Scope `openid profile` (the adapter default) suffices.
+- **`id_token` carries the needed claims:** "include claims in id_token" is on, so `sub`, `amr`/`acr`, GLA's
+  UV proof claim (`gla_uv`), and any `nonce`/`aud`/`exp` the adapter validates are present in the **`id_token`**
+  itself (the adapter validates the `id_token`, not a userinfo round-trip). Scope `openid profile` plus the
+  GLA custom mapping suffices.
 
-### §3.2 · An authentication flow offering passkey AND password — emitting a distinguishing `amr`/`acr`
+### §3.2 · An authentication flow offering passkey AND password — emitting distinguishing method and UV claims
 - The provider's **authentication flow** presents **both** a **passkey/WebAuthn** stage **and** a **password**
   stage (and any MFA the operator wants), so a recipient can use either (`see authentik-dual-method-flow.md
   §2`). authentik's flow/stage model supports this (an Identification stage → a WebAuthn-validator and/or a
   Password stage; the flow lets the user choose).
-- **(Critical — from `authentik-dual-method-flow.md §3`/`§8` and `authentik-integration.md §4):** the flow
-  **emits an `amr` (or `acr`) in the `id_token` that distinguishes passkey from password**, so GLA's
-  pure-function strength map yields **`webauthn`** for a passkey login and **`password`** for a password login.
+- **(Critical — from `authentik-dual-method-flow.md §3`/`§8`, `authentik-integration.md §4`, and
+  `identity-and-auth.md`):** the flow **emits an `amr` (or `acr`) in the `id_token` that distinguishes passkey
+  from password** and emits explicit UV proof (`gla_uv: true`) for the passkey/WebAuthn branch. Only the pair
+  lets GLA's pure-function strength map yield **`webauthn`** for a passkey login; password or passkey-labelled
+  evidence without UV proof yields **`password`** or insufficient/degraded evidence.
   Concretely: a **custom scope/property mapping** populates `amr` from the authentication context — a passkey
-  login → an `amr` token in GLA's webauthn set (`{hwk, swk, webauthn, fido}`), a password login → `{pwd}`
-  (`see adapters/auth-authentik/src/strength.ts` `DEFAULT_METHOD_MAPS`). The operator-overridable map
-  (`GLA_AUTHENTIK_AMR_MAP`/`_ACR_MAP`) absorbs label differences across authentik versions, **but the flow
-  MUST emit *something* that separates the two tiers** — without it, the integration degrades to `password`-only
-  (the `never-up-map` floor; `§8` risk). This is the single most authentik-version-sensitive outcome and the
-  one GLA-074 must **verify against the running instance**, not assume.
+  login → an `amr` token in GLA's webauthn set (`{hwk, swk, webauthn, fido}`) **and** `gla_uv: true`; a password
+  login → `{pwd}` with no UV proof (`see adapters/auth-authentik/src/strength.ts` `DEFAULT_METHOD_MAPS`). The
+  operator-overridable map (`GLA_AUTHENTIK_AMR_MAP`/`_ACR_MAP`) absorbs label differences across authentik
+  versions, **but the flow MUST emit both a tier-separating method signal and the UV proof claim** — without
+  both, the integration degrades to `password`-only (the `never-up-map` floor; `§8` risk). This is the single
+  most authentik-version-sensitive outcome and the one GLA-074 must **verify against the running instance**, not
+  assume.
 
 ### §3.3 · A stable subject (`sub`)
 - The provider's **subject mode** yields a **stable, immutable `sub`** — authentik's "based on the User's
@@ -191,7 +195,7 @@ the authentik path under the **same detect → setup → verify → record** loo
 
 - **Detect before changing anything (idempotent / Repair).** The setup step (extending
   `identity-provider-1`'s detect + `identity-provider-2`'s setup) first **detects** whether an authentik that
-  satisfies `§3` already answers (issuer reachable? RP app present? flow emitting `amr`? — `§7`). If so, it
+  satisfies `§3` already answers (issuer reachable? RP app present? flow emitting `amr` + `gla_uv`? — `§7`). If so, it
   **adopts** (records the binding, changes nothing) — the Local-External reference path (`§1`). Re-running is
   **Repair**, converging to the same end-state without duplicating providers/applications.
 - **Record a receipt — the `DependencyBinding`** (`see dependency-strategy.md §5`; the artifact that crosses
@@ -199,7 +203,7 @@ the authentik path under the **same detect → setup → verify → record** loo
   ```
   dependency:    "identity-provider"
   ownershipMode: "local-external" | "remote-external" | "managed"   // reference: local-external
-  connection:    { issuer, clientId, redirectUri /*, scopes, amrMap? */ }   // clientSecret NOT in the receipt — a secret-ref (§8)
+  connection:    { issuer, clientId, redirectUri /*, scopes, amrMap?, uvClaim? */ }   // clientSecret NOT in the receipt — a secret-ref (§8)
   installed:     false   // local/remote-external = adopted; true only for a Managed standup (carries inverseOp)
   inverseOp:     <uninstall/teardown step>   // Managed only — the wpm receipt for what it installed
   lastProbe:     { at, result: "available"|"degraded"|"unavailable", detail }
@@ -284,7 +288,7 @@ route.
 |---|---:|---|---|---|
 | Caddy / exposure layer | yes | `https://gla.example/` → GLA gateway upstream | `https://gla.example/team-a/*` → GLA gateway upstream, prefix preserved or sanitized `X-Forwarded-Prefix` | Caddy owns TLS and path routing only. Optional authentik forward-auth may pre-screen the browser, but does not decide GLA handoff authorization. |
 | GLA public gateway | yes, under `GLA_PUBLIC_BASE_URL` only | `/enroll`, `/auth/callback`, `/handoff/auth/*`, `/handoff/<id>` | `/team-a/enroll`, `/team-a/auth/callback`, `/team-a/handoff/auth/*`, `/team-a/handoff/<id>` | **GLA Access Gateway** verifies grants, recipient caveats, TTL/revocation, route scope, enrollment state, and selected auth assurance. |
-| authentik OIDC issuer | yes, usually a separate origin | `https://idp.example/application/o/gla/...` | same, unless the operator deliberately hosts authentik under its own routed prefix | authentik authenticates the human and emits OIDC facts (`sub`, `amr`/`acr`, tokens). GLA validates and decides. |
+| authentik OIDC issuer | yes, usually a separate origin | `https://idp.example/application/o/gla/...` | same, unless the operator deliberately hosts authentik under its own routed prefix | authentik authenticates the human and emits OIDC facts (`sub`, `amr`/`acr`, `gla_uv`, tokens). GLA validates and decides. |
 | GLA OIDC callback | yes, but only as a GLA gateway page | `https://gla.example/auth/callback` | `https://gla.example/team-a/auth/callback` | GLA callback page restores same-origin state and reposts to GLA verify routes; authentik sees only OIDC `code/state`. |
 | authentik proxy/outpost | optional public edge endpoint | `/outpost.goauthentik.io/*` or a proxy host chosen by the operator | same under the operator's exposure layout | authentik/outpost owns only the outer application-session check. It cannot mint or verify GLA grants. |
 | Agent Bridge | no | Unix socket or loopback endpoint | same | Local operator/agent surface; daemon refuses non-local bridge binds. Never expose through Caddy or authentik. |
@@ -337,12 +341,12 @@ GLA-074 builds the **authentik branch of the `identity-provider` bundle** — th
 that stands authentik up (or adopts it) and configures `§3`, recording the `DependencyBinding`. Concrete steps:
 
 1. **Extend the detect step** (`identity-provider-1`): detect selection (`GLA_AUTH_PROVIDER=authentik`) and
-   whether an authentik satisfying `§3` already answers (issuer reachable, RP app present, flow emits `amr`,
-   stable `sub`). Record findings.
+   whether an authentik satisfying `§3` already answers (issuer reachable, RP app present, flow emits `amr` +
+   `gla_uv`, stable `sub`). Record findings.
 2. **Extend the setup step** (`identity-provider-2`, authentik branch): for the **reference (Local-External)**,
    **guide + verify** the operator/agent standing authentik up **at the VPS host** (the Compose stack, where
-   Docker works — `§1`) and configuring the RP app + the passkey/password flow + the `amr` mapping + the
-   immutable subject mode (`§3`); for **Remote-External**, configure connection-only; for **Managed** (only
+   Docker works — `§1`) and configuring the RP app + the passkey/password flow + the `amr`/`gla_uv` mapping +
+   the immutable subject mode (`§3`); for **Remote-External**, configure connection-only; for **Managed** (only
    where nested Docker works), stand the Compose stack up and carry the inverse op. Point GLA at it (write the
    env/connection). **Detect-before-change** so a present authentik is adopted, not duplicated.
 3. **Wire the Caddy `redirect_uri` callback** on GLA's origin (`§5.1`) — same-origin, no grant leak.
@@ -357,7 +361,7 @@ The verify step is **probe-driven** (the bundle's "verify before record"):
 |---|---|
 | **The provider answers** | `GET <issuer>/.well-known/openid-configuration` responds 200 with a valid OIDC discovery doc; the advertised **token** + **JWKS** endpoints answer (JWKS returns keys). |
 | **The RP application exists** | an authorization request to `/authorize` with GLA's `client_id` + `redirect_uri` is **accepted** (authentik recognizes the client + redirect URI), not rejected as unknown-client/bad-redirect. |
-| **The passkey/password flow exists + emits a distinguishing `amr`** | an **end-to-end auth** (via the bundle's smoke test, or `FakeAuthentik` for the deterministic unit layer): a passkey login yields an `id_token` whose `amr` maps to **`webauthn`**, a password login yields one mapping to **`password`** — proving the flow offers both **and** the strength map separates them (`§3.2`). |
+| **The passkey/password flow exists + emits distinguishing method + UV evidence** | an **end-to-end auth** (via the bundle's smoke test, or `FakeAuthentik` for the deterministic unit layer): a passkey login yields an `id_token` whose `amr` maps to **`webauthn`** and whose `gla_uv` is **true**; a password login yields one mapping to **`password`** without UV proof — proving the flow offers both, the strength map separates them, and only verified passkey evidence satisfies phishing-resistant assurance (`§3.2`). |
 | **Stable `sub`** | enrolling then re-authenticating the same user yields the **same `sub`** (the subject is immutable — `§3.3`). |
 | **GLA agrees on the binding** | GLA's `doctor`/`probe` **reads the `DependencyBinding`** and reports the `identity-provider` dependency **available** (system-derived from the probe) — closing the loop that the runtime adapter can actually reach what the bundle stood up. |
 
@@ -369,7 +373,7 @@ with authentik-specific probes.
 
 | Already provided | GLA-074 builds |
 |---|---|
-| the adapter that dials authentik's OIDC endpoints (`oidc.ts` discovery/exchange/validate), the `amr`→strength map (`strength.ts`), the dual-method flow + GLA-served same-origin callback page, `FakeAuthentik` | the **bundle's authentik branch** (detect→setup→verify→record), the **host-level standup/adopt** decision wiring, the **`§3` config outcomes** + their probes, the **Caddy `redirect_uri` route**, the **`DependencyBinding` receipt** |
+| the adapter that dials authentik's OIDC endpoints (`oidc.ts` discovery/exchange/validate), the `amr`/`gla_uv`→assurance map (`strength.ts`), the dual-method flow + GLA-served same-origin callback page, `FakeAuthentik` | the **bundle's authentik branch** (detect→setup→verify→record), the **host-level standup/adopt** decision wiring, the **`§3` config outcomes** + their probes, the **Caddy `redirect_uri` route**, the **`DependencyBinding` receipt** |
 | the existing `identity-provider` bundle (WebAuthn-default tasks `1..3`) + its DoD-gated receipt model | the authentik tasks/AC under the same loop (the WebAuthn-default path stays unchanged) |
 
 ---
@@ -383,13 +387,13 @@ with authentik-specific probes.
    offer Remote-External cleanly. **Document Local-/Remote-External as the hermes-1 reference; treat
    Managed-in-container as a non-reference path only attempted where nested Docker is proven working.** This is
    the single biggest where-it-runs decision and must be surfaced to the operator (a guided pause), not assumed.
-2. **The `amr` emission config (the version-sensitive correctness outcome).** authentik must be configured so
-   the flow emits an `amr`/`acr` that **separates passkey from password** (`§3.2`); the docs enumerate few
-   fields and the exact mechanism (a custom property/scope mapping populating `amr`) varies by authentik
-   version. GLA-074 must **verify the emitted `amr` against the running instance** (a real passkey login →
-   `webauthn`, a real password login → `password`) and tune `GLA_AUTHENTIK_AMR_MAP` to the actual labels — not
-   assume defaults. If the flow cannot be made to distinguish them, the integration **safely degrades to
-   `password`-only** (never up-maps), and the operator must be warned.
+2. **The `amr` + `gla_uv` emission config (the version-sensitive correctness outcome).** authentik must be
+   configured so the flow emits an `amr`/`acr` that **separates passkey from password** and a UV proof claim that
+   is true only for the passkey/WebAuthn branch (`§3.2`); the exact mechanism (a custom property/scope mapping)
+   varies by authentik version. GLA-074 must **verify the emitted `amr` and `gla_uv` against the running
+   instance** (a real passkey login → `webauthn` + UV true, a real password login → `password` + no UV proof) and
+   tune `GLA_AUTHENTIK_AMR_MAP` to the actual labels — not assume defaults. If the flow cannot emit both, the
+   integration **safely degrades to `password`-only** (never up-maps), and the operator must be warned.
 3. **authentik version drift — Redis present or not.** ≥2025.10 **removes Redis** (`§2` A4); older versions
    require it. GLA-074 must branch the stack composition on the detected/target version (include Redis only
    when needed) and not hard-require a Redis the version doesn't use.
@@ -420,8 +424,8 @@ with authentik-specific probes.
    mode; the reference is **Local-External** (host-level, adopted); the whole stack is **one** GLA
    `identity-provider` dependency (GLA dials only the OIDC endpoints) (`§2`).
 2. Config **outcomes**: an OIDC **RP app** (client id/secret, redirect URI, issuer, claims-in-`id_token`); an
-   **auth flow offering passkey AND password** that **emits a distinguishing `amr`/`acr`** (→ `webauthn` vs
-   `password`); a **stable immutable `sub`** (`§3`).
+   **auth flow offering passkey AND password** that **emits distinguishing `amr`/`acr` plus `gla_uv`** (→
+   `webauthn` only when UV is true, otherwise `password`/degraded); a **stable immutable `sub`** (`§3`).
 3. The standup is the **`wpm` `identity-provider` bundle's authentik branch** — **detect-before-change**,
    **records a `DependencyBinding`** (issuer/clientId/redirectUri/ownershipMode/installed/inverseOp), **idempotent**
    detect→setup→verify→record (`§4`).
@@ -440,7 +444,7 @@ with authentik-specific probes.
 - authentik OAuth2/OIDC provider + endpoints (`/application/o/authorize|token|<slug>/jwks/`, `.well-known`):
   [OAuth 2.0 provider](https://docs.goauthentik.io/add-secure-apps/providers/oauth2) ·
   [Create an OAuth2 provider](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/create-oauth2-provider/)
-- Custom claims via scope/property mappings (the `amr` mechanism):
+- Custom claims via scope/property mappings (the `amr` + `gla_uv` mechanism):
   [Provider property mappings](https://docs.goauthentik.io/add-secure-apps/providers/property-mappings/)
 - Flows/stages/policies (the passkey + password flow model):
   [Flows, stages, and policies](https://goauthentik.io/blog/2024-08-27-flows-stages-and-policies/)
@@ -453,11 +457,11 @@ with authentik-specific probes.
 
 `docs/architecture/authentik-integration.md` (the master — `§6` deployment boundary + GLA-074 named, `§7`
 selection surface/config envs) · `docs/architecture/authentik-dual-method-flow.md` (`§5` the redirect_uri
-callback + same-origin landing, `§3`/`§8` the `amr` distinction) · `docs/architecture/authentik-enrollment.md`
+callback + same-origin landing, `§3`/`§8` the `amr` + `gla_uv` distinction) · `docs/architecture/authentik-enrollment.md`
 (`§3` the subject binding, `§8.3` stable `sub`) · `docs/architecture/dependency-strategy.md` (the ownership
 modes + the `DependencyBinding` receipt + availability=system-derived) · `docs/01-architecture-overview.md
 §7–§8` (the dependency/ownership model + the GLA↔`wpm` boundary) · `docs/components/identity-and-auth.md` (the
 identity/auth model) · `wpm/wip/bundles/identity-provider/` (`bundle.yml` + `install-backlog/` tasks
 `identity-provider-1..3` — the WebAuthn-default config GLA-074 extends with the authentik branch) ·
 `adapters/auth-authentik/src/oidc.ts` (the OIDC endpoints/discovery the standup must satisfy) ·
-`adapters/auth-authentik/src/strength.ts` (the `amr`→strength map the flow must feed).
+`adapters/auth-authentik/src/strength.ts` (the `amr`/`gla_uv`→assurance map the flow must feed).

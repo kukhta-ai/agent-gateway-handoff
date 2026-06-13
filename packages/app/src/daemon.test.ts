@@ -72,7 +72,12 @@ const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
       authStrength: "webauthn",
       assuranceLevel: "phishing-resistant",
       choiceGroup: "primary-credential",
-      providerEvidence: { amr: ["swk"] },
+      providerEvidence: {
+        amr: ["swk"],
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
     },
   ],
   externalSources: [

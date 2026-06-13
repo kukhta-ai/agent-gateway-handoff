@@ -14,20 +14,27 @@ import {
   methodResolvable,
 } from "./strength.js";
 
-describe("AC#5 · amr passkey set → webauthn (highest matching method wins)", () => {
+describe("AC#5 · amr passkey set requires explicit UV proof before it becomes webauthn", () => {
   it.each([["hwk"], ["swk"], ["webauthn"], ["fido"]])(
-    "amr [%s] (a phishing-resistant key) → webauthn",
+    "amr [%s] plus userVerified:true → webauthn",
     (token) => {
-      expect(mapMethodToStrength({ amr: [token] })).toBe("webauthn");
+      expect(mapMethodToStrength({ amr: [token], userVerified: true })).toBe("webauthn");
     },
   );
 
-  it("amr [pwd, swk] (password AND passkey) → webauthn (the strongest method wins)", () => {
-    expect(mapMethodToStrength({ amr: ["pwd", "swk"] })).toBe("webauthn");
+  it.each([["hwk"], ["swk"], ["webauthn"], ["fido"]])(
+    "amr [%s] without UV proof → password floor",
+    (token) => {
+      expect(mapMethodToStrength({ amr: [token] })).toBe("password");
+    },
+  );
+
+  it("amr [pwd, swk] plus UV → webauthn (the strongest verified method wins)", () => {
+    expect(mapMethodToStrength({ amr: ["pwd", "swk"], userVerified: true })).toBe("webauthn");
   });
 
-  it("matching is case-insensitive (authentik labels vary in case): amr [SWK] → webauthn", () => {
-    expect(mapMethodToStrength({ amr: ["SWK"] })).toBe("webauthn");
+  it("matching is case-insensitive (authentik labels vary in case): amr [SWK] plus UV → webauthn", () => {
+    expect(mapMethodToStrength({ amr: ["SWK"], userVerified: true })).toBe("webauthn");
   });
 });
 
@@ -49,8 +56,12 @@ describe("AC#5 · amr pwd (with/without MFA companions) → password (MFA never 
 });
 
 describe("AC#5 · acr fallback when amr is absent", () => {
-  it("acr 'phr' (phishing-resistant context) → webauthn", () => {
-    expect(mapMethodToStrength({ acr: "phr" })).toBe("webauthn");
+  it("acr 'phr' (phishing-resistant context) plus UV → webauthn", () => {
+    expect(mapMethodToStrength({ acr: "phr", userVerified: true })).toBe("webauthn");
+  });
+
+  it("acr 'phr' without UV proof → password floor", () => {
+    expect(mapMethodToStrength({ acr: "phr" })).toBe("password");
   });
 
   it("acr 'password' (operator-mapped password context) → password", () => {
@@ -62,8 +73,10 @@ describe("AC#5 · acr fallback when amr is absent", () => {
   });
 
   it("amr present-but-unmatched takes precedence over acr resolution path → still resolves via acr", () => {
-    // amr has no passkey/pwd token, so we fall to acr; acr says passkey → webauthn.
-    expect(mapMethodToStrength({ amr: ["unknown-method"], acr: "phr" })).toBe("webauthn");
+    // amr has no passkey/pwd token, so we fall to acr; acr plus UV says passkey → webauthn.
+    expect(mapMethodToStrength({ amr: ["unknown-method"], acr: "phr", userVerified: true })).toBe(
+      "webauthn",
+    );
   });
 });
 
@@ -86,11 +99,29 @@ describe("AC#5 · valid token but unresolvable method → password (NEVER webaut
 });
 
 describe("AC#4 · authentik claims project into provider-neutral assurance evidence", () => {
-  it("passkey amr claims produce phishing-resistant assurance evidence", () => {
-    expect(mapMethodToAssurance({ amr: ["swk"] })).toEqual({
+  it("passkey amr claims plus UV/binding/replay facts produce phishing-resistant assurance evidence", () => {
+    expect(
+      mapMethodToAssurance({ amr: ["swk"], userVerified: true }, DEFAULT_METHOD_MAPS, {
+        recipientBound: true,
+        replayResistant: true,
+      }),
+    ).toEqual({
       authStrength: "webauthn",
       level: "phishing-resistant",
       methodResolvable: true,
+      userVerified: true,
+      recipientBound: true,
+      replayResistant: true,
+      providerEvidence: { amr: ["swk"], userVerified: true },
+    });
+  });
+
+  it("passkey amr claims without UV proof degrade with actionable diagnostics", () => {
+    expect(mapMethodToAssurance({ amr: ["swk"] })).toEqual({
+      authStrength: "password",
+      level: "password",
+      methodResolvable: true,
+      diagnostics: ["missing-user-verification"],
       providerEvidence: { amr: ["swk"] },
     });
   });
@@ -100,6 +131,7 @@ describe("AC#4 · authentik claims project into provider-neutral assurance evide
       authStrength: "password",
       level: "password",
       methodResolvable: false,
+      diagnostics: ["method-unresolved", "ambiguous-provider-evidence"],
       providerEvidence: { amr: ["mfa"], acr: "unknown" },
     });
   });
@@ -108,7 +140,7 @@ describe("AC#4 · authentik claims project into provider-neutral assurance evide
 describe("AC#5 · the maps are operator-overridable (a deployment with different labels needs no code change)", () => {
   it("an extra webauthn amr label maps to webauthn via an override", () => {
     const maps = methodMaps({ webauthnAmr: ["hwk", "swk", "webauthn", "fido", "passkey"] });
-    expect(mapMethodToStrength({ amr: ["passkey"] }, maps)).toBe("webauthn");
+    expect(mapMethodToStrength({ amr: ["passkey"], userVerified: true }, maps)).toBe("webauthn");
     // The default maps DON'T know 'passkey' → it would be the password floor.
     expect(mapMethodToStrength({ amr: ["passkey"] }, DEFAULT_METHOD_MAPS)).toBe("password");
   });
@@ -117,7 +149,7 @@ describe("AC#5 · the maps are operator-overridable (a deployment with different
     const maps = methodMaps({ passwordAmr: ["pwd", "pw"] });
     expect(mapMethodToStrength({ amr: ["pw"] }, maps)).toBe("password");
     // Defaults for the passkey set are retained.
-    expect(mapMethodToStrength({ amr: ["swk"] }, maps)).toBe("webauthn");
+    expect(mapMethodToStrength({ amr: ["swk"], userVerified: true }, maps)).toBe("webauthn");
   });
 
   it("the default maps are the §4 contract", () => {
@@ -133,8 +165,8 @@ describe("AC#5 · the mapping never returns 'none' (that tier is the verifier's,
     {},
     { amr: [] },
     { amr: ["pwd"] },
-    { amr: ["swk"] },
-    { acr: "phr" },
+    { amr: ["swk"], userVerified: true },
+    { acr: "phr", userVerified: true },
     { acr: "whatever" },
   ])("claims %j → a non-none tier", (claims) => {
     expect(mapMethodToStrength(claims)).not.toBe("none");
