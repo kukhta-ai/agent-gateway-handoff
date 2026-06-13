@@ -68,9 +68,15 @@ it in place. The placed/modified config is captured in the receipt with its chec
   be on GLA's public base, for example
   `GLA_AUTHENTIK_REDIRECT_URI=https://gla.example/team-a/auth/callback`. Caddy routes that callback to GLA,
   not to authentik, so the GLA grant stays on GLA's origin.
+- **Whether authentik proxy/forward-auth is also desired** — this is optional defense-in-depth, not the GLA
+  identity-provider path. If used, route authentik's outpost path (for example `/outpost.goauthentik.io/*`) to
+  the outpost and use Caddy `forward_auth` before proxying to GLA. Still keep `/enroll`, `/auth/callback`,
+  `/handoff/auth/*`, and `/handoff/<id>` on the GLA gateway; never expose the bridge socket, noVNC/websockify,
+  CDP broker, host/container internal forwards, or authentik datastore/worker ports.
 
 In every shape, Caddy transports HTTP and WebSocket bytes; it does not authorize a handoff. The Access Gateway
-remains the authorization membrane for grants, recipients, assurance policy, and mounted routes.
+remains the authorization membrane for grants, recipients, assurance policy, and mounted routes. An authentik
+proxy session or `X-Authentik-*` header is not a GLA grant.
 
 ## How to add it
 

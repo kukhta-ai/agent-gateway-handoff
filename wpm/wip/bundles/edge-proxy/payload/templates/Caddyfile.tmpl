@@ -16,6 +16,10 @@
 #   • subpath mount:   GLA_PUBLIC_BASE_URL=https://gla.example/team-a/
 # The Access Gateway remains the authorization membrane in both cases. Caddy terminates TLS and routes bytes
 # (including WebSocket upgrades); GLA still verifies grants, recipients, auth strength, and mounted route scope.
+# Optional authentik proxy/forward-auth can be added as defense-in-depth before this reverse_proxy, but it is not
+# GLA's AuthProvider wiring and it must not be documented or operated as a grant bypass. A valid authentik outpost
+# session/cookie/header is still not a GLA grant; `/enroll`, `/auth/callback`, `/handoff/auth/*`, and
+# `/handoff/<id>` must continue to land on the GLA gateway.
 #
 # ── The upstream: point at whatever actually reaches GLA's :3000 on THIS topology ──────────────────────────
 #   • Caddy and GLA on the SAME host (or same container)        → reverse_proxy 127.0.0.1:3000
@@ -67,3 +71,22 @@
 # Existing/custom reverse proxies that preserve the prefix instead of stripping it are also supported by GLA
 # when GLA_PUBLIC_BASE_URL contains that same prefix; they should forward /team-a/enroll and /team-a/handoff/*
 # unchanged to the gateway and do not need GLA_TRUST_FORWARDED_PREFIX.
+
+# ── Optional authentik forward-auth wrapper (defense-in-depth only) ──────────────────────────────────────
+# Use this ONLY if the operator already wants authentik proxy/forward-auth as an outer browser-session guard.
+# It does not replace `GLA_AUTH_PROVIDER=authentik` or the `GLA_AUTHENTIK_*` OIDC config needed for delegated
+# GLA handoff step-up. Keep the outpost path public because authentik's outpost uses it; keep GLA's bridge,
+# noVNC/websockify, CDP, and host/container internal forwards private.
+#
+# ⟨gla.example.com⟩ {
+# 	handle /outpost.goauthentik.io/* {
+# 		reverse_proxy ⟨authentik-outpost:9000⟩
+# 	}
+#
+# 	forward_auth ⟨authentik-outpost:9000⟩ {
+# 		uri /outpost.goauthentik.io/auth/caddy
+# 		copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
+# 	}
+#
+# 	reverse_proxy ⟨127.0.0.1:13000⟩
+# }
