@@ -1,9 +1,10 @@
 ---
 id: GLA-089
 title: 'Harden public gateway grant transport, logs, and HTML responses'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-12 22:58'
+updated_date: '2026-06-13 21:37'
 labels:
   - security
   - gateway
@@ -43,28 +44,28 @@ Boundaries: this task does not change grant meaning, recipient binding, or authe
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Grant-bearing enrollment and handoff flows do not leave raw grant values in browser-visible URLs, referrers, authentik-visible requests, edge-proxy access logs, or gateway logs after the recipient bootstrap point has been consumed.
-- [ ] #2 Gateway-served enrollment, handoff, callback, refusal, and unavailable responses include cache and referrer protections appropriate for bearer or recipient-bound security state.
-- [ ] #3 Adversarial recipient, path, and grant-shaped values cannot break out of gateway HTML, script data islands, attributes, URLs, or client-side state containers.
-- [ ] #4 Wrong-recipient, expired, replayed, revoked, and not-yet-authorized attempts produce refusals without exposing raw grants or upstream endpoint details in public responses.
-- [ ] #5 Caddy and WPM edge-proxy templates either avoid logging grant-bearing request components or redact them consistently with daemon and audit redaction.
-- [ ] #6 Canary E2E coverage proves the same raw grant and adversarial display strings are absent from public HTML, response headers, browser referrer targets, gateway logs, edge logs, and audit egress.
+- [x] #1 Grant-bearing enrollment and handoff flows do not leave raw grant values in browser-visible URLs, referrers, authentik-visible requests, edge-proxy access logs, or gateway logs after the recipient bootstrap point has been consumed.
+- [x] #2 Gateway-served enrollment, handoff, callback, refusal, and unavailable responses include cache and referrer protections appropriate for bearer or recipient-bound security state.
+- [x] #3 Adversarial recipient, path, and grant-shaped values cannot break out of gateway HTML, script data islands, attributes, URLs, or client-side state containers.
+- [x] #4 Wrong-recipient, expired, replayed, revoked, and not-yet-authorized attempts produce refusals without exposing raw grants or upstream endpoint details in public responses.
+- [x] #5 Caddy and WPM edge-proxy templates either avoid logging grant-bearing request components or redact them consistently with daemon and audit redaction.
+- [x] #6 Canary E2E coverage proves the same raw grant and adversarial display strings are absent from public HTML, response headers, browser referrer targets, gateway logs, edge logs, and audit egress.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Created from independent security and local inspection findings. Evidence includes packages/gateway/src/index.ts URL/log surfaces; packages/gateway/src/handoff-page.ts and packages/gateway/src/enroll-page.ts script data islands/sessionStorage behavior; packages/kernel/src/assembly.ts and packages/bridge/src/index.ts recipient validation; wpm/wip/bundles/edge-proxy/payload/templates/Caddyfile.tmpl access logging.
+Implemented gateway-local HttpOnly bootstrap tickets and one-use stream tickets so browser flows keep raw grants out of HTML/sessionStorage/POST bodies/WS URLs after the initial recipient bootstrap. Added safe JSON/text HTML serialization, no-store/no-referrer/nosniff response coverage, Caddy default no-access-log posture, docs for bearer-bearing public surfaces, and AC6 same-canary E2E coverage across public HTML/headers, URL scrub, provider referrer, default gateway/edge logs, and audit egress. Rule-3 evidence: worker ran bmad-create-story + bmad-dev-story planning; reviewer ran story-automator-review and approved after AC6 fix; TEA ran testarch security review and PASS. Verification: focused gateway/app suites passed; real noVNC E2E passed; pnpm run gate passed (63 files, 669 passed, 15 skipped).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Typecheck passes with no errors.
-- [ ] #2 Linter passes clean.
-- [ ] #3 Tests are added for the change and the full suite is green.
-- [ ] #4 Public functions and exported types are documented.
-- [ ] #5 No dead code or unused exports are introduced.
-- [ ] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
-- [ ] #7 Security review covers URL transport, referrer behavior, cache behavior, edge logging, gateway rendering, and HTML/script serialization.
-- [ ] #8 Docs describe which recipient-facing values may be bearer-bearing, where they are scrubbed, and which logs or public surfaces must never contain them.
+- [x] #1 Typecheck passes with no errors.
+- [x] #2 Linter passes clean.
+- [x] #3 Tests are added for the change and the full suite is green.
+- [x] #4 Public functions and exported types are documented.
+- [x] #5 No dead code or unused exports are introduced.
+- [x] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
+- [x] #7 Security review covers URL transport, referrer behavior, cache behavior, edge logging, gateway rendering, and HTML/script serialization.
+- [x] #8 Docs describe which recipient-facing values may be bearer-bearing, where they are scrubbed, and which logs or public surfaces must never contain them.
 <!-- DOD:END -->

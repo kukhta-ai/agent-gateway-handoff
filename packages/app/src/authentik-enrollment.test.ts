@@ -116,16 +116,23 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
   assertion();
 }
 
+function cookiePair(setCookie: string, name: string): string {
+  return setCookie.match(new RegExp(`${name}=[^;,]+`))?.[0] ?? "";
+}
+
 function executeEnrollmentCallback(
   html: string,
   args: {
     origin: string;
-    grant: string;
     search: string;
+    cookie?: string;
   },
-): { fetchCalls: Array<{ input: string; init: RequestInit }>; status: { textContent: string } } {
+): {
+  fetchCalls: Array<{ input: string; init: RequestInit; response: Response }>;
+  status: { textContent: string };
+} {
   const status = { textContent: "", className: "" };
-  const fetchCalls: Array<{ input: string; init: RequestInit }> = [];
+  const fetchCalls: Array<{ input: string; init: RequestInit; response: Response }> = [];
   const origin = new URL(args.origin);
   const context = {
     URLSearchParams,
@@ -146,8 +153,14 @@ function executeEnrollmentCallback(
       },
     },
     fetch: vi.fn(async (input: string, init: RequestInit) => {
-      fetchCalls.push({ input, init });
-      return fetch(new URL(input, args.origin).toString(), init);
+      const headers = new Headers(init.headers);
+      if (args.cookie !== undefined) {
+        headers.set("cookie", args.cookie);
+      }
+      const nextInit = { ...init, headers };
+      const response = await fetch(new URL(input, args.origin).toString(), nextInit);
+      fetchCalls.push({ input, init: nextInit, response });
+      return response;
     }),
     history: { replaceState: vi.fn() },
     location: {
@@ -157,7 +170,7 @@ function executeEnrollmentCallback(
       search: args.search,
     },
     sessionStorage: {
-      getItem: vi.fn((key: string) => (key === "gla.enroll" ? args.grant : null)),
+      getItem: vi.fn((key: string) => (key === "gla.enroll" ? "pending" : null)),
       removeItem: vi.fn(),
     },
   };
@@ -408,10 +421,14 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     const { origin, stack, fake, deliveredLinks } = await authentikStack();
     await stack.enrollInvite(recipient);
     const grant = lastDeliveredGrant(deliveredLinks);
+    const page = await fetch(`${origin}/enroll?grant=${encodeURIComponent(grant)}`);
+    expect(page.status).toBe(200);
+    const bootstrapCookie = cookiePair(page.headers.get("set-cookie") ?? "", "gla_enroll_boot");
+    expect(bootstrapCookie).toMatch(/^gla_enroll_boot=/);
     const optRes = await fetch(`${origin}/enroll/options`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant }),
+      headers: { "content-type": "application/json", cookie: bootstrapCookie },
+      body: JSON.stringify({}),
     });
     expect(optRes.status).toBe(200);
     const challenge = (await optRes.json()) as { kind?: string; authorizeUrl?: string };
@@ -433,7 +450,7 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     expect(callback.status).toBe(200);
     const { fetchCalls, status } = executeEnrollmentCallback(await callback.text(), {
       origin,
-      grant,
+      cookie: bootstrapCookie,
       search: `?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
     });
 
@@ -441,7 +458,6 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     expect(status.textContent).toMatch(/Enrolled/);
     expect(fetchCalls[0]?.input).toBe("/enroll/verify");
     expect(JSON.parse(String(fetchCalls[0]?.init.body))).toEqual({
-      grant,
       attestation: { code, state },
     });
     expect(stack.identity.getCredential(recipient)?.credentialId).toBe("sub-callback-enrolled");
@@ -468,7 +484,6 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     expect(callback.status).toBe(200);
     const { status } = executeEnrollmentCallback(await callback.text(), {
       origin,
-      grant,
       search: "?code=bad-code&state=missing-state",
     });
 

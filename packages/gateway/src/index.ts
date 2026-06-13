@@ -6,9 +6,10 @@
 //
 // Routes (Phase E):
 //   GET  /enroll?grant=<token>  → verify the grant (sig, recipient caveat, TTL, single-use NOT-spent, class +
-//                                 purpose) → serve the enrollment web page (HTML+JS running navigator.credentials.create)
-//   POST /enroll/options        → re-verify the grant → registration options from Identity+Auth. Redirect-shaped
-//                                 delegated ceremonies consume the GLA grant before the browser leaves this origin.
+//                                 purpose) → serve the enrollment web page and issue an HttpOnly bootstrap ticket.
+//   POST /enroll/options        → resolve the bootstrap ticket or legacy body grant → registration options from
+//                                 Identity+Auth. Redirect-shaped delegated ceremonies consume the GLA grant before
+//                                 the browser leaves this origin.
 //   POST /enroll/verify         → verify the attestation + ATOMICALLY store the credential bound to the recipient;
 //                                 in-page ceremonies consume here, delegated callbacks must match a pending consumed
 //                                 grant from /enroll/options.
@@ -21,8 +22,15 @@
 // AC#5; the import-boundary lint proves it). The seams below are structural interfaces the capability/identity
 // services satisfy.
 
+import { randomBytes } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
+import {
+  type IncomingMessage,
+  type OutgoingHttpHeaders,
+  type Server,
+  type ServerResponse,
+  createServer,
+} from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { extname, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import {
@@ -50,6 +58,17 @@ import {
   publicPath,
   publicUrl,
 } from "./public-base.js";
+
+const STREAM_TICKET_COOKIE = "gla_handoff";
+const HANDOFF_BOOTSTRAP_COOKIE = "gla_handoff_boot";
+const ENROLL_BOOTSTRAP_COOKIE = "gla_enroll_boot";
+const STREAM_TICKET_TTL_MS = 5 * 60 * 1000;
+const GRANT_BOOTSTRAP_TTL_MS = 15 * 60 * 1000;
+const NO_STORE_SECURITY_HEADERS = {
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+} as const;
 
 export {
   PublicBaseUrlError,
@@ -405,6 +424,16 @@ export class AccessGateway {
   private readonly proxyIdleTimeoutMs: number;
   /** Provider browser-client assets served from local read-only roots, grouped by provider ref. */
   private readonly entrypointClientAssets = new Map<string, EntrypointClientAssetMount[]>();
+  /** Short-lived same-origin stream tickets that let browser WebSockets avoid grant-bearing URLs. */
+  private readonly streamTickets = new Map<
+    string,
+    { grant: OpaqueToken; grantId: CapabilityId; routePath: string; expiresAt: number }
+  >();
+  /** Server-side bootstrap tickets: public pages hold only opaque cookie ids, never raw grant values. */
+  private readonly grantBootstrapTickets = new Map<
+    string,
+    { grant: OpaqueToken; purpose: "enroll" | "handoff"; routePath?: string; expiresAt: number }
+  >();
   /**
    * Delegated enrollment redirects consume the GLA grant before leaving this origin. The callback may finish only
    * once for a nonce recorded here; abandonment leaves the grant spent and the pending attempt harmlessly unusable.
@@ -558,6 +587,7 @@ export class AccessGateway {
       this.liveSockets.delete(grantId);
     }
     this.authorizedGrants.delete(grantId);
+    this.deleteStreamTicketsForGrant(grantId);
   }
 
   /** The single request router. Every enrollment + handoff route verifies the grant FIRST — no bypass. */
@@ -638,9 +668,10 @@ export class AccessGateway {
   }
 
   /**
-   * `GET /enroll?grant=<token>` — verify the grant, then serve the enrollment page. The recipient is read from the
-   * VERIFIED grant (never a query param), so a forwarded link is bound to its recipient. An absent grant → 400; an
-   * invalid/expired/wrong-recipient/reused grant → 403, the refusal page.
+   * `GET /enroll?grant=<token>` — verify the grant, set an HttpOnly bootstrap ticket, then serve the enrollment
+   * page without embedding the raw grant. The recipient is read from the VERIFIED grant (never a query param), so a
+   * forwarded link is bound to its recipient. An absent grant → 400; an invalid/expired/wrong-recipient/reused grant
+   * → 403, the refusal page.
    */
   private handleEnrollPage(url: URL, res: ServerResponse): void {
     const grants = this.grants;
@@ -662,10 +693,17 @@ export class AccessGateway {
     this.sendHtml(
       res,
       200,
-      enrollPageHtml(grant, String(verified.recipient), {
+      enrollPageHtml(String(verified.recipient), {
         options: this.publicPath("/enroll/options"),
         verify: this.publicPath("/enroll/verify"),
       }),
+      {
+        "set-cookie": this.createGrantBootstrapCookie(
+          ENROLL_BOOTSTRAP_COOKIE,
+          "enroll",
+          grant as OpaqueToken,
+        ),
+      },
     );
   }
 
@@ -682,12 +720,12 @@ export class AccessGateway {
       return;
     }
     const body = await this.readJson(req);
-    const grant = body.grant;
-    if (typeof grant !== "string" || grant.length === 0) {
+    const grant = this.enrollmentGrantFromRequest(body, req);
+    if (grant === undefined) {
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant"));
       return;
     }
-    const verified = grants.verifyEnrollmentGrantToken(grant as OpaqueToken);
+    const verified = grants.verifyEnrollmentGrantToken(grant);
     if (!verified.ok) {
       this.sendJson(
         res,
@@ -696,9 +734,9 @@ export class AccessGateway {
       );
       return;
     }
-    const options = await identity.enrollmentOptions(verified.recipient, grant as OpaqueToken);
+    const options = await identity.enrollmentOptions(verified.recipient, grant);
     if (isDelegatedEnrollmentOptions(options)) {
-      const consumed = grants.tryConsumeEnrollmentGrantToken(grant as OpaqueToken);
+      const consumed = grants.tryConsumeEnrollmentGrantToken(grant);
       if (!consumed.ok) {
         this.sendJson(
           res,
@@ -729,8 +767,8 @@ export class AccessGateway {
       return;
     }
     const body = await this.readJson(req);
-    const grant = body.grant;
-    if (typeof grant !== "string" || grant.length === 0) {
+    const grant = this.enrollmentGrantFromRequest(body, req);
+    if (grant === undefined) {
       // NO BYPASS: a verify with no grant is refused before any credential work.
       this.sendJson(res, 401, this.errBody("auth.insufficient", "missing enrollment grant"));
       return;
@@ -738,7 +776,7 @@ export class AccessGateway {
     // Validate the request BEFORE consuming the grant, so a malformed body (no attestation) never burns it.
     if (body.attestation === undefined) {
       // The grant must still verify (no-bypass) — read-only check, no consume.
-      const check = grants.verifyEnrollmentGrantToken(grant as OpaqueToken);
+      const check = grants.verifyEnrollmentGrantToken(grant);
       if (!check.ok) {
         this.sendJson(
           res,
@@ -751,7 +789,7 @@ export class AccessGateway {
       return;
     }
     if (isDelegatedRedirectAttestation(body.attestation)) {
-      const verified = grants.verifyConsumedEnrollmentGrantToken(grant as OpaqueToken);
+      const verified = grants.verifyConsumedEnrollmentGrantToken(grant);
       if (!verified.ok) {
         this.sendJson(
           res,
@@ -766,10 +804,16 @@ export class AccessGateway {
       }
       try {
         const record = await identity.enrollComplete(verified.recipient, body.attestation);
-        this.sendJson(res, 200, {
-          enrolled: true,
-          auth_strength: this.readEnrolledStrength(record),
-        });
+        this.deleteGrantBootstrapTicketFromRequest(req, ENROLL_BOOTSTRAP_COOKIE);
+        this.sendJson(
+          res,
+          200,
+          {
+            enrolled: true,
+            auth_strength: this.readEnrolledStrength(record),
+          },
+          { "set-cookie": this.clearCookie(ENROLL_BOOTSTRAP_COOKIE) },
+        );
       } catch (e) {
         const code = isCoded(e) ? e.code : "auth.insufficient";
         this.sendJson(res, 403, this.errBody(code, "enrollment attestation did not verify"));
@@ -778,7 +822,7 @@ export class AccessGateway {
     }
     // ATOMIC verify-and-consume: marks the single-use nonce spent in the same synchronous step as the verify, so
     // a concurrent second verify of the same grant observes it already spent and is refused.
-    const verified = grants.tryConsumeEnrollmentGrantToken(grant as OpaqueToken);
+    const verified = grants.tryConsumeEnrollmentGrantToken(grant);
     if (!verified.ok) {
       this.sendJson(
         res,
@@ -805,7 +849,13 @@ export class AccessGateway {
     // never be reused (GLA-013 AC#2). ECHO the strength the identity service actually recorded (provider-agnostic —
     // `"webauthn"` for a passkey enrollment, `"password"` for a password-grade delegated one), matching the handoff
     // verify response's `auth_strength: factResult.authStrength` echo (no hardcoded strength, no provider special-case).
-    this.sendJson(res, 200, { enrolled: true, auth_strength: this.readEnrolledStrength(record) });
+    this.deleteGrantBootstrapTicketFromRequest(req, ENROLL_BOOTSTRAP_COOKIE);
+    this.sendJson(
+      res,
+      200,
+      { enrolled: true, auth_strength: this.readEnrolledStrength(record) },
+      { "set-cookie": this.clearCookie(ENROLL_BOOTSTRAP_COOKIE) },
+    );
   }
 
   // ── Handoff at the edge (Slice 4b, scenario-01 Phases 6/12) ───────────────────────────────────────────
@@ -861,6 +911,11 @@ export class AccessGateway {
     //    verified above (not bypassable). An expired/absent validity falls through to the full step-up page (Phase 6).
     if (this.recipientAuthValid(verified.recipient)) {
       this.authorizedGrants.add(verified.capability.id as CapabilityId);
+      const streamCookie = this.createStreamTicketCookie(
+        grant as OpaqueToken,
+        verified.capability.id as CapabilityId,
+        route,
+      );
       this.sendHtml(
         res,
         200,
@@ -872,6 +927,7 @@ export class AccessGateway {
           route.client,
           this.publicPath("/handoff/client-assets"),
         ),
+        { "set-cookie": streamCookie },
       );
       return;
     }
@@ -886,6 +942,14 @@ export class AccessGateway {
         clientAssets: this.publicPath("/handoff/client-assets"),
         entrypointClient: route.client,
       }),
+      {
+        "set-cookie": this.createGrantBootstrapCookie(
+          HANDOFF_BOOTSTRAP_COOKIE,
+          "handoff",
+          grant as OpaqueToken,
+          route.path,
+        ),
+      },
     );
   }
 
@@ -902,24 +966,26 @@ export class AccessGateway {
       return;
     }
     const body = await this.readJson(req);
-    const grant = body.grant;
     const route = this.routeForBody(body);
-    if (typeof grant !== "string" || grant.length === 0) {
-      this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
-      return;
-    }
     if (route === undefined) {
+      const grant = this.handoffGrantFromBody(body, req);
       const retiredRoute = this.retiredRouteForBody(body);
       if (
+        grant !== undefined &&
         retiredRoute !== undefined &&
-        this.sendStaleHandoffJson(res, grant as OpaqueToken, retiredRoute)
+        this.sendStaleHandoffJson(res, grant, retiredRoute)
       ) {
         return;
       }
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
       return;
     }
-    const verified = this.verifyHandoffGrant(grant as OpaqueToken, route);
+    const grant = this.handoffGrantFromBody(body, req, route.path);
+    if (grant === undefined) {
+      this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
+      return;
+    }
+    const verified = this.verifyHandoffGrant(grant, route);
     if (!verified.ok) {
       this.sendJson(
         res,
@@ -943,10 +1009,10 @@ export class AccessGateway {
   }
 
   /**
-   * `POST /handoff/auth/verify` — re-verify the grant (no bypass), then verify the recipient's WebAuthn assertion
-   * against the enrolled credential. On a verified assertion that reaches the required `auth_strength`, MARK the
-   * grant authorized (so the next WS upgrade for it is proxied). A failed assertion → refused, NOT authorized. An
-   * un-enrolled recipient → a catchable refusal (GLA-035 AC#4). Auth is DELEGATED to the provider (GLA-035 AC#5).
+   * `POST /handoff/auth/verify` — resolve the bootstrap ticket or legacy body grant (no bypass), then verify the
+   * recipient's opaque assertion against the selected auth provider. On a verified assertion that reaches the
+   * required assurance, MARK the grant authorized and issue a short-lived HttpOnly stream ticket for the next WS
+   * upgrade. A failed assertion → refused, NOT authorized. An un-enrolled recipient → a catchable refusal.
    */
   private async handleHandoffAuthVerify(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const sessionGrants = this.sessionGrants;
@@ -956,24 +1022,26 @@ export class AccessGateway {
       return;
     }
     const body = await this.readJson(req);
-    const grant = body.grant;
     const route = this.routeForBody(body);
-    if (typeof grant !== "string" || grant.length === 0) {
-      this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
-      return;
-    }
     if (route === undefined) {
+      const grant = this.handoffGrantFromBody(body, req);
       const retiredRoute = this.retiredRouteForBody(body);
       if (
+        grant !== undefined &&
         retiredRoute !== undefined &&
-        this.sendStaleHandoffJson(res, grant as OpaqueToken, retiredRoute)
+        this.sendStaleHandoffJson(res, grant, retiredRoute)
       ) {
         return;
       }
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
       return;
     }
-    const verified = this.verifyHandoffGrant(grant as OpaqueToken, route);
+    const grant = this.handoffGrantFromBody(body, req, route.path);
+    if (grant === undefined) {
+      this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
+      return;
+    }
+    const verified = this.verifyHandoffGrant(grant, route);
     if (!verified.ok) {
       this.sendJson(
         res,
@@ -1016,15 +1084,26 @@ export class AccessGateway {
     // keyed by the recipient from the SIGNED grant, TTL-bounded. A second window's grant for THIS recipient, while
     // unexpired + sufficient, skips the ceremony. Disabled when the reuse TTL is 0.
     this.recordRecipientAuth(verified.recipient, assurance);
-    this.sendJson(res, 200, { authorized: true, auth_strength: factResult.authStrength });
+    this.deleteGrantBootstrapTicketFromRequest(req, HANDOFF_BOOTSTRAP_COOKIE);
+    this.sendJson(
+      res,
+      200,
+      { authorized: true, auth_strength: factResult.authStrength },
+      {
+        "set-cookie": [
+          this.clearCookie(HANDOFF_BOOTSTRAP_COOKIE),
+          this.createStreamTicketCookie(grant, verified.capability.id as CapabilityId, route),
+        ],
+      },
+    );
   }
 
   /**
    * Handle a WebSocket upgrade on a handoff route (the human reaching the capsule surface — GLA-038/039). VERIFY the
    * recipient-bound grant statelessly AND require that the bound recipient already authenticated to the required
-   * strength (the grant is in the authorized set). Only an AUTHORIZED, in-window upgrade is proxied to the mounted
-   * transport binding — and NOTHING else (GLA-038 AC#1). An unverified/expired/revoked grant, an unknown route, or an
-   * un-authorized grant is refused (the connection resolves onward to nothing — GLA-035 AC#2/#3, GLA-039 AC#2).
+   * strength (the grant is in the authorized set). Browser upgrades normally present a one-use HttpOnly stream
+   * ticket instead of a raw grant in the URL; legacy query grants are still accepted for compatibility. Only an
+   * AUTHORIZED, in-window upgrade is proxied to the mounted transport binding — and NOTHING else (GLA-038 AC#1).
    */
   private handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void {
     try {
@@ -1035,8 +1114,8 @@ export class AccessGateway {
       const sessionGrants = this.sessionGrants;
       if (route === undefined || sessionGrants === undefined) {
         if (retiredRoute !== undefined && sessionGrants !== undefined) {
-          const grant = url.searchParams.get("grant");
-          if (grant === null || grant.length === 0) {
+          const grant = this.handoffGrantFromRequest(url, req, retiredRoute.path);
+          if (grant === undefined) {
             this.refuseUpgrade(socket, 404);
             return;
           }
@@ -1052,8 +1131,8 @@ export class AccessGateway {
         this.refuseUpgrade(socket, 404);
         return;
       }
-      const grant = url.searchParams.get("grant");
-      if (grant === null || grant.length === 0) {
+      const grant = this.handoffGrantFromRequest(url, req, route.path);
+      if (grant === undefined) {
         this.refuseUpgrade(socket, 400);
         return;
       }
@@ -1113,22 +1192,33 @@ export class AccessGateway {
     return { error: { code, message } };
   }
 
-  private sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+  private sendJson(
+    res: ServerResponse,
+    status: number,
+    body: Record<string, unknown>,
+    headers: OutgoingHttpHeaders = {},
+  ): void {
     const payload = JSON.stringify(body);
     res.writeHead(status, {
       "content-type": "application/json; charset=utf-8",
       "content-length": Buffer.byteLength(payload),
+      ...NO_STORE_SECURITY_HEADERS,
+      ...headers,
     });
     res.end(payload);
   }
 
-  private sendHtml(res: ServerResponse, status: number, html: string): void {
+  private sendHtml(
+    res: ServerResponse,
+    status: number,
+    html: string,
+    headers: OutgoingHttpHeaders = {},
+  ): void {
     res.writeHead(status, {
       "content-type": "text/html; charset=utf-8",
       "content-length": Buffer.byteLength(html),
-      "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
-      "x-content-type-options": "nosniff",
+      ...NO_STORE_SECURITY_HEADERS,
+      ...headers,
     });
     res.end(html);
   }
@@ -1157,6 +1247,7 @@ export class AccessGateway {
         "content-type": contentTypeForPath(file),
         "content-length": body.byteLength,
         "cache-control": asset.cacheControl ?? "no-cache",
+        "referrer-policy": "no-referrer",
         "x-content-type-options": "nosniff",
       });
       res.end(body);
@@ -1375,7 +1466,9 @@ export class AccessGateway {
               ? "Forbidden"
               : "Error";
     try {
-      socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`);
+      socket.write(
+        `HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\n\r\n`,
+      );
     } catch {
       // The socket may already be gone; nothing to do.
     }
@@ -1503,6 +1596,9 @@ export class AccessGateway {
         continue;
       }
       const value = Array.isArray(v) ? v.join(", ") : (v ?? "");
+      if (value.length === 0) {
+        continue;
+      }
       out.push(`${k}: ${value}`);
     }
     return out.join("\r\n");
@@ -1541,6 +1637,173 @@ export class AccessGateway {
    */
   liveSocketCount(grantId: CapabilityId): number {
     return this.liveSockets.get(grantId)?.size ?? 0;
+  }
+
+  private handoffGrantFromRequest(
+    url: URL,
+    req: IncomingMessage,
+    routePath: string,
+  ): OpaqueToken | undefined {
+    const queryGrant = url.searchParams.get("grant");
+    if (queryGrant !== null && queryGrant.length > 0) {
+      return queryGrant as OpaqueToken;
+    }
+    return this.takeStreamTicket(req, routePath);
+  }
+
+  private enrollmentGrantFromRequest(
+    body: EnrollBody,
+    req: IncomingMessage,
+  ): OpaqueToken | undefined {
+    if (typeof body.grant === "string" && body.grant.length > 0) {
+      return body.grant as OpaqueToken;
+    }
+    return this.grantBootstrapFromRequest(req, ENROLL_BOOTSTRAP_COOKIE, "enroll");
+  }
+
+  private handoffGrantFromBody(
+    body: EnrollBody,
+    req: IncomingMessage,
+    routePath?: string,
+  ): OpaqueToken | undefined {
+    if (typeof body.grant === "string" && body.grant.length > 0) {
+      return body.grant as OpaqueToken;
+    }
+    return this.grantBootstrapFromRequest(req, HANDOFF_BOOTSTRAP_COOKIE, "handoff", routePath);
+  }
+
+  private createGrantBootstrapCookie(
+    cookieName: string,
+    purpose: "enroll" | "handoff",
+    grant: OpaqueToken,
+    routePath?: string,
+  ): string {
+    this.pruneExpiredGrantBootstrapTickets();
+    const ticket = randomBytes(24).toString("base64url");
+    this.grantBootstrapTickets.set(ticket, {
+      grant,
+      purpose,
+      ...(routePath !== undefined ? { routePath } : {}),
+      expiresAt: Date.now() + GRANT_BOOTSTRAP_TTL_MS,
+    });
+    return this.cookieHeader(
+      cookieName,
+      ticket,
+      this.gatewayStateCookiePath(),
+      GRANT_BOOTSTRAP_TTL_MS,
+    );
+  }
+
+  private grantBootstrapFromRequest(
+    req: IncomingMessage,
+    cookieName: string,
+    purpose: "enroll" | "handoff",
+    routePath?: string,
+  ): OpaqueToken | undefined {
+    const ticket = parseCookieHeader(firstHeader(req.headers.cookie))[cookieName];
+    if (ticket === undefined) {
+      return undefined;
+    }
+    const record = this.grantBootstrapTickets.get(ticket);
+    if (
+      record === undefined ||
+      record.purpose !== purpose ||
+      Date.now() >= record.expiresAt ||
+      (routePath !== undefined && record.routePath !== routePath)
+    ) {
+      this.grantBootstrapTickets.delete(ticket);
+      return undefined;
+    }
+    return record.grant;
+  }
+
+  private deleteGrantBootstrapTicketFromRequest(req: IncomingMessage, cookieName: string): void {
+    const ticket = parseCookieHeader(firstHeader(req.headers.cookie))[cookieName];
+    if (ticket !== undefined) {
+      this.grantBootstrapTickets.delete(ticket);
+    }
+  }
+
+  private createStreamTicketCookie(
+    grant: OpaqueToken,
+    grantId: CapabilityId,
+    route: ProgrammedRoute,
+  ): string {
+    this.pruneExpiredStreamTickets();
+    const ticket = randomBytes(24).toString("base64url");
+    this.streamTickets.set(ticket, {
+      grant,
+      grantId,
+      routePath: route.path,
+      expiresAt: Date.now() + STREAM_TICKET_TTL_MS,
+    });
+    return this.cookieHeader(
+      STREAM_TICKET_COOKIE,
+      ticket,
+      this.publicPath(route.path),
+      STREAM_TICKET_TTL_MS,
+    );
+  }
+
+  private takeStreamTicket(req: IncomingMessage, routePath: string): OpaqueToken | undefined {
+    const ticket = parseCookieHeader(firstHeader(req.headers.cookie))[STREAM_TICKET_COOKIE];
+    if (ticket === undefined) {
+      return undefined;
+    }
+    const record = this.streamTickets.get(ticket);
+    this.streamTickets.delete(ticket);
+    if (record === undefined || record.routePath !== routePath || Date.now() >= record.expiresAt) {
+      return undefined;
+    }
+    return record.grant;
+  }
+
+  private deleteStreamTicketsForGrant(grantId: CapabilityId): void {
+    for (const [ticket, record] of [...this.streamTickets.entries()]) {
+      if (record.grantId === grantId) {
+        this.streamTickets.delete(ticket);
+      }
+    }
+  }
+
+  private pruneExpiredStreamTickets(): void {
+    const now = Date.now();
+    for (const [ticket, record] of [...this.streamTickets.entries()]) {
+      if (now >= record.expiresAt) {
+        this.streamTickets.delete(ticket);
+      }
+    }
+  }
+
+  private pruneExpiredGrantBootstrapTickets(): void {
+    const now = Date.now();
+    for (const [ticket, record] of [...this.grantBootstrapTickets.entries()]) {
+      if (now >= record.expiresAt) {
+        this.grantBootstrapTickets.delete(ticket);
+      }
+    }
+  }
+
+  private clearCookie(cookieName: string): string {
+    return this.cookieHeader(cookieName, "", this.gatewayStateCookiePath(), 0);
+  }
+
+  private cookieHeader(cookieName: string, value: string, path: string, ttlMs: number): string {
+    const attrs = [
+      `${cookieName}=${value}`,
+      "HttpOnly",
+      "SameSite=Strict",
+      `Path=${path}`,
+      `Max-Age=${Math.ceil(ttlMs / 1000)}`,
+    ];
+    if (this.publicBase.href.startsWith("https://")) {
+      attrs.push("Secure");
+    }
+    return attrs.join("; ");
+  }
+
+  private gatewayStateCookiePath(): string {
+    return this.publicBase.pathPrefix.length > 0 ? this.publicBase.pathPrefix : "/";
   }
 }
 
@@ -1705,4 +1968,16 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
     return value[0];
   }
   return value;
+}
+
+function parseCookieHeader(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of header?.split(";") ?? []) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (rawName === undefined || rawName.length === 0 || rawValue.length === 0) {
+      continue;
+    }
+    out[rawName] = rawValue.join("=");
+  }
+  return out;
 }
