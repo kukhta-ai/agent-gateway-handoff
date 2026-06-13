@@ -35,6 +35,8 @@ export interface MintIdTokenClaims {
   amr?: string[];
   /** The `acr` context value (the coarse fallback). */
   acr?: string;
+  /** GLA deployment-owned user-verification proof claim (`gla_uv`) for passkey/WebAuthn-labelled methods. */
+  userVerified?: boolean;
   /** Override the issuer (`iss`). Default the fake's configured issuer. */
   iss?: string;
   /** Override the audience (`aud`) — a single value OR an ARRAY (a multi-audience token). Default the client id. */
@@ -154,6 +156,9 @@ export class FakeAuthentik {
     }
     if (claims.azp !== undefined) {
       payload.azp = claims.azp;
+    }
+    if (claims.userVerified !== undefined) {
+      payload.gla_uv = claims.userVerified;
     }
     return new SignJWT(payload)
       .setProtectedHeader({ alg: ALG, kid: "fake-key-1" })

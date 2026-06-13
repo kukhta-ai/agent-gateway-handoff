@@ -146,13 +146,18 @@ describe("AC#2 · challenge() builds an OIDC authorization request", () => {
 });
 
 describe("AC#2 · verifyAssertion happy path → {ok:true, authStrength} with the right strength", () => {
-  it("passkey amr (swk) → ok:true, authStrength webauthn; fact shape is {ok, authStrength} (same kind as auth-webauthn)", async () => {
+  it("passkey amr (swk) plus explicit UV proof → ok:true, authStrength webauthn", async () => {
     const { fake, provider, subjects } = await setup({
       randomness: fixedRandomness([{ state: "st-1", nonce: "no-1" }]),
     });
     subjects.set(userId, { sub: "sub-abc" });
     await provider.challenge(userId);
-    await fake.stageValidLogin("code-xyz", { sub: "sub-abc", nonce: "no-1", amr: ["swk"] });
+    await fake.stageValidLogin("code-xyz", {
+      sub: "sub-abc",
+      nonce: "no-1",
+      amr: ["swk"],
+      userVerified: true,
+    });
     const r = await provider.verifyAssertion(userId, { code: "code-xyz", state: "st-1" });
     expect(r).toEqual({
       ok: true,
@@ -161,7 +166,10 @@ describe("AC#2 · verifyAssertion happy path → {ok:true, authStrength} with th
         authStrength: "webauthn",
         level: "phishing-resistant",
         methodResolvable: true,
-        providerEvidence: { amr: ["swk"] },
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+        providerEvidence: { amr: ["swk"], userVerified: true },
       },
     });
     // The token endpoint received the confidential-client auth + PKCE verifier + the auth-code grant.
@@ -191,7 +199,33 @@ describe("AC#2 · verifyAssertion happy path → {ok:true, authStrength} with th
         authStrength: "password",
         level: "password",
         methodResolvable: true,
+        recipientBound: true,
+        replayResistant: true,
+        diagnostics: ["password-grade-proof"],
         providerEvidence: { amr: ["pwd"] },
+      },
+    });
+  });
+
+  it("passkey amr (swk) without UV proof degrades to password-grade assurance with diagnostics", async () => {
+    const { fake, provider, subjects } = await setup({
+      randomness: fixedRandomness([{ state: "st-1", nonce: "no-1" }]),
+    });
+    subjects.set(userId, { sub: "sub-abc" });
+    await provider.challenge(userId);
+    await fake.stageValidLogin("code-no-uv", { sub: "sub-abc", nonce: "no-1", amr: ["swk"] });
+    const r = await provider.verifyAssertion(userId, { code: "code-no-uv", state: "st-1" });
+    expect(r).toEqual({
+      ok: true,
+      authStrength: "password",
+      assurance: {
+        authStrength: "password",
+        level: "password",
+        methodResolvable: true,
+        recipientBound: true,
+        replayResistant: true,
+        diagnostics: ["missing-user-verification"],
+        providerEvidence: { amr: ["swk"] },
       },
     });
   });
@@ -424,6 +458,7 @@ describe("AC#4 · finishEnrollment binds the authentik subject; step-up then enf
       sub: "sub-enrolled",
       nonce: "enon-1",
       amr: ["swk"],
+      userVerified: true,
     });
     const rec = await provider.finishEnrollment(userId, { code: "enroll-code", state: "en-1" });
     expect(rec).toEqual({
@@ -433,7 +468,10 @@ describe("AC#4 · finishEnrollment binds the authentik subject; step-up then enf
         authStrength: "webauthn",
         level: "phishing-resistant",
         methodResolvable: true,
-        providerEvidence: { amr: ["swk"] },
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+        providerEvidence: { amr: ["swk"], userVerified: true },
       },
     });
     // The durable binding now exists (the delegated analogue of a stored credential).
@@ -465,12 +503,23 @@ describe("AC#4 · finishEnrollment binds the authentik subject; step-up then enf
     await provider.finishEnrollment(userId, { code: "enroll-code", state: "en-1" });
     // Later step-up with the SAME sub succeeds.
     await provider.challenge(userId);
-    await fake.stageValidLogin("auth-code", { sub: "sub-stable", nonce: "anon-1", amr: ["swk"] });
+    await fake.stageValidLogin("auth-code", {
+      sub: "sub-stable",
+      nonce: "anon-1",
+      amr: ["swk"],
+      userVerified: true,
+    });
     const r = await provider.verifyAssertion(userId, { code: "auth-code", state: "au-1" });
     expect(r).toMatchObject({
       ok: true,
       authStrength: "webauthn",
-      assurance: { level: "phishing-resistant", methodResolvable: true },
+      assurance: {
+        level: "phishing-resistant",
+        methodResolvable: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
     });
     // The binding is the same stable sub throughout (doc §9 risk 3 — subject stability).
     expect(subjects.get(userId)?.sub).toBe("sub-stable");
@@ -596,7 +645,12 @@ describe("AC#3 · onVerifyOutcome surfaces the discriminated outcome for observa
     });
     subjects.set(userId, { sub: "sub-abc" });
     await provider.challenge(userId);
-    await fake.stageValidLogin("c", { sub: "sub-abc", nonce: "no-1", amr: ["swk", "pwd"] });
+    await fake.stageValidLogin("c", {
+      sub: "sub-abc",
+      nonce: "no-1",
+      amr: ["swk", "pwd"],
+      userVerified: true,
+    });
     await provider.verifyAssertion(userId, { code: "c", state: "st-1" });
     expect(outcomes.at(-1)).toMatchObject({ ok: true, authStrength: "webauthn", sub: "sub-abc" });
   });
@@ -658,6 +712,7 @@ describe("FIX 1 · multi-audience id_token requires a matching `azp` (else azp_m
       sub: "sub-abc",
       nonce: "no-1",
       amr: ["swk"],
+      userVerified: true,
       aud: ["gla-client", "other-client"],
       azp: "gla-client",
     });
@@ -665,7 +720,13 @@ describe("FIX 1 · multi-audience id_token requires a matching `azp` (else azp_m
     expect(r).toMatchObject({
       ok: true,
       authStrength: "webauthn",
-      assurance: { level: "phishing-resistant", methodResolvable: true },
+      assurance: {
+        level: "phishing-resistant",
+        methodResolvable: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
     });
   });
 

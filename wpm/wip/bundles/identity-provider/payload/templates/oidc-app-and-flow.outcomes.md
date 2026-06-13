@@ -20,24 +20,28 @@ an `identity-provider-5`/`-6` acceptance criterion.
       **JWKS** (`/application/o/<app-slug>/jwks/`) endpoints — the exact endpoints the adapter discovers/dials
       (`adapters/auth-authentik/src/oidc.ts` `resolveEndpoints`/`buildAuthorizeUrl`).
 
-## 2 · The authentication flow: passkey AND password, emitting a distinguishing `amr` (§3.2 — the critical one)
+## 2 · The authentication flow: passkey AND password, emitting `amr` plus `gla_uv` (§3.2 — the critical one)
 
 - [ ] The provider's **authentication flow** presents **both** a **passkey/WebAuthn** stage **and** a
       **password** stage (plus any MFA the operator wants); an Identification stage routes to a WebAuthn-validator
       stage and/or a Password stage, and the user **chooses**.
-- [ ] **The flow emits an `amr` (or `acr`) in the id_token that distinguishes passkey from password.** authentik
+- [ ] **The flow emits an `amr` (or `acr`) and `gla_uv` in the id_token that distinguish passkey from password and
+      prove user verification.** authentik
       2025.10 emits `amr: []` (empty) by default and does NOT distinguish them out of the box (PROVEN in the
       GLA-074 rehearsal) — so this is a **REQUIRED** step, not an assumption. Apply this bundle's
       **`amr-scope-mapping.py`** as a custom OAuth2 provider scope mapping (`scope_name: "openid"`, attached to
       GLA's provider's property mappings; see `amr-scope-mapping.md`). It populates `amr` from authentik's
       recorded login method:
-      - a **passkey** login → `["swk"]` (in GLA's webauthn set `{hwk, swk, webauthn, fido}`) → strength **`webauthn`**;
-      - a **password** login → `["pwd"]` (with/without MFA companions `{mfa, otp, sms}`) → strength **`password`**.
+      - a **passkey** login through a UV-required WebAuthn/passkey stage → `["swk"]` and `gla_uv:true` → strength
+        **`webauthn`**;
+      - a **password** login → `["pwd"]` and no UV proof (with/without MFA companions `{mfa, otp, sms}`) → strength
+        **`password`**.
       (The map is `adapters/auth-authentik/src/strength.ts` `DEFAULT_METHOD_MAPS` — which the expression matches,
       so no `GLA_AUTHENTIK_AMR_MAP` override is needed. Proven live: a real password login → `amr:["pwd"]`.)
 - [ ] If this instance's labels differ, `GLA_AUTHENTIK_AMR_MAP` / `GLA_AUTHENTIK_ACR_MAP` are set to the **actual**
-      labels — but the flow **must emit something** separating the two tiers. **Verify against the running
-      instance** (a real passkey login → `webauthn`, a real password login → `password`); never assume defaults.
+      labels — but the flow **must emit something** separating the two tiers and `gla_uv:true` only for a
+      UV-required passkey/WebAuthn result. **Verify against the running instance** (a real passkey login →
+      `webauthn`, a real password login → `password`); never assume defaults.
 - [ ] **Degradation is safe, not silent:** if the flow cannot be made to distinguish the methods, the integration
       falls back to **`password`-only** (the adapter **never up-maps** a missing/ambiguous method to `webauthn`),
       and the operator is **warned** in the receipt.

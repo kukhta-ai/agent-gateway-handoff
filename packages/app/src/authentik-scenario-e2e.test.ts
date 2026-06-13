@@ -253,7 +253,7 @@ async function authentikWiring(): Promise<AuthentikWiring> {
 
 /**
  * Enroll the recipient through authentik (the GLA-070 service path): begin → synthesize the register-leg login
- * with the bound `sub` + the attempt's nonce → finish → bind `subjects[userId]={sub}`. The precondition for any
+ * with the bound `sub` + the attempt's nonce + UV proof → finish → bind `subjects[userId]={sub}`. The precondition for any
  * step-up. (This is the "enroll once per run" the capstone performs cold, §2.)
  */
 async function enrollThroughAuthentik(
@@ -263,7 +263,12 @@ async function enrollThroughAuthentik(
 ): Promise<void> {
   const challenge = await w.identity.enrollmentOptions(r, discharge);
   const { state, nonce } = redirectParams(challenge);
-  await w.fake.stageValidLogin(`enroll-${state}`, { sub, nonce, amr: ["swk"] });
+  await w.fake.stageValidLogin(`enroll-${state}`, {
+    sub,
+    nonce,
+    amr: ["swk"],
+    userVerified: true,
+  });
   await w.identity.enrollComplete(r, { code: `enroll-${state}`, state });
 }
 
@@ -278,7 +283,7 @@ async function synthesizeStepUp(
   origin: string,
   fake: FakeAuthentik,
   link: string,
-  opts: { amr?: string[]; sub: string; codeTag?: string },
+  opts: { amr?: string[]; sub: string; codeTag?: string; userVerified?: boolean },
 ): Promise<Response> {
   const grant = new URL(link).searchParams.get("grant") ?? "";
   const path = new URL(link).pathname;
@@ -296,6 +301,7 @@ async function synthesizeStepUp(
     sub: opts.sub,
     nonce,
     ...(opts.amr !== undefined ? { amr: opts.amr } : {}),
+    ...(opts.userVerified !== undefined ? { userVerified: opts.userVerified } : {}),
   });
   return fetch(`${origin}/handoff/auth/verify`, {
     method: "POST",
@@ -418,7 +424,7 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
       const upstream = await startStubUpstream();
       closers.push(upstream.close);
 
-      // ── RUN A — PASSKEY: amr:["swk"] → webauthn → authorized on a "webauthn"-required route → WS reaches capsule.
+      // ── RUN A — PASSKEY: amr:["swk"] + UV → webauthn → authorized on a "webauthn"-required route → WS reaches capsule.
       const wA = await authentikWiring();
       const a = await coldAuthentikStack({
         wiring: wA,
@@ -441,6 +447,7 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         const res = await synthesizeStepUp(a.origin, wA.fake, view.link, {
           amr: ["swk"],
           sub: BOUND_SUB,
+          userVerified: true,
         });
         expect(res.status).toBe(200);
         const body = (await res.json()) as { authorized?: boolean; auth_strength?: string };
@@ -557,6 +564,7 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         const resK = await synthesizeStepUp(origin, w.fake, viewK.link, {
           amr: ["swk"],
           sub: BOUND_SUB,
+          userVerified: true,
         });
         expect(resK.status).toBe(200);
         expect(((await resK.json()) as { authorized?: boolean }).authorized).toBe(true);
@@ -602,6 +610,7 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         const resUn = await synthesizeStepUp(origin, w.fake, viewUn.link, {
           amr: ["swk"],
           sub: BOUND_SUB,
+          userVerified: true,
         });
         // /handoff/auth/options refuses an un-enrolled recipient (403) → the page never gets a redirect challenge.
         expect(resUn.status).toBe(403);
@@ -623,6 +632,7 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         const resSm = await synthesizeStepUp(origin, w.fake, viewSm.link, {
           amr: ["swk"],
           sub: "sub-IMPOSTOR-not-the-bound-one",
+          userVerified: true,
         });
         expect(resSm.status).toBe(403); // verifyAssertion → subject_mismatch → {ok:false}.
         const grantSm = grantIdOf(stack, viewSm.link);
@@ -658,6 +668,7 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
           sub: BOUND_SUB,
           nonce: "WRONG-NONCE",
           amr: ["swk"],
+          userVerified: true,
         });
         const resBad = await fetch(`${origin}/handoff/auth/verify`, {
           method: "POST",
