@@ -219,8 +219,8 @@ these resolve to / agree with **`GLA_PUBLIC_BASE_URL`** (in hermes-1, `https://2
   authentik its own subdomain fronted by the same host Caddy; the bundle records whatever the operator chose.)
 - **The RP/origin agreement:** the browser leaves GLA's origin (the handoff/enroll page) → authentik's origin
   (login) → **back to GLA's origin** (the `redirect_uri` callback). The **return must land on GLA's origin** so
-  the callback page's same-origin state (the `state`/return-detection it needs) works (`§5.1`). The adapter's
-  `redirectUri` (sent in the authorization request) and authentik's registered redirect URI and GLA's served
+  the callback page's same-origin state (the `state`/return-detection it needs) works (`§5.1`). The configured
+  `redirectUri` (sent in the authorization request), authentik's registered redirect URI, and GLA's served
   callback path are **one and the same URL**.
 
 ### §5.1 · The Caddy routing (carried from `authentik-dual-method-flow.md §5`) — GLA-074 owns it
@@ -232,7 +232,7 @@ verify route (`see authentik-dual-method-flow.md §5.2`). GLA-074's Caddy/route 
   (the existing host-Caddy → `:3000` mapping, `see` deployment-target notes; GLA-010/edge-proxy).
 - **authentik's endpoints** reachable at the issuer host (the operator's authentik origin) — Caddy at the host
   proxies to the host-level authentik stack (`§1`).
-- **The `redirect_uri` callback** served **by GLA on GLA's origin** (the adapter-owned callback,
+- **The `redirect_uri` callback** served **by GLA on GLA's origin** (the gateway callback page,
   `authentik-dual-method-flow.md §5.2`) — so it is **same-origin** with the gateway (sessionStorage/state work)
   and the **grant never leaks to authentik**: the grant rides only between GLA's page and GLA's verify route;
   authentik sees only the OIDC `code`/`state`, never the GLA grant. The callback path is on GLA's origin,
@@ -312,7 +312,7 @@ with authentik-specific probes.
 
 | Already provided | GLA-074 builds |
 |---|---|
-| the adapter that dials authentik's OIDC endpoints (`oidc.ts` discovery/exchange/validate), the `amr`→strength map (`strength.ts`), the dual-method flow + same-origin callback (GLA-072), `FakeAuthentik` | the **bundle's authentik branch** (detect→setup→verify→record), the **host-level standup/adopt** decision wiring, the **`§3` config outcomes** + their probes, the **Caddy `redirect_uri` route**, the **`DependencyBinding` receipt** |
+| the adapter that dials authentik's OIDC endpoints (`oidc.ts` discovery/exchange/validate), the `amr`→strength map (`strength.ts`), the dual-method flow + GLA-served same-origin callback page, `FakeAuthentik` | the **bundle's authentik branch** (detect→setup→verify→record), the **host-level standup/adopt** decision wiring, the **`§3` config outcomes** + their probes, the **Caddy `redirect_uri` route**, the **`DependencyBinding` receipt** |
 | the existing `identity-provider` bundle (WebAuthn-default tasks `1..3`) + its DoD-gated receipt model | the authentik tasks/AC under the same loop (the WebAuthn-default path stays unchanged) |
 
 ---
