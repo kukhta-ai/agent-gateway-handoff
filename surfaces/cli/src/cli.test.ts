@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentBridge } from "@gla/bridge";
-import { CatalogService, defaultStoreContent } from "@gla/catalog";
+import { CatalogService, defaultStoreContent, referenceWpmDependencyBindings } from "@gla/catalog";
 import { glaError } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import { CLI_VERSION, type CliServices, run } from "./cli.js";
@@ -33,8 +33,15 @@ function capture(stdoutTty: boolean): { out: Output; stdout: () => string; stder
   return { out: new Output("auto", streams), stdout: () => o.join(""), stderr: () => e.join("") };
 }
 
-/** Default services for tests (the in-tree reference-slice Bridge). */
-function services(bridge: AgentBridge = new AgentBridge()): CliServices {
+/** Bridge fixture for tests that intentionally simulate WPM having installed the reference slice. */
+function readyBridge(): AgentBridge {
+  return new AgentBridge({
+    catalog: new CatalogService({ dependencyBindings: referenceWpmDependencyBindings() }),
+  });
+}
+
+/** Default services for tests (the reference-slice Bridge with explicit WPM receipt fixtures). */
+function services(bridge: AgentBridge = readyBridge()): CliServices {
   return { bridge };
 }
 
@@ -163,6 +170,7 @@ describe("gla catalog list (GLA-017 AC#3)", () => {
     // A Bridge whose launcher probe reports unavailable — the system derives the drop.
     const catalog = new CatalogService({
       content: defaultStoreContent(),
+      dependencyBindings: referenceWpmDependencyBindings(),
       probes: { "launcher-process": () => "unavailable" },
     });
     const c = capture(false);
@@ -272,7 +280,7 @@ describe("gla session create — dry-run (admission only)", () => {
     const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
     try {
       const path = specFile(dir, OK_ASSEMBLY);
-      const bridge = new AgentBridge();
+      const bridge = readyBridge();
       const c = capture(false);
       const code = await run(["session", "create", "-f", path, "--dry-run"], c.out, { bridge });
       expect(code).toBe(ExitCode.OK);
@@ -285,6 +293,27 @@ describe("gla session create — dry-run (admission only)", () => {
       const list = capture(false);
       await run(["task", "list"], list.out, { bridge });
       expect(JSON.parse(list.stdout()).length).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unavailable provider from missing WPM binding rejects with catalog.unavailable and creates no state", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
+    try {
+      const path = specFile(dir, OK_ASSEMBLY);
+      const bridge = new AgentBridge();
+      const c = capture(false);
+      const code = await run(["session", "create", "-f", path], c.out, { bridge });
+      expect(code).toBe(ExitCode.DEPENDENCY);
+      expect(JSON.parse(c.stderr()).error.code).toBe("catalog.unavailable");
+
+      const tasks = capture(false);
+      await run(["task", "list"], tasks.out, { bridge });
+      expect(JSON.parse(tasks.stdout()).length).toBe(0);
+      const sessions = capture(false);
+      await run(["session", "list"], sessions.out, { bridge });
+      expect(JSON.parse(sessions.stdout()).length).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -390,7 +419,7 @@ describe("gla session create — real run (dispatch a Session in `issued`, no sp
     const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
     try {
       const path = specFile(dir, OK_ASSEMBLY);
-      const bridge = new AgentBridge();
+      const bridge = readyBridge();
       const c = capture(false);
       const code = await run(["session", "create", "-f", path], c.out, { bridge });
       expect(code).toBe(ExitCode.OK);
@@ -418,7 +447,7 @@ describe("gla session create — real run (dispatch a Session in `issued`, no sp
         ...OK_ASSEMBLY,
         spec: { ...OK_ASSEMBLY.spec, detectors: [{ use: "url-watcher" }] },
       });
-      const bridge = new AgentBridge();
+      const bridge = readyBridge();
       const c = capture(false);
       const code = await run(["session", "create", "-f", badSpec], c.out, { bridge });
       expect(code).toBe(ExitCode.POLICY); // rejected (config-schema) → exit 3
@@ -438,7 +467,7 @@ describe("gla session create — real run (dispatch a Session in `issued`, no sp
     const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
     try {
       const path = specFile(dir, OK_ASSEMBLY);
-      const bridge = new AgentBridge();
+      const bridge = readyBridge();
       const tc = capture(false);
       await run(["task", "create", "--intent", "explicit"], tc.out, { bridge });
       const taskId = JSON.parse(tc.stdout()).task_id as string;

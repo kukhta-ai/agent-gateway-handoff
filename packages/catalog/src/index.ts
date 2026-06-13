@@ -23,10 +23,21 @@ import {
   type BindingStatus,
   CHANNEL_CLI_MANIFEST,
   type DependencyBinding,
+  type DependencyConnectionEvidence,
+  type DependencyDecisionNote,
+  type DependencyInverseOperation,
+  type DependencyProbeEvidence,
+  type DependencyReceiptEvidence,
+  type DependencyRequirement,
+  type DependencyState,
+  type IndexedDependencyBinding,
+  type OwnershipMode,
   PROVIDER_MANIFESTS,
+  type ProbeResult,
   type ProviderManifest,
   type SkillManifest,
   type TemplateManifest,
+  type WpmBundleEvidence,
 } from "./manifests.js";
 
 export * from "./manifests.js";
@@ -54,19 +65,274 @@ export type Probe = () => Availability;
 /** The default probe for an in-tree part with all dependencies bound: `available`. */
 const ALWAYS_AVAILABLE: Probe = () => "available";
 
+/** Structured WPM dependency binding input accepted by the catalog. */
+export type DependencyBindingSource =
+  | DependencyBinding[]
+  | Record<string, DependencyBinding>
+  | { bindingFor(dependency: string): DependencyBinding | undefined };
+
+const SECRET_KEY_RE = /(secret|token|password|credential|private[_-]?key)/i;
+
+const probeToAvailability = (result: ProbeResult): Availability => result;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function bindingFor(
+  source: DependencyBindingSource | undefined,
+  dependency: string,
+): DependencyBinding | undefined {
+  if (source === undefined) {
+    return undefined;
+  }
+  if (Array.isArray(source)) {
+    return source.find((b) => b.dependency === dependency);
+  }
+  if ("bindingFor" in source && typeof source.bindingFor === "function") {
+    return source.bindingFor(dependency);
+  }
+  return (source as Record<string, DependencyBinding>)[dependency];
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function validBundle(
+  bundle: unknown,
+  requirement: DependencyRequirement,
+  missing: string[],
+): bundle is WpmBundleEvidence {
+  if (!isRecord(bundle)) {
+    missing.push("bundle");
+    return false;
+  }
+  const declaredRequires = bundle.declaredRequires;
+  let valid = true;
+  const expected = requirement.bundle;
+  const expectedId = expected?.id ?? requirement.dependency;
+  if (!hasText(bundle.id) || bundle.id !== expectedId) {
+    missing.push("bundle.id");
+    valid = false;
+  }
+  if (
+    !hasText(bundle.version) ||
+    (expected?.version !== undefined && bundle.version !== expected.version)
+  ) {
+    missing.push("bundle.version");
+    valid = false;
+  }
+  if (!isRecord(declaredRequires)) {
+    missing.push("bundle.declaredRequires");
+    valid = false;
+  } else if (expected?.declaredRequires !== undefined) {
+    for (const [dependency, range] of Object.entries(expected.declaredRequires)) {
+      if (declaredRequires[dependency] !== range) {
+        missing.push(`bundle.declaredRequires.${dependency}`);
+        valid = false;
+      }
+    }
+  }
+  return valid;
+}
+
+function validReceipt(receipt: unknown): receipt is DependencyReceiptEvidence {
+  return isRecord(receipt) && hasText(receipt.taskId) && receipt.status === "Done";
+}
+
+function validProbe(probe: unknown): probe is DependencyProbeEvidence {
+  return (
+    isRecord(probe) &&
+    (probe.result === "available" || probe.result === "degraded" || probe.result === "unavailable")
+  );
+}
+
+function validConnection(
+  connection: unknown,
+  requirement: DependencyRequirement,
+  missing: string[],
+): connection is DependencyConnectionEvidence {
+  if (!isRecord(connection) || !isRecord(connection.refs)) {
+    missing.push("connection.refs");
+    return false;
+  }
+  const refs = connection.refs;
+  if (Object.keys(refs).length === 0) {
+    missing.push("connection.refs.nonempty");
+  }
+  for (const requiredRef of requirement.connectionRefs ?? []) {
+    if (refs[requiredRef] === undefined) {
+      missing.push(`connection.refs.${requiredRef}`);
+    }
+  }
+  const allowedKinds = new Set(["secret-ref", "path-ref", "uri-ref", "service-ref", "socket-ref"]);
+  for (const [key, ref] of Object.entries(refs)) {
+    if (!isRecord(ref) || !hasText(ref.kind) || !allowedKinds.has(ref.kind) || !hasText(ref.ref)) {
+      missing.push(`connection.refs.${key}`);
+      continue;
+    }
+    if (SECRET_KEY_RE.test(key) && ref.kind !== "secret-ref") {
+      missing.push(`connection.refs.${key}.secret-ref`);
+    }
+  }
+  return !missing.some((m) => m.startsWith("connection."));
+}
+
+function stateMatchesOwnership(ownershipMode: OwnershipMode, state: DependencyState): boolean {
+  switch (ownershipMode) {
+    case "managed":
+      return state === "installed";
+    case "local-external":
+      return state === "adopted";
+    case "remote-external":
+      return state === "remote";
+    case "manual-byo":
+      return state === "manual";
+    case "disabled":
+      return state === "disabled";
+  }
+}
+
+function statusFromMissing(
+  binding: DependencyBinding | undefined,
+  missingEvidence: string[],
+): BindingStatus {
+  if (binding?.ownershipMode === "disabled" || binding?.state === "disabled") {
+    return "unbound";
+  }
+  if (missingEvidence.length > 0 || binding === undefined) {
+    return "unbound";
+  }
+  if (binding.lastProbe.result !== "available") {
+    return "degraded";
+  }
+  return "bound";
+}
+
+function sanitizedConnection(
+  connection: DependencyConnectionEvidence | undefined,
+): DependencyConnectionEvidence | undefined {
+  if (connection === undefined) {
+    return undefined;
+  }
+  return structuredClone(connection);
+}
+
+function evaluateRequirement(
+  requirement: DependencyRequirement,
+  binding: DependencyBinding | undefined,
+  currentProbe: DependencyProbeEvidence,
+): IndexedDependencyBinding {
+  const missingEvidence: string[] = [];
+  if (requirement.hostTouching !== true) {
+    return {
+      ...requirement,
+      status: "bound",
+      currentProbe,
+      missingEvidence,
+      diagnostics: { install: "available", runtime: currentProbe.result },
+    };
+  }
+
+  if (binding === undefined) {
+    missingEvidence.push("wpm-receipt");
+  } else {
+    if (binding.source !== "wpm-receipt") {
+      missingEvidence.push("source.wpm-receipt");
+    }
+    if (binding.dependency !== requirement.dependency) {
+      missingEvidence.push("dependency.match");
+    }
+    validBundle(binding.bundle, requirement, missingEvidence);
+    if (!validReceipt(binding.receipt)) {
+      missingEvidence.push("receipt");
+    }
+    if (!validProbe(binding.lastProbe)) {
+      missingEvidence.push("lastProbe");
+    }
+    if (
+      binding.ownershipMode !== "managed" &&
+      binding.ownershipMode !== "local-external" &&
+      binding.ownershipMode !== "remote-external" &&
+      binding.ownershipMode !== "manual-byo" &&
+      binding.ownershipMode !== "disabled"
+    ) {
+      missingEvidence.push("ownershipMode");
+    }
+    if (
+      binding.state !== "installed" &&
+      binding.state !== "adopted" &&
+      binding.state !== "remote" &&
+      binding.state !== "manual" &&
+      binding.state !== "disabled"
+    ) {
+      missingEvidence.push("state");
+    } else if (!stateMatchesOwnership(binding.ownershipMode, binding.state)) {
+      missingEvidence.push("state.ownershipMode");
+    }
+    if (binding.ownershipMode !== "disabled") {
+      validConnection(binding.connection, requirement, missingEvidence);
+    }
+    if (binding.ownershipMode === "managed" && binding.inverseOp === undefined) {
+      missingEvidence.push("inverseOp");
+    }
+  }
+
+  const status = statusFromMissing(binding, missingEvidence);
+  const installProbe: ProbeResult =
+    binding !== undefined && validProbe(binding.lastProbe)
+      ? binding.lastProbe.result
+      : "unavailable";
+  const base: IndexedDependencyBinding = {
+    ...requirement,
+    status,
+    currentProbe,
+    missingEvidence,
+    diagnostics: {
+      install: installProbe,
+      runtime: currentProbe.result,
+    },
+  };
+  if (binding === undefined) {
+    return base;
+  }
+  const out: IndexedDependencyBinding = {
+    ...base,
+    ownershipMode: binding.ownershipMode,
+    state: binding.state,
+    bundle: structuredClone(binding.bundle),
+    receipt: structuredClone(binding.receipt),
+    lastProbe: structuredClone(binding.lastProbe),
+  };
+  const connection = sanitizedConnection(binding.connection);
+  if (connection !== undefined) {
+    out.connection = connection;
+  }
+  if (binding.inverseOp !== undefined) {
+    out.inverseOp = structuredClone(binding.inverseOp) as DependencyInverseOperation;
+  }
+  if (binding.decisionNotes !== undefined) {
+    out.decisionNotes = structuredClone(binding.decisionNotes) as DependencyDecisionNote[];
+  }
+  return out;
+}
+
 /**
- * Derive an entity's availability from (a) its dependency bindings and (b) its probe — SYSTEM-
- * derived, never read from the manifest. An `unbound`/`disabled` dependency forces `unavailable`; a
- * `degraded` binding caps at `degraded`; otherwise the probe result wins. This is the single place
- * availability is computed.
+ * Derive an entity's availability from validated dependency diagnostics and its current probe —
+ * SYSTEM-derived, never read from the manifest. Invalid/missing/disabled WPM evidence forces
+ * `unavailable`; a degraded current probe is not available.
  */
-function deriveAvailability(requires: DependencyBinding[] | undefined, probe: Probe): Availability {
+function deriveAvailability(
+  requires: IndexedDependencyBinding[] | undefined,
+  currentProbe: DependencyProbeEvidence,
+): Availability {
   for (const dep of requires ?? []) {
-    if (dep.status === "unbound" || dep.ownershipMode === "disabled") {
+    if (dep.status === "unbound" || dep.ownershipMode === "disabled" || dep.state === "disabled") {
       return "unavailable";
     }
   }
-  const probed = probe();
+  const probed = probeToAvailability(currentProbe.result);
   if (probed === "unavailable") {
     return "unavailable";
   }
@@ -96,8 +362,8 @@ export interface IndexedEntity extends CatalogEntity {
   /** SYSTEM-DERIVED (probe + bindings). The boolean `available` = (availability === "available"). */
   available: boolean;
   availability: Availability;
-  /** The dependency bindings backing this provider (empty for pure in-tree parts). */
-  requires: DependencyBinding[];
+  /** The evaluated dependency diagnostics backing this provider (empty for pure in-tree parts). */
+  requires: IndexedDependencyBinding[];
 }
 
 /** The binding status of one required part, as `template show` reports it (GLA-017 AC#2). */
@@ -108,8 +374,8 @@ export interface PartBinding {
   provider: string;
   /** The provider's system-derived availability. */
   availability: Availability;
-  /** Each backing dependency's binding status. */
-  dependencies: DependencyBinding[];
+  /** Each backing dependency's evaluated binding diagnostics. */
+  dependencies: IndexedDependencyBinding[];
 }
 
 /** What `templateShow` returns (GLA-017 AC#2): required parts + each backing dependency's binding. */
@@ -151,7 +417,11 @@ interface IngestResult {
  * the index (so an unlisted entity is inert — the catalog invariant). Skills are registered with the
  * skill manifest; relations are kept for `template show`.
  */
-function ingest(content: StoreContent, probes: ProbeRegistry): IngestResult {
+function ingest(
+  content: StoreContent,
+  probes: ProbeRegistry,
+  bindings: DependencyBindingSource | undefined,
+): IngestResult {
   const entities = new Map<string, IndexedEntity>();
   const templates = new Map<string, TemplateManifest>();
   const skills = new Map<string, SkillManifest>();
@@ -178,7 +448,11 @@ function ingest(content: StoreContent, probes: ProbeRegistry): IngestResult {
         );
       }
     }
-    const availability = deriveAvailability(m.spec.requires, probeFor(m.spec.probe));
+    const currentProbe: DependencyProbeEvidence = { result: probeFor(m.spec.probe)() };
+    const requires = (m.spec.requires ?? []).map((requirement) =>
+      evaluateRequirement(requirement, bindingFor(bindings, requirement.dependency), currentProbe),
+    );
+    const availability = deriveAvailability(requires, currentProbe);
     entities.set(m.metadata.name, {
       name: m.metadata.name,
       kind: m.kind,
@@ -186,7 +460,7 @@ function ingest(content: StoreContent, probes: ProbeRegistry): IngestResult {
       summary: m.spec.capability.summary,
       availability,
       available: availability === "available",
-      requires: m.spec.requires ?? [],
+      requires,
     });
     registerSkills(m.spec.skills);
   }
@@ -238,6 +512,8 @@ export interface CatalogServiceOptions {
   content?: StoreContent;
   /** Per-probe overrides; a missing probe defaults to `available` (in-tree parts). */
   probes?: ProbeRegistry;
+  /** Structured WPM DependencyBinding receipt evidence. Absent means host-touching deps are unavailable. */
+  dependencyBindings?: DependencyBindingSource;
 }
 
 /**
@@ -254,6 +530,75 @@ export function defaultStoreContent(): StoreContent {
 }
 
 /**
+ * Structured WPM receipt fixture for tests/development flows that intentionally simulate an installed
+ * reference browser-handoff stack. Production composition should pass real receipts instead.
+ */
+export function referenceWpmDependencyBindings(): DependencyBinding[] {
+  return structuredClone([
+    {
+      dependency: "browser-runtime",
+      source: "wpm-receipt",
+      ownershipMode: "managed",
+      state: "installed",
+      installed: true,
+      bundle: {
+        id: "browser-runtime",
+        version: "0.1.0",
+        declaredRequires: { "gla-core": "^0.1.0" },
+      },
+      receipt: {
+        taskId: "browser-runtime-3",
+        status: "Done",
+        recordedAt: "2026-06-13T00:00:00.000Z",
+        refs: ["wpm/wip/bundles/browser-runtime/install-backlog/tasks/browser-runtime-3"],
+      },
+      connection: {
+        refs: {
+          chromium: { kind: "path-ref", ref: "playwright:chromium" },
+          cdp: { kind: "uri-ref", ref: "runtime:cdp" },
+        },
+      },
+      lastProbe: { at: "2026-06-13T00:00:00.000Z", result: "available" },
+      inverseOp: {
+        description: "Remove only browser/runtime files installed by the browser-runtime bundle.",
+        condition: "Only when receipt ownershipMode is managed.",
+      },
+      decisionNotes: [{ note: "Managed install fixture for the reference browser runtime." }],
+    },
+    {
+      dependency: "human-view",
+      source: "wpm-receipt",
+      ownershipMode: "managed",
+      state: "installed",
+      installed: true,
+      bundle: {
+        id: "human-view",
+        version: "0.1.0",
+        declaredRequires: { "gla-core": "^0.1.0", "browser-runtime": "^0.1.0" },
+      },
+      receipt: {
+        taskId: "human-view-3",
+        status: "Done",
+        recordedAt: "2026-06-13T00:00:00.000Z",
+        refs: ["wpm/wip/bundles/human-view/install-backlog/tasks/human-view-3"],
+      },
+      connection: {
+        refs: {
+          novnc: { kind: "uri-ref", ref: "runtime:novnc" },
+          xvfb: { kind: "service-ref", ref: "runtime:xvfb" },
+        },
+      },
+      lastProbe: { at: "2026-06-13T00:00:00.000Z", result: "available" },
+      inverseOp: {
+        description: "Remove only noVNC/X stack components installed by the human-view bundle.",
+        condition: "Only when receipt ownershipMode is managed.",
+      },
+      decisionNotes: [{ note: "Managed install fixture for the reference human-view stack." }],
+    },
+  ]);
+}
+
+/**
  * The Catalog read service (components/catalog.md). Constructed from Store content (defaults to the
  * in-tree reference slice) and a probe registry; it ingests once at construction and serves the
  * read surface. Implements the kernel {@link CatalogPort} (list/show/resolveTemplate) plus the
@@ -266,7 +611,7 @@ export class CatalogService implements CatalogPort {
 
   constructor(opts: CatalogServiceOptions = {}) {
     this.store = opts.content ?? defaultStoreContent();
-    this.index = ingest(this.store, opts.probes ?? {});
+    this.index = ingest(this.store, opts.probes ?? {}, opts.dependencyBindings);
   }
 
   /**

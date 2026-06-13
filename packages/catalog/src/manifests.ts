@@ -6,7 +6,8 @@
 //
 // Seeds the browser-handoff CapsuleTemplate + the six provider manifests it requires
 // (launcher-process, entrypoint-novnc, connector-cdp, workspace-profile, url-watcher, user-done),
-// each with a DependencyBinding status, plus a browser-handoff Skill (a short SKILL.md body).
+// each with static dependency requirements. Dynamic DependencyBinding receipts are supplied by WPM
+// at runtime; manifests must never imply host software is already installed.
 
 import type { ConfigSchema } from "@gla/kernel";
 
@@ -31,16 +32,158 @@ export type OwnershipMode =
   | "manual-byo"
   | "disabled";
 
+/** The environment state WPM recorded for one dependency without collapsing ownership semantics. */
+export type DependencyState = "installed" | "adopted" | "remote" | "manual" | "disabled";
+
+/** Probe result vocabulary shared by WPM receipt probes and GLA runtime probes. */
+export type ProbeResult = "available" | "degraded" | "unavailable";
+
+/** Deterministic bundle metadata authored before host-specific install decisions are made. */
+export interface WpmBundleEvidence {
+  /** WPM bundle id, e.g. `browser-runtime`. */
+  id: string;
+  /** WPM bundle version, e.g. `0.1.0`. */
+  version: string;
+  /** Declared bundle prerequisites from `bundle.yml`. */
+  declaredRequires: Record<string, string>;
+  /** Delivered payload file references, when the bundle ships files. */
+  fileRefs?: string[];
+  /** Delivered template references, when the bundle ships templates. */
+  templateRefs?: string[];
+  /** Delivered installer script references, when applicable. */
+  scriptRefs?: string[];
+}
+
 /**
- * The dependency a provider requires on the host, with its current binding (docs/02 §6). For an
- * in-tree provider with no host dependency the binding is `bound` with mode `managed` (nothing to
- * stand up). The `probe` name is the system-derived health seam (resolved by the Index, not here).
+ * Static dependency requirement declared by a provider manifest. This is not proof that the
+ * dependency is installed; WPM supplies that separately as a {@link DependencyBinding}.
  */
-export interface DependencyBinding {
+export interface DependencyRequirement {
   /** The dependency name (matches what a `wpm` bundle stands up). */
   dependency: string;
-  status: BindingStatus;
+  /** Host-touching requirements require WPM receipt evidence before they can be available. */
+  hostTouching?: boolean;
+  /** Named connection references the WPM receipt must expose for this dependency to be usable. */
+  connectionRefs?: string[];
+  /** Deterministic bundle evidence for the dependency, if the dependency is WPM-managed. */
+  bundle?: WpmBundleEvidence;
+}
+
+/** A reference to a connection fact. Sensitive facts must be secret refs, never literal values. */
+export interface DependencyConnectionRef {
+  /** The reference kind; `secret-ref` is mandatory for secret-bearing connection facts. */
+  kind: "secret-ref" | "path-ref" | "uri-ref" | "service-ref" | "socket-ref";
+  /** The opaque reference value, not the secret itself. */
+  ref: string;
+}
+
+/** Machine-readable connection evidence emitted by a WPM dependency receipt. */
+export interface DependencyConnectionEvidence {
+  /** Named connection references, such as `endpoint`, `chromium`, `clientSecret`, or `socket`. */
+  refs: Record<string, DependencyConnectionRef>;
+}
+
+/** Probe evidence captured at a specific point in time. */
+export interface DependencyProbeEvidence {
+  /** ISO timestamp for the probe, when the producer records one. */
+  at?: string;
+  /** The probe result. */
+  result: ProbeResult;
+  /** Optional diagnostic detail safe for logs/catalog output. */
+  detail?: string;
+}
+
+/** The typed receipt facts WPM maps from Backlog.md task state and structured notes. */
+export interface DependencyReceiptEvidence {
+  /** WPM install-backlog task id that recorded the receipt. */
+  taskId: string;
+  /** The task status WPM recorded for the verification step. */
+  status: "Done";
+  /** When the receipt was recorded, if known. */
+  recordedAt?: string;
+  /** Files or task refs recorded by WPM. */
+  refs?: string[];
+  /** Checksums recorded for placed files, keyed by path/ref. */
+  checksums?: Record<string, string>;
+}
+
+/** Repair/uninstall evidence recorded by WPM for ownership-safe reversal. */
+export interface DependencyInverseOperation {
+  /** Human-readable description of the inverse operation. */
+  description: string;
+  /** Optional command reference; callers display it, but GLA never executes it. */
+  command?: string;
+  /** Condition under which the inverse operation is valid. */
+  condition?: string;
+}
+
+/** Agent-adaptive install decision recorded by WPM and surfaced separately from bundle metadata. */
+export interface DependencyDecisionNote {
+  /** The decision, e.g. "adopted existing host chromium". */
+  note: string;
+  /** Optional rationale/context for repair or audit. */
+  rationale?: string;
+}
+
+/**
+ * Dynamic dependency binding evidence written by WPM and read by GLA. A binding is accepted only
+ * when the machine-readable fields required by the dependency contract are present.
+ */
+export interface DependencyBinding {
+  /** The dependency name, matching a provider's {@link DependencyRequirement.dependency}. */
+  dependency: string;
+  /** Receipt provenance. Free-form prose or seeded defaults are not accepted as this source. */
+  source: "wpm-receipt";
+  /** Who owns the dependency lifecycle. */
   ownershipMode: OwnershipMode;
+  /** The environment state WPM recorded for this dependency. */
+  state: DependencyState;
+  /** Deterministic bundle metadata from the WPM bundle. */
+  bundle: WpmBundleEvidence;
+  /** The WPM task/receipt facts proving the install/adoption was recorded. */
+  receipt: DependencyReceiptEvidence;
+  /** Connection references GLA may use; secrets must be secret refs. */
+  connection?: DependencyConnectionEvidence;
+  /** Legacy compatibility flag from the earlier binding sketch; structured `state` is authoritative. */
+  installed?: boolean;
+  /** Last WPM install-time verification probe. */
+  lastProbe: DependencyProbeEvidence;
+  /** Ownership-safe inverse operation or repair note. GLA displays but never executes it. */
+  inverseOp?: DependencyInverseOperation;
+  /** Agent-adaptive environment decisions, separate from deterministic bundle metadata. */
+  decisionNotes?: DependencyDecisionNote[];
+}
+
+/**
+ * Indexed dependency diagnostics returned by catalog reads. It combines static requirements,
+ * accepted/rejected WPM receipt evidence, and the current GLA runtime probe result.
+ */
+export interface IndexedDependencyBinding extends DependencyRequirement {
+  /** Derived receipt status after structured evidence validation. */
+  status: BindingStatus;
+  /** Ownership mode from accepted WPM evidence, if present. */
+  ownershipMode?: OwnershipMode;
+  /** Environment state from accepted WPM evidence, if present. */
+  state?: DependencyState;
+  /** Sanitized connection references. */
+  connection?: DependencyConnectionEvidence;
+  /** WPM receipt metadata. */
+  receipt?: DependencyReceiptEvidence;
+  /** WPM install-time probe evidence. */
+  lastProbe?: DependencyProbeEvidence;
+  /** Current GLA runtime probe evidence for the provider using this dependency. */
+  currentProbe?: DependencyProbeEvidence;
+  /** WPM inverse operation evidence, shown for repair/uninstall safety but never executed by GLA. */
+  inverseOp?: DependencyInverseOperation;
+  /** WPM agent-adaptive decision notes. */
+  decisionNotes?: DependencyDecisionNote[];
+  /** Machine-readable evidence fields that were absent or invalid. */
+  missingEvidence: string[];
+  /** Separate install-convergence and current-runtime-health diagnostics. */
+  diagnostics: {
+    install: ProbeResult;
+    runtime: ProbeResult;
+  };
 }
 
 /** A skill a provider/template ships (docs/02 §3). The body is emitted by `gla skill show`. */
@@ -55,7 +198,7 @@ export interface SkillManifest {
 /**
  * A provider manifest (docs/02 §3) — the uniform self-describing shape every family follows. Slice
  * 1 carries the fields orientation reads: identity (name/version/family), capability summary, the
- * typed `config_schema` (the agent's option surface), the required dependency + its binding, the
+ * typed `config_schema` (the agent's option surface), the required dependencies, the
  * probe name (availability seam), relations (compatibility), and shipped skills.
  */
 export interface ProviderManifest {
@@ -66,8 +209,8 @@ export interface ProviderManifest {
     family: ProviderFamily;
     capability: { summary: string; [k: string]: unknown };
     config_schema?: ConfigSchema;
-    /** The host dependency this provider needs + its binding (drives availability). */
-    requires?: DependencyBinding[];
+    /** Static host dependency requirements. Dynamic binding evidence is supplied by WPM receipts. */
+    requires?: DependencyRequirement[];
     /** The probe name resolved against the Index's probe registry (system-derived availability). */
     probe?: string;
     skills?: SkillManifest[];
@@ -128,8 +271,19 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
       config_schema: {
         headless: { type: "bool", required: false, default: true },
       },
-      // The browser-runtime host dependency (GLA-007 stands it up via wpm); seeded bound in-tree.
-      requires: [{ dependency: "browser-runtime", status: "bound", ownershipMode: "managed" }],
+      // The browser-runtime host dependency (GLA-007 stands it up via WPM); not seeded as bound.
+      requires: [
+        {
+          dependency: "browser-runtime",
+          hostTouching: true,
+          connectionRefs: ["chromium"],
+          bundle: {
+            id: "browser-runtime",
+            version: "0.1.0",
+            declaredRequires: { "gla-core": "^0.1.0" },
+          },
+        },
+      ],
       probe: "launcher-process",
       relations: {
         compatibleWith: { entrypoints: ["entrypoint-novnc"], connectors: ["connector-cdp"] },
@@ -152,7 +306,18 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     spec: {
       family: "entrypoint",
       capability: { summary: "noVNC live-view human entrypoint (agent-blind input path)" },
-      requires: [{ dependency: "human-view", status: "bound", ownershipMode: "managed" }],
+      requires: [
+        {
+          dependency: "human-view",
+          hostTouching: true,
+          connectionRefs: ["novnc"],
+          bundle: {
+            id: "human-view",
+            version: "0.1.0",
+            declaredRequires: { "gla-core": "^0.1.0", "browser-runtime": "^0.1.0" },
+          },
+        },
+      ],
       probe: "entrypoint-novnc",
     },
   },
@@ -165,7 +330,18 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     spec: {
       family: "connector",
       capability: { summary: "Chrome DevTools Protocol agent connector (agent-blind)" },
-      requires: [{ dependency: "browser-runtime", status: "bound", ownershipMode: "managed" }],
+      requires: [
+        {
+          dependency: "browser-runtime",
+          hostTouching: true,
+          connectionRefs: ["chromium"],
+          bundle: {
+            id: "browser-runtime",
+            version: "0.1.0",
+            declaredRequires: { "gla-core": "^0.1.0" },
+          },
+        },
+      ],
       probe: "connector-cdp",
     },
   },

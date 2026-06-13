@@ -216,6 +216,14 @@ interface DependencyBinding {
   lastProbe?: { at: string; result: "available" | "degraded" | "unavailable"; detail?: string };
 }
 ```
+
+GLA-082 refines the runtime side of this sketch: provider manifests now declare static
+`DependencyRequirement` entries, while WPM receipts supply dynamic `DependencyBinding` evidence. Host-touching
+dependencies are unavailable until a structured `source: "wpm-receipt"` binding proves ownership mode, state,
+connection references, typed receipt facts, and a successful WPM probe; GLA then combines that receipt with the
+current runtime probe. See `docs/architecture/catalog-dependency-bindings.md` for the exact ingest and diagnostic
+rules.
+
 **Division of labor (must not merge):** `wpm verify`/Repair proves the *install converged* (one-time, agent-run);
 GLA `doctor`/`probe` proves the *runtime is healthy right now* (continuous, server-side). Same binding, different
 question, different time. GLA's runtime **never installs anything**; a `wpm` bundle **never models a GLA

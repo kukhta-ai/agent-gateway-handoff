@@ -29,7 +29,7 @@ import {
 } from "@gla/auth-webauthn";
 import { AgentBridge } from "@gla/bridge";
 import { CapabilityService } from "@gla/capability";
-import { CatalogService, toAdmissionCatalog } from "@gla/catalog";
+import { CatalogService, type DependencyBinding, toAdmissionCatalog } from "@gla/catalog";
 import {
   CHANNEL_CLI_MODULE,
   ChannelCli,
@@ -265,6 +265,8 @@ function stateSlot<T>(
 export interface CreateBridgeOptions {
   /** The Cedar policy set source (defaults to {@link MVP_POLICY_SET}). */
   policySet?: string;
+  /** Structured WPM dependency binding receipts. Absent means host-touching catalog providers are unavailable. */
+  dependencyBindings?: DependencyBinding[];
 }
 
 /**
@@ -273,7 +275,9 @@ export interface CreateBridgeOptions {
  * `session create` dispatches a Session in `issued` — NO spawn (provisioning is `createProvisioningBridge`).
  */
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
-  const catalog = new CatalogService();
+  const catalog = new CatalogService(
+    opts.dependencyBindings !== undefined ? { dependencyBindings: opts.dependencyBindings } : {},
+  );
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );
@@ -464,7 +468,9 @@ export function createProvisioningBridge(
           unsafeRoots: opts.workspaceRoot !== undefined ? [opts.workspaceRoot] : [],
         })
       : undefined;
-  const catalog = new CatalogService();
+  const catalog = new CatalogService(
+    opts.dependencyBindings !== undefined ? { dependencyBindings: opts.dependencyBindings } : {},
+  );
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );

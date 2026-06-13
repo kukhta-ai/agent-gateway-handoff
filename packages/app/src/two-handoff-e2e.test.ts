@@ -32,6 +32,7 @@ import { type AddressInfo, createServer as createNet } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthWebauthnProvider } from "@gla/auth-webauthn";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { IdentityService } from "@gla/identity";
 import {
@@ -325,6 +326,7 @@ describe("REAL two-handoff end-to-end (scenario-01 Phases 9–14; Slice 6 deltas
       };
 
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,
