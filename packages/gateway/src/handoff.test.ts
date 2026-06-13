@@ -11,7 +11,7 @@
 //     ONLY within an open window (unmount → unreachable); revoke → the live WS is FORCE-CLOSED and unreachable.
 
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { type Server, createServer } from "node:http";
+import { type IncomingMessage, type Server, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -145,11 +145,14 @@ function startStubUpstream(): Promise<{
   endpoint: string;
   close: () => Promise<void>;
   server: Server;
+  requests: IncomingMessage[];
 }> {
   return new Promise((resolve) => {
+    const requests: IncomingMessage[] = [];
     // Use a bare net server so we can complete the upgrade handshake ourselves (no `ws` dependency).
     const server = createServer();
-    server.on("upgrade", (_req, socket, _head) => {
+    server.on("upgrade", (req, socket, _head) => {
+      requests.push(req);
       // Minimal WS handshake completion (we don't need the Sec-WebSocket-Accept to be cryptographically correct for
       // the proxy-conduit test — the gateway pipes bytes verbatim; the test asserts the bytes traverse the proxy).
       socket.write(
@@ -167,6 +170,7 @@ function startStubUpstream(): Promise<{
       const port = (server.address() as AddressInfo).port;
       resolve({
         endpoint: `ws://127.0.0.1:${port}/`,
+        requests,
         close: () =>
           new Promise<void>((r) => {
             // Force-terminate the upgraded sockets so close() doesn't hang on a live proxied connection.
@@ -296,15 +300,20 @@ function openUpgrade(
   path: string,
   grant: string,
   headers: Readonly<Record<string, string>> = {},
+  opts: { grantPlacement?: "query" | "protocol" | "none" } = {},
 ): Promise<{ firstChunk: string; socket: Socket; closed: Promise<void> }> {
   return new Promise((resolve, reject) => {
     const socket = netConnect({ host, port }, () => {
-      const target = `${path}?grant=${encodeURIComponent(grant)}`;
+      const grantPlacement = opts.grantPlacement ?? "query";
+      const target =
+        grantPlacement === "query" ? `${path}?grant=${encodeURIComponent(grant)}` : path;
+      const protocolHeader =
+        grantPlacement === "protocol" ? `Sec-WebSocket-Protocol: ${grant}\r\n` : "";
       const extraHeaders = Object.entries(headers)
         .map(([k, v]) => `${k}: ${v}\r\n`)
         .join("");
       socket.write(
-        `GET ${target} HTTP/1.1\r\nHost: ${host}:${port}\r\n${extraHeaders}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+        `GET ${target} HTTP/1.1\r\nHost: ${host}:${port}\r\n${extraHeaders}${protocolHeader}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
       );
     });
     let firstChunk = "";
@@ -343,6 +352,16 @@ afterEach(async () => {
   }
 });
 
+function headerText(headers: Headers): string {
+  const lines: string[] = [];
+  headers.forEach((value, key) => lines.push(`${key}: ${value}`));
+  return lines.join("\n");
+}
+
+function cookiePair(setCookie: string, name: string): string {
+  return setCookie.match(new RegExp(`${name}=[^;,]+`))?.[0] ?? "";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // VERIFY AT EDGE (GLA-035) — the handoff page + step-up decision
 // ─────────────────────────────────────────────────────────────────────────────
@@ -357,6 +376,9 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     await gateway.mount(mountReq("ws://127.0.0.1:1/"));
     const res = await fetch(`${base}${ROUTE_PATH}?grant=valid`);
     expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
     const html = await res.text();
     expect(html).toMatch(/Verify with passkey/);
@@ -364,6 +386,71 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     expect(html).toContain('id="viewer"');
     expect(html).toContain("rfb-web-client");
     expect(html).not.toContain("new WebSocket");
+  });
+
+  it("keeps the raw grant out of public handoff HTML, response headers, and browser stream URLs after bootstrap", async () => {
+    const canary = "grant-canary-089";
+    const grants = new StubSessionGrants();
+    grants.validToken = canary;
+    grants.routeProofScopes.set(canary, ROUTE_PATH);
+    const stepUp = new StubStepUp();
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const { base, host, port, gateway, close } = await bootHandoffGateway(grants, stepUp);
+    closers.push(close);
+    await gateway.mount(mountReq(upstream.endpoint));
+
+    const page = await fetch(`${base}${ROUTE_PATH}?grant=${encodeURIComponent(canary)}`);
+    expect(page.status).toBe(200);
+    const pageHeaders = headerText(page.headers);
+    const html = await page.text();
+    expect(pageHeaders).not.toContain(canary);
+    expect(html).not.toContain(canary);
+    const bootstrapCookie = cookiePair(page.headers.get("set-cookie") ?? "", "gla_handoff_boot");
+    expect(bootstrapCookie).toMatch(/^gla_handoff_boot=/);
+
+    const options = await fetch(`${base}/handoff/auth/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: bootstrapCookie },
+      body: JSON.stringify({ path: ROUTE_PATH }),
+    });
+    expect(options.status).toBe(200);
+    expect(headerText(options.headers)).not.toContain(canary);
+    expect(await options.text()).not.toContain(canary);
+
+    const verify = await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: bootstrapCookie },
+      body: JSON.stringify({ path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(verify.status).toBe(200);
+    const verifyHeaders = headerText(verify.headers);
+    expect(verifyHeaders).not.toContain(canary);
+    expect(await verify.text()).not.toContain(canary);
+    const streamCookie = cookiePair(verify.headers.get("set-cookie") ?? "", "gla_handoff");
+    expect(streamCookie).toMatch(/^gla_handoff=/);
+
+    const up = await openUpgrade(
+      host,
+      port,
+      ROUTE_PATH,
+      canary,
+      { Cookie: streamCookie },
+      { grantPlacement: "none" },
+    );
+    expect(up.firstChunk).toMatch(/101 Switching Protocols/);
+    expect(upstream.requests[0]?.url).toBe("/");
+    expect(upstream.requests[0]?.headers.cookie).toBeUndefined();
+    expect(String(upstream.requests[0]?.headers["sec-websocket-protocol"] ?? "")).not.toContain(
+      canary,
+    );
+    up.socket.destroy();
+  });
+
+  it("scrubs grant-bearing bootstrap URLs from enrollment and handoff browser history", () => {
+    const handoff = handoffPageHtml("valid", ROUTE_PATH, String(recipient));
+    expect(handoff).toContain('history.replaceState(null, "", location.pathname)');
+    expect(handoff).toContain('new URLSearchParams(location.search).has("grant")');
   });
 
   it("embeds the provider-declared browser client binding in the handoff page contract", async () => {
@@ -403,6 +490,7 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     const ok = await fetch(`${base}/handoff/client-assets/test-viewer/viewer.js`);
     expect(ok.status).toBe(200);
     expect(ok.headers.get("content-type")).toMatch(/text\/javascript/);
+    expect(ok.headers.get("referrer-policy")).toBe("no-referrer");
     expect(await ok.text()).toContain("TestViewer");
 
     const traversal = await fetch(`${base}/handoff/client-assets/test-viewer/%2e%2e/package.json`);
@@ -411,6 +499,8 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     expect(symlinkEscape.status).toBe(404);
     const missingRef = await fetch(`${base}/handoff/client-assets/unknown/viewer.js`);
     expect(missingRef.status).toBe(404);
+    expect(missingRef.headers.get("cache-control")).toBe("no-store");
+    expect(missingRef.headers.get("referrer-policy")).toBe("no-referrer");
   });
 
   it("rejects malformed reverse-proxy transport at mount without exposing a public route", async () => {
@@ -575,6 +665,8 @@ describe("Access Gateway — handoff step-up options + verify decision (GLA-035)
       body: JSON.stringify({ grant: "valid", path: ROUTE_PATH }),
     });
     expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(((await res.json()) as { challenge?: string }).challenge).toBe("auth-challenge");
     expect(stepUp.optionsCalls).toBe(1);
   });
@@ -780,6 +872,45 @@ describe("Access Gateway — WS upgrade proxy to the capsule (GLA-038/039)", () 
     up.socket.destroy();
   });
 
+  it("an AUTHORIZED browser upgrade can use the short-lived stream ticket cookie without leaking the raw grant to URLs or upstream headers", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const grants = new StubSessionGrants();
+    const stepUp = new StubStepUp();
+    const { base, host, port, gateway, close } = await bootHandoffGateway(grants, stepUp);
+    closers.push(close);
+    await gateway.mount(mountReq(upstream.endpoint));
+
+    const verRes = await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(verRes.status).toBe(200);
+    const streamCookie = verRes.headers.get("set-cookie") ?? "";
+    expect(streamCookie).toContain("gla_handoff=");
+    expect(streamCookie).toContain("HttpOnly");
+    expect(streamCookie).toContain("SameSite=Strict");
+    expect(streamCookie).toContain(`Path=${ROUTE_PATH}`);
+    expect(streamCookie).not.toContain("valid");
+
+    const up = await openUpgrade(
+      host,
+      port,
+      ROUTE_PATH,
+      "valid",
+      { Cookie: streamCookie.match(/gla_handoff=[^;,]+/)?.[0] ?? "" },
+      { grantPlacement: "none" },
+    );
+    expect(up.firstChunk).toMatch(/101 Switching Protocols/);
+    expect(up.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]?.url).toBe("/");
+    expect(upstream.requests[0]?.headers["sec-websocket-protocol"]).toBeUndefined();
+    expect(upstream.requests[0]?.headers.cookie).toBeUndefined();
+    up.socket.destroy();
+  });
+
   it("an AUTHORIZED prefixed public WebSocket upgrade is proxied to the capsule endpoint", async () => {
     const upstream = await startStubUpstream();
     closers.push(upstream.close);
@@ -872,6 +1003,8 @@ describe("Access Gateway — WS upgrade proxy to the capsule (GLA-038/039)", () 
     // No step-up → the grant is not authorized → the upgrade is refused (401), never proxied.
     const up = await openUpgrade(host, port, ROUTE_PATH, "valid");
     expect(up.firstChunk).toMatch(/401/);
+    expect(up.firstChunk).toContain("Cache-Control: no-store");
+    expect(up.firstChunk).toContain("Referrer-Policy: no-referrer");
     expect(up.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
   });
 
