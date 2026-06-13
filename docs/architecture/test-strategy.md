@@ -43,14 +43,14 @@ packages/admission     → UNIT (mutate pipeline, Cedar policy evaluation) + CON
 packages/catalog       → UNIT (entity validation, availability derivation) + CONTRACT (CatalogPort)
 packages/identity      → UNIT (binding narrowing, enrollment rules) + CONTRACT (IdentityPort / AuthProviderPort)
 packages/worker        → CONTRACT (LauncherPort × process-tier adapter; WorkspacePort)
-packages/gateway       → INTEGRATION (stateless verify against real CapabilityPort; WS upgrade path; route proxy)
+packages/gateway       → INTEGRATION (stateless verify against real CapabilityPort; browser-client asset host; WS upgrade path; route proxy)
 packages/bridge        → INTEGRATION (CLI + MCP surface parity; thin transport test)
 packages/assembly      → UNIT (AssemblySpec schema, template resolution, offline dry-run)
 packages/app           → E2E only (the composition root; not unit-tested in isolation)
 adapters/policy-cedar  → CONTRACT (PolicyPort guarantee: pure, total, forbid-wins)
 adapters/auth-webauthn → CONTRACT (AuthProviderPort: enrollment + assertion round-trip with a virtual authenticator)
 adapters/launcher-process → CONTRACT (LauncherPort: spawn + health + stop on T2 process tier)
-adapters/entrypoint-novnc → CONTRACT (HumanEntrypointPort: returns a reachable internalEndpoint)
+adapters/entrypoint-novnc → CONTRACT (HumanEntrypointPort: returns provider-neutral binding + noVNC/RFB client metadata)
 adapters/connector-cdp → CONTRACT (AgentConnectorPort: attach returns a live CDP url)
 adapters/workspace-profile → CONTRACT (WorkspacePort: realize → reap, ephemeral)
 adapters/detector-url  → CONTRACT (CompletionDetectorPort: watcher fires on the declared URL; contract rejection)
@@ -87,7 +87,7 @@ Drive Phases E, 0–15 (see `docs/scenario-01-unified.html`) headlessly in two e
 |---|---|---|
 | `ChannelPort` | **`channel-cli` adapter** (real, in-tree) | Delivers links to stdout/file instead of Telegram; the "human" Playwright client polls for the link |
 | `LauncherPort` | **`launcher-process` adapter** (real, T2) | `hermes-1`'s Docker storage driver is broken; process-tier is the correct default |
-| `HumanEntrypointPort` | **`entrypoint-novnc` adapter** (real) | noVNC stack started by the launcher; the Playwright client connects to the websocket URL |
+| `HumanEntrypointPort` | **`entrypoint-novnc` adapter** (real) | noVNC stack started by the launcher; the recipient browser loads the provider-owned RFB client from same-origin gateway assets and connects through the grant-protected route |
 | `AuthProviderPort` | **`auth-webauthn` adapter** (real) + `Page.addVirtualAuthenticator` | Full WebAuthn round-trip in Chromium; no mock |
 | `PolicyPort` | **`policy-cedar` adapter** (real) | Actual Cedar evaluation; the policy file is the minimal MVP policy set |
 | `CompletionDetectorPort` (url-watcher) | **`detector-url` adapter** (real) against the **local stub** | Fires deterministically when the stub serves `/dashboard` |
@@ -132,10 +132,11 @@ Phase 5  handoff 1 open
 Phase 6  user authenticates at the edge
   harness (human Playwright): navigates to the handoff link (direct `:3000` or via Caddy)
   harness: WebAuthn assertion via Page.addVirtualAuthenticator
-  assert:  GW accepts; WebSocket proxied to noVNC; HTTP 101
+  assert:  GW accepts; the provider client loads from same-origin assets; RFB/noVNC renders a visible live viewport
+  assert:  lower-level gateway proxy tests still prove the authorized WebSocket upgrade reaches only the mounted entrypoint
 
 Phase 7  user fills the form
-  harness (human Playwright): fills the registration form via noVNC WebSocket interaction
+  harness (human Playwright): fills the registration form through the rendered noVNC/RFB viewport
   stub:    POST /register → 200, "check your email"; emits verification-email event (known code)
   assert:  url-watcher signals /verify
 
@@ -154,7 +155,7 @@ Phase 11  handoff 2 open (same capsule)
 Phase 12  user enters the code (auth reused)
   harness (human Playwright): opens handoff-2 link
   assert:  GW reuses auth (no re-challenge because auth is still valid within TTL)
-  harness: reads known code from stub; enters via noVNC interaction
+  harness: reads known code from stub; enters through the rendered noVNC/RFB viewport
   stub:    POST /verify-code → 302 /dashboard
   assert:  url-watcher fires on /dashboard
 
@@ -178,7 +179,7 @@ Phase 15  teardown
 |---|---|---|
 | TLS | No TLS; direct `:3000` | Host Caddy at `https://57.131.31.126/`; harness sets `GLA_ENDPOINT=https://57.131.31.126/` |
 | Launcher | `launcher-process` (same) | `launcher-process` (same; Docker alt is not the default) |
-| noVNC connectivity | `ws://127.0.0.1:<port>` | `wss://57.131.31.126/<path>` via Caddy |
+| noVNC connectivity | provider RFB client assets from gateway + grant-protected `ws://127.0.0.1:<path>` | provider RFB client assets from gateway + grant-protected `wss://57.131.31.126/<path>` via Caddy |
 | Network isolation | Loopback only | LXD container network; same security invariants |
 | Cold start | `pnpm install && pnpm gate` from a fresh checkout | Same; GLA-066 specifically mandates a **cold start** (clean env, nothing warm) |
 

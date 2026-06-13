@@ -10,8 +10,11 @@
 //     flow both ways; an un-authorized/expired/revoked grant upgrade is refused (resolves to nothing); reachable
 //     ONLY within an open window (unmount → unreachable); revoke → the live WS is FORCE-CLOSED and unreachable.
 
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { type Server, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { authAssurancePolicyFromProfile } from "@gla/kernel";
 import type {
   AuthAssuranceEvidence,
@@ -274,7 +277,11 @@ function mountReq(endpoint: string, overrides: MountReqOverrides = {}): RouteMou
       protocol: "websocket",
       upstream: endpoint,
     },
-    client: overrides.client ?? { kind: "gateway-page", ref: "handoff" },
+    client: overrides.client ?? {
+      kind: "rfb-web-client",
+      ref: "novnc",
+      bootstrap: { module: "core/rfb.js" },
+    },
   };
 }
 
@@ -354,6 +361,9 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     const html = await res.text();
     expect(html).toMatch(/Verify with passkey/);
     expect(html).toMatch(/navigator\.credentials\.get/);
+    expect(html).toContain('id="viewer"');
+    expect(html).toContain("rfb-web-client");
+    expect(html).not.toContain("new WebSocket");
   });
 
   it("embeds the provider-declared browser client binding in the handoff page contract", async () => {
@@ -374,6 +384,33 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     expect(html).toContain(
       '"client":{"kind":"provider-asset","ref":"fake-viewer","bootstrap":{"mode":"test"}}',
     );
+    expect(html).toContain('"clientAssets":"/handoff/client-assets"');
+  });
+
+  it("serves configured provider client assets safely under the generic handoff asset route", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gla-client-assets-"));
+    const outside = await mkdtemp(join(tmpdir(), "gla-client-assets-outside-"));
+    closers.push(() => rm(root, { recursive: true, force: true }));
+    closers.push(() => rm(outside, { recursive: true, force: true }));
+    await writeFile(join(root, "viewer.js"), "export default class TestViewer {}\n");
+    await writeFile(join(outside, "leak.js"), "export default 'outside root';\n");
+    await symlink(join(outside, "leak.js"), join(root, "leak.js"));
+    const { base, close } = await bootHandoffGateway(new StubSessionGrants(), new StubStepUp(), {
+      entrypointClientAssets: [{ ref: "test-viewer", root }],
+    });
+    closers.push(close);
+
+    const ok = await fetch(`${base}/handoff/client-assets/test-viewer/viewer.js`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toMatch(/text\/javascript/);
+    expect(await ok.text()).toContain("TestViewer");
+
+    const traversal = await fetch(`${base}/handoff/client-assets/test-viewer/%2e%2e/package.json`);
+    expect(traversal.status).toBe(404);
+    const symlinkEscape = await fetch(`${base}/handoff/client-assets/test-viewer/leak.js`);
+    expect(symlinkEscape.status).toBe(404);
+    const missingRef = await fetch(`${base}/handoff/client-assets/unknown/viewer.js`);
+    expect(missingRef.status).toBe(404);
   });
 
   it("rejects malformed reverse-proxy transport at mount without exposing a public route", async () => {

@@ -21,8 +21,10 @@
 // AC#5; the import-boundary lint proves it). The seams below are structural interfaces the capability/identity
 // services satisfy.
 
+import { readFile, realpath, stat } from "node:fs/promises";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
+import { extname, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import {
   type AuthAssuranceEvidence,
   type AuthAssurancePolicy,
@@ -220,6 +222,16 @@ interface ReverseProxyTransportBinding {
   upstream: string;
 }
 
+/** Provider-owned browser-client assets the gateway serves read-only under `/handoff/client-assets/<ref>/...`. */
+export interface EntrypointClientAssetMount {
+  /** Provider-owned reference from `HumanEntrypointClientBinding.ref`. */
+  ref: string;
+  /** Local read-only directory containing browser assets for that ref. */
+  root: string;
+  /** Cache policy for served assets. Defaults to `no-cache` so module trees revalidate across upgrades. */
+  cacheControl?: string;
+}
+
 interface RouteAuthorizationMount {
   routeId: RouteId;
   path: string;
@@ -306,6 +318,11 @@ export interface GatewayOptions {
    * proxy resets this on every byte, so a live stream is never killed. Default 120_000 (120s). Set 0 to disable.
    */
   proxyIdleTimeoutMs?: number;
+  /**
+   * Provider-owned browser-client asset trees. This is static client hosting only; every capsule connection still
+   * goes through grant-verified route upgrades.
+   */
+  entrypointClientAssets?: EntrypointClientAssetMount[];
 }
 
 /** A parsed enrollment/handoff request body. `attestation` is enrollment; `assertion`/`path` are the handoff step-up. */
@@ -386,6 +403,8 @@ export class AccessGateway {
   private readonly proxyConnectTimeoutMs: number;
   /** The WS-proxy idle timeout (ms) applied to both proxied sockets — a stalled stream cannot pin fds. 0 disables. */
   private readonly proxyIdleTimeoutMs: number;
+  /** Provider browser-client assets served from local read-only roots, grouped by provider ref. */
+  private readonly entrypointClientAssets = new Map<string, EntrypointClientAssetMount[]>();
   /**
    * Delegated enrollment redirects consume the GLA grant before leaving this origin. The callback may finish only
    * once for a nonce recorded here; abandonment leaves the grant spent and the pending attempt harmlessly unusable.
@@ -409,6 +428,15 @@ export class AccessGateway {
     this.proxyConnectTimeoutMs = opts.proxyConnectTimeoutMs ?? 10_000;
     this.proxyIdleTimeoutMs = opts.proxyIdleTimeoutMs ?? 120_000;
     this.trustForwardedPrefix = opts.trustForwardedPrefix ?? false;
+    for (const mount of opts.entrypointClientAssets ?? []) {
+      const normalized = normalizeClientAssetMount(mount);
+      if (normalized === undefined) {
+        continue;
+      }
+      const existing = this.entrypointClientAssets.get(normalized.ref) ?? [];
+      existing.push(normalized);
+      this.entrypointClientAssets.set(normalized.ref, existing);
+    }
   }
 
   /** Start listening. Returns the actual bound `{ host, port }` (port is the ephemeral one when 0 was requested). */
@@ -568,8 +596,14 @@ export class AccessGateway {
           authCallbackPageHtml({
             enrollVerify: this.publicPath("/enroll/verify"),
             handoffVerify: this.publicPath("/handoff/auth/verify"),
+            clientAssets: this.publicPath("/handoff/client-assets"),
           }),
         );
+        return;
+      }
+
+      if (method === "GET" && path.startsWith("/handoff/client-assets/")) {
+        await this.handleClientAsset(path, res);
         return;
       }
 
@@ -836,6 +870,7 @@ export class AccessGateway {
           String(verified.recipient),
           this.publicPath(route.path),
           route.client,
+          this.publicPath("/handoff/client-assets"),
         ),
       );
       return;
@@ -848,6 +883,7 @@ export class AccessGateway {
         authOptions: this.publicPath("/handoff/auth/options"),
         authVerify: this.publicPath("/handoff/auth/verify"),
         stream: this.publicPath(route.path),
+        clientAssets: this.publicPath("/handoff/client-assets"),
         entrypointClient: route.client,
       }),
     );
@@ -1095,6 +1131,38 @@ export class AccessGateway {
       "x-content-type-options": "nosniff",
     });
     res.end(html);
+  }
+
+  private async handleClientAsset(path: string, res: ServerResponse): Promise<void> {
+    const asset = resolveClientAssetRequest(path, this.entrypointClientAssets);
+    if (asset === undefined) {
+      this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+      return;
+    }
+    try {
+      const root = await realpath(asset.root);
+      const file = await realpath(asset.path);
+      const rel = relative(root, file);
+      if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+        this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+        return;
+      }
+      const fileStat = await stat(file);
+      if (!fileStat.isFile()) {
+        this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+        return;
+      }
+      const body = await readFile(file);
+      res.writeHead(200, {
+        "content-type": contentTypeForPath(file),
+        "content-length": body.byteLength,
+        "cache-control": asset.cacheControl ?? "no-cache",
+        "x-content-type-options": "nosniff",
+      });
+      res.end(body);
+    } catch {
+      this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+    }
   }
 
   // ── handoff helpers ───────────────────────────────────────────────────────────────────────────────────
@@ -1493,6 +1561,96 @@ function layerError(layer: string, message: string): Error {
   err.layer = layer;
   err.detail = { layer };
   return err;
+}
+
+function normalizeClientAssetMount(
+  mount: EntrypointClientAssetMount,
+): EntrypointClientAssetMount | undefined {
+  if (!/^[a-zA-Z0-9._-]+$/.test(mount.ref)) {
+    return undefined;
+  }
+  const root = resolvePath(mount.root);
+  if (root.length === 0) {
+    return undefined;
+  }
+  return {
+    ref: mount.ref,
+    root,
+    ...(mount.cacheControl !== undefined ? { cacheControl: mount.cacheControl } : {}),
+  };
+}
+
+function resolveClientAssetRequest(
+  path: string,
+  mountsByRef: ReadonlyMap<string, readonly EntrypointClientAssetMount[]>,
+): { path: string; root: string; cacheControl?: string } | undefined {
+  const prefix = "/handoff/client-assets/";
+  if (!path.startsWith(prefix)) {
+    return undefined;
+  }
+  const rest = path.slice(prefix.length);
+  const slash = rest.indexOf("/");
+  if (slash <= 0) {
+    return undefined;
+  }
+  const ref = rest.slice(0, slash);
+  if (!/^[a-zA-Z0-9._-]+$/.test(ref)) {
+    return undefined;
+  }
+  const rawAssetPath = rest.slice(slash + 1);
+  const segments = rawAssetPath.split("/").flatMap((segment) => {
+    try {
+      const decoded = decodeURIComponent(segment);
+      return decoded.length === 0 ? [] : [decoded];
+    } catch {
+      return [".."];
+    }
+  });
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment === "." || segment === ".." || segment.includes("\0"))
+  ) {
+    return undefined;
+  }
+  for (const mount of mountsByRef.get(ref) ?? []) {
+    const root = resolvePath(mount.root);
+    const candidate = resolvePath(root, ...segments);
+    const rel = relative(root, candidate);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+      continue;
+    }
+    return {
+      path: candidate,
+      root,
+      ...(mount.cacheControl !== undefined ? { cacheControl: mount.cacheControl } : {}),
+    };
+  }
+  return undefined;
+}
+
+function contentTypeForPath(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+    case ".mjs":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".wasm":
+      return "application/wasm";
+    default:
+      return "application/octet-stream";
+  }
 }
 
 /** Parse a websocket-compatible endpoint into `{ host, port, path }`, or undefined if malformed. */

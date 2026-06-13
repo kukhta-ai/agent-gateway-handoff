@@ -5,7 +5,12 @@
 
 import { type RuntimeHandle, encodeRuntimeHandle } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
-import { EntrypointNovncAdapter } from "./index.js";
+import {
+  EntrypointNovncAdapter,
+  NOVNC_CLIENT_ASSET_REF,
+  RFB_WEB_CLIENT_KIND,
+  novncClientAssetMounts,
+} from "./index.js";
 
 describe("EntrypointNovncAdapter.open — mode-aware human entrypoint (GLA-023)", () => {
   it("FULL mode: returns the internal noVNC ws endpoint (the gateway proxies it in Slice 4)", async () => {
@@ -25,8 +30,20 @@ describe("EntrypointNovncAdapter.open — mode-aware human entrypoint (GLA-023)"
     });
     const out = await e.open(runtime);
     expect(out.resourceId).toBe("entrypoint:novnc:test");
+    expect(out.client).toMatchObject({
+      kind: RFB_WEB_CLIENT_KIND,
+      ref: NOVNC_CLIENT_ASSET_REF,
+      bootstrap: { module: "core/rfb.js" },
+    });
     expect(out.transport.upstream).toBe("ws://127.0.0.1:6080/");
     expect(e.isAvailable(runtime)).toBe(true);
+  });
+
+  it("resolves bundled noVNC RFB assets for the gateway's generic client-asset host", () => {
+    const mounts = novncClientAssetMounts({});
+    expect(mounts).toHaveLength(1);
+    expect(mounts[0]).toMatchObject({ ref: NOVNC_CLIENT_ASSET_REF, cacheControl: "no-cache" });
+    expect(mounts[0]?.root).toMatch(/@novnc[\/\\]novnc/);
   });
 
   it("HEADLESS mode: open throws dependency.unavailable (no human-view stack)", async () => {

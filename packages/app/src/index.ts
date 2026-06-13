@@ -39,7 +39,7 @@ import {
 import { CompletionService, type DetectorContract } from "@gla/completion";
 import { CONNECTOR_CDP_MODULE, ConnectorCdpAdapter } from "@gla/connector-cdp";
 import { DETECTOR_URL_MODULE, DETECTOR_URL_NAME, DetectorUrlAdapter } from "@gla/detector-url";
-import { EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
+import { EntrypointNovncAdapter, novncClientAssetMounts } from "@gla/entrypoint-novnc";
 import { AccessGateway } from "@gla/gateway";
 import { type EnrollmentRecord, IdentityService } from "@gla/identity";
 // Core / core-adjacent ports (the inward side of the seam):
@@ -611,6 +611,9 @@ export function createProvisioningBridge(
       // Provider-neutral assurance profile (default phishing-resistant): app translates deployment policy to the
       // gateway's common contract; gateway code never names provider method claims.
       ...(authAssurancePolicy !== undefined ? { authAssurancePolicy } : {}),
+      // The noVNC provider owns its browser client assets; the gateway only serves them through a generic static
+      // mount so session/capability/auth/core never learn noVNC details.
+      entrypointClientAssets: novncClientAssetMounts(),
     });
     route = new RouteController({ gateway });
     handoffDeps = {

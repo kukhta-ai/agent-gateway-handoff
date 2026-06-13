@@ -1,4 +1,5 @@
 import { ENROLL_REDIRECT_STORAGE_KEY } from "./enroll-page.js";
+import { handoffClientScript, handoffClientStyles, jsonScriptData } from "./handoff-page.js";
 
 /** Same-origin public paths the delegated-auth callback page calls back into. */
 export interface AuthCallbackPagePaths {
@@ -6,6 +7,8 @@ export interface AuthCallbackPagePaths {
   readonly enrollVerify: string;
   /** Same-origin path for handoff step-up completion. */
   readonly handoffVerify: string;
+  /** Same-origin path prefix serving provider-owned browser-client assets. */
+  readonly clientAssets?: string;
 }
 
 /**
@@ -16,7 +19,7 @@ export interface AuthCallbackPagePaths {
  * appears in the IdP-facing redirect URI.
  */
 export function authCallbackPageHtml(paths: AuthCallbackPagePaths): string {
-  const data = JSON.stringify({ paths });
+  const data = jsonScriptData({ paths });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -24,17 +27,16 @@ export function authCallbackPageHtml(paths: AuthCallbackPagePaths): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Completing sign-in — GLA</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
-  #status { margin-top: 1rem; min-height: 1.5rem; }
-  .ok { color: #137333; } .err { color: #b3261e; }
-  #screen { margin-top: 1rem; width: 100%; }
+${handoffClientStyles()}
 </style>
 </head>
 <body>
+<main class="shell">
 <h1>Completing sign-in</h1>
 <p>Returning to your secure GLA session.</p>
 <div id="status" role="status" aria-live="polite">Verifying…</div>
-<canvas id="screen" width="1024" height="768" hidden></canvas>
+<div id="viewer" aria-label="Live secure browser viewport" hidden></div>
+</main>
 <script id="callback-data" type="application/json">${data}</script>
 <script>
 (() => {
@@ -60,14 +62,7 @@ export function authCallbackPageHtml(paths: AuthCallbackPagePaths): string {
       return undefined;
     }
   };
-  const openStream = (ctx) => {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = proto + "//" + location.host + ctx.streamPath + "?grant=" + encodeURIComponent(ctx.grant);
-    const ws = new WebSocket(url);
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => say("✓ Connected. The secure session is now open.", "ok");
-    ws.onclose = () => say("The session was closed.", "err");
-  };
+${handoffClientScript()}
   const finishHandoff = async (ctx) => {
     const res = await fetch(cfg.paths.handoffVerify, {
       method: "POST",
@@ -79,7 +74,7 @@ export function authCallbackPageHtml(paths: AuthCallbackPagePaths): string {
       return;
     }
     try { sessionStorage.removeItem("gla.handoff"); } catch (e) {}
-    openStream(ctx);
+    await openEntrypointClient({ ...ctx, clientAssets: ctx.clientAssets || cfg.paths.clientAssets });
   };
   const finishEnroll = async (grant) => {
     const res = await fetch(cfg.paths.enrollVerify, {

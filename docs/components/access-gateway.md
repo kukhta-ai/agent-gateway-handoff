@@ -16,6 +16,8 @@ The Access Gateway is the user's policy-enforcement point and the only door open
 - Consult the revocation cache; force-close WebSockets when a grant is revoked.
 - Trigger recipient step-up via Identity + Auth when the reported auth assurance is insufficient for the selected deployment policy.
 - After authorization succeeds, proxy traffic using the route's reverse-proxy transport binding.
+- Serve provider-owned browser-client assets from configured same-origin static mounts. This is asset hosting only:
+  capsule traffic still starts only through a grant-verified route/upgrade.
 
 ## Interfaces
 
@@ -31,9 +33,13 @@ forward-auth. Such a proxy may be deployed as defense-in-depth before traffic re
 cookies, or an authentik browser session are not GLA grants and cannot satisfy the recipient caveat, route
 scope, TTL/revocation, enrollment, or assurance checks the Access Gateway owns.
 
+It does **not** own noVNC or any other Human Entrypoint provider. The selected provider declares browser-client
+metadata and assets; the gateway serves those assets by opaque provider `ref` and applies the same grant checks to
+the route transport. Adding a different entrypoint client must not add a new authorization branch.
+
 ## Entities & data
 
-Grant capabilities (verified), `RevocationEntry` cache, `Route` authorization state (path, grant, session/entrypoint resource), and a reverse-proxy transport binding (protocol + upstream).
+Grant capabilities (verified), `RevocationEntry` cache, `Route` authorization state (path, grant, session/entrypoint resource), a reverse-proxy transport binding (protocol + upstream), and provider browser-client asset mounts keyed by opaque client `ref`.
 
 ## In scenario 01
 
