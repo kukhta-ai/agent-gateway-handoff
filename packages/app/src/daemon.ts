@@ -25,7 +25,7 @@ import type { AgentBridge } from "@gla/bridge";
 import type { DependencyBinding } from "@gla/catalog";
 import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
-import { parsePublicBaseUrl } from "@gla/gateway";
+import { parsePublicBaseUrl, publicPath } from "@gla/gateway";
 import {
   AUTH_ASSURANCE_PROFILE_VALUES,
   type AuthAssuranceProfile,
@@ -37,9 +37,11 @@ import {
   parseAuthAssuranceProfile,
 } from "@gla/kernel";
 import {
+  type AuthDeploymentRole,
   type AuthDiagnostics,
   type AuthEnrollmentMethodPolicy,
   authEnrollmentDiagnostics,
+  parseAuthDeploymentRolesJson,
   parseAuthEnrollmentPolicyJson,
   withRecipientBindingDiagnostic,
 } from "./auth-enrollment-policy.js";
@@ -85,6 +87,10 @@ export interface ServeOptions {
    * evidence returned through the AuthProviderPort.
    */
   authEnrollmentPolicy?: AuthEnrollmentMethodPolicy;
+  /** Provider-extensible deployment-role evidence for auth diagnostics and edge-guard orientation. */
+  authDeploymentRoles?: AuthDeploymentRole[];
+  /** JSON form of {@link authDeploymentRoles}; accepted from env/flags for deployment templates. */
+  authDeploymentRolesJson?: string;
   /** The authentik OIDC issuer (only when `authProvider=authentik`), e.g. `https://idp.example/application/o/gla/`. */
   authentikIssuerUrl?: string;
   /** The authentik OIDC client/application id (the id_token audience). */
@@ -186,15 +192,18 @@ function authDiagnosticsInput(opts: {
   authProvider: "webauthn" | "authentik" | undefined;
   authAssuranceProfile: AuthAssuranceProfile | undefined;
   authEnrollmentPolicy: AuthEnrollmentMethodPolicy | undefined;
+  authDeploymentRoles: AuthDeploymentRole[] | undefined;
 }): {
   authProvider?: "webauthn" | "authentik";
   authAssuranceProfile?: AuthAssuranceProfile;
   enrollmentPolicy?: AuthEnrollmentMethodPolicy;
+  deploymentRoles?: AuthDeploymentRole[];
 } {
   const input: {
     authProvider?: "webauthn" | "authentik";
     authAssuranceProfile?: AuthAssuranceProfile;
     enrollmentPolicy?: AuthEnrollmentMethodPolicy;
+    deploymentRoles?: AuthDeploymentRole[];
   } = {};
   if (opts.authProvider !== undefined) {
     input.authProvider = opts.authProvider;
@@ -205,6 +214,9 @@ function authDiagnosticsInput(opts: {
   if (opts.authEnrollmentPolicy !== undefined) {
     input.enrollmentPolicy = opts.authEnrollmentPolicy;
   }
+  if (opts.authDeploymentRoles !== undefined) {
+    input.deploymentRoles = opts.authDeploymentRoles;
+  }
   return input;
 }
 
@@ -213,12 +225,14 @@ export function authAssuranceProviderDiagnostic(opts: {
   authProvider?: "webauthn" | "authentik";
   authAssuranceProfile?: AuthAssuranceProfile;
   authEnrollmentPolicy?: AuthEnrollmentMethodPolicy;
+  authDeploymentRoles?: AuthDeploymentRole[];
 }): string {
   const d = authEnrollmentDiagnostics(
     authDiagnosticsInput({
       authProvider: opts.authProvider,
       authAssuranceProfile: opts.authAssuranceProfile,
       authEnrollmentPolicy: opts.authEnrollmentPolicy,
+      authDeploymentRoles: opts.authDeploymentRoles,
     }),
   );
   if (d.concerns.length > 0) {
@@ -341,11 +355,17 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
           opts.authProvider ?? "webauthn",
         )
       : undefined);
+  const authDeploymentRoles =
+    opts.authDeploymentRoles ??
+    (opts.authDeploymentRolesJson !== undefined
+      ? parseAuthDeploymentRolesJson(opts.authDeploymentRolesJson)
+      : undefined);
   const authDiagnostics = authEnrollmentDiagnostics(
     authDiagnosticsInput({
       authProvider: opts.authProvider,
       authAssuranceProfile: opts.authAssuranceProfile,
       authEnrollmentPolicy,
+      authDeploymentRoles,
     }),
   );
 
@@ -430,6 +450,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   );
   log(`  auth assurance   : ${opts.authAssuranceProfile ?? DEFAULT_AUTH_ASSURANCE_PROFILE}`);
   log(`  auth enrollment  : ${authDiagnostics.summary}`);
+  log(`  auth edge guard  : ${authDiagnostics.edgeGuard.summary}`);
   for (const concern of authDiagnostics.concerns) {
     log(`  auth concern     : ${concern}`);
   }
@@ -576,7 +597,7 @@ function buildAuthentikConfig(
     opts.authentikRedirectUri === undefined
   ) {
     throw new Error(
-      `GLA_AUTH_PROVIDER=authentik requires the authentik OIDC config — missing: ${missing.join(", ")}`,
+      `GLA_AUTH_PROVIDER=authentik requires the authentik OIDC/callback config — missing: ${missing.join(", ")}. authentik proxy/forward-auth is optional outer protection and does not replace the required GLA_AUTHENTIK_* step-up config.`,
     );
   }
   const redirectBase = parsePublicBaseUrl(opts.authentikRedirectUri);
@@ -592,6 +613,12 @@ function buildAuthentikConfig(
   ) {
     throw new Error(
       "GLA_AUTHENTIK_REDIRECT_URI must be under GLA_PUBLIC_BASE_URL's path prefix so code/state return to GLA without leaking grants to authentik",
+    );
+  }
+  const expectedCallbackPath = publicPath(publicBase, "/auth/callback");
+  if (redirectBase.pathPrefix !== expectedCallbackPath) {
+    throw new Error(
+      `GLA_AUTHENTIK_REDIRECT_URI must land on the GLA gateway callback path ${expectedCallbackPath}; authentik proxy/outpost paths or arbitrary same-origin callbacks cannot complete grant-verified step-up/enrollment.`,
     );
   }
   return {
@@ -618,7 +645,7 @@ Usage:
             [--auth-provider <webauthn|authentik>] [--auth-assurance-policy <phishing-resistant|password-permitted>]
             [--authentik-issuer-url <url>] [--authentik-client-id <id>]
             [--authentik-client-secret <secret>] [--authentik-redirect-uri <url>] [--authentik-scopes <s>]
-            [--auth-enrollment-policy-json <json>]
+            [--auth-enrollment-policy-json <json>] [--auth-deployment-roles-json <json>]
 
 Binds:
   • the Access Gateway (PUBLIC) on  host:port           default 0.0.0.0:3000   (front with Caddy)
@@ -635,6 +662,7 @@ Auth assurance (--auth-assurance-policy, default phishing-resistant): unset dema
 Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_TRUST_FORWARDED_PREFIX,
   GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_WORKSPACE_ROOT, GLA_STATE_ROOT,
   GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY, GLA_AUTH_ENROLLMENT_POLICY_JSON,
+  GLA_AUTH_DEPLOYMENT_ROLES_JSON, GLA_AUTH_EDGE_GUARD_ROLES_JSON,
   GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET,
   GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
 
@@ -783,6 +811,13 @@ export function parseServeArgs(
       options.authProvider ?? "webauthn",
     );
   }
+  const authDeploymentRolesJson =
+    str("auth-deployment-roles-json", "GLA_AUTH_DEPLOYMENT_ROLES_JSON") ??
+    str("auth-edge-guard-roles-json", "GLA_AUTH_EDGE_GUARD_ROLES_JSON");
+  if (authDeploymentRolesJson !== undefined) {
+    options.authDeploymentRolesJson = authDeploymentRolesJson;
+    options.authDeploymentRoles = parseAuthDeploymentRolesJson(authDeploymentRolesJson);
+  }
   const launcher = str("launcher", "GLA_LAUNCHER_MODE");
   if (launcher !== undefined) {
     if (launcher !== "auto" && launcher !== "full" && launcher !== "headless") {
@@ -819,6 +854,12 @@ function assertUsableServeOption(name: string, value: unknown): void {
     for (const [index, item] of value.entries()) {
       assertUsableServeOption(`${name}[${index}]`, item);
     }
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [key, entry] of Object.entries(value)) {
+      assertUsableServeOption(`${name}.${key}`, entry);
+    }
   }
 }
 
@@ -833,6 +874,8 @@ function validateServeOptions(opts: ServeOptions): void {
   assertUsableServeOption("authentikRedirectUri", opts.authentikRedirectUri);
   assertUsableServeOption("authentikScopes", opts.authentikScopes);
   assertUsableServeOption("authEnrollmentPolicyJson", opts.authEnrollmentPolicyJson);
+  assertUsableServeOption("authDeploymentRolesJson", opts.authDeploymentRolesJson);
+  assertUsableServeOption("authDeploymentRoles", opts.authDeploymentRoles);
   assertUsableServeOption("rpID", opts.rpID);
   assertUsableServeOption("rpName", opts.rpName);
   assertUsableServeOption("expectedOrigin", opts.expectedOrigin);

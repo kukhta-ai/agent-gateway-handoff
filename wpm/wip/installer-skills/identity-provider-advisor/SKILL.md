@@ -84,6 +84,10 @@ Exactly one decision drives this bundle: **in-tree WebAuthn (the default) vs. de
   GLA-served callback under `GLA_PUBLIC_BASE_URL` (for example
   `https://gla.example/team-a/auth/callback` when `GLA_PUBLIC_BASE_URL=https://gla.example/team-a/`). The
   redirect URI must not point at authentik and must not carry the GLA grant.
+- Do not confuse this OIDC provider role with authentik proxy/forward-auth. Proxy/forward-auth can guard other
+  HTTP upstreams, or optionally pre-screen traffic before it reaches GLA, but it is not the GLA AuthProvider and
+  cannot replace GLA's grant/recipient/assurance checks. A deployment that only has authentik proxy configured
+  should either keep using the default WebAuthn provider intentionally or add the OIDC provider wiring above.
 
 ## How to add it
 

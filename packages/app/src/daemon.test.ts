@@ -70,6 +70,23 @@ const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
     { id: "primary-credential", choices: ["password", "webauthn-passkey", "oauth:github"] },
   ],
 });
+const AUTHENTIK_EDGE_GUARD_ROLES_JSON = JSON.stringify([
+  {
+    role: "authentik-forward-auth",
+    provider: "authentik",
+    mode: "forward-auth",
+    label: "authentik outpost in front of GLA",
+    optional: true,
+    publicSurface: "https://gla.example/team-a/",
+    providerEvidence: { outpost: "embedded", access_token: "EDGE_TOKEN_CANARY_087" },
+  },
+  {
+    role: "gla-oidc-provider",
+    provider: "authentik",
+    mode: "oidc-provider",
+    label: "GLA handoff step-up provider",
+  },
+]);
 
 function chromiumAvailable(): boolean {
   try {
@@ -349,7 +366,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     }
   });
 
-  it("authentik redirect URI must land on the configured GLA public base, not a different origin or prefix", async () => {
+  it("authentik redirect URI must land on the configured GLA gateway callback path", async () => {
     const common = {
       host: "127.0.0.1",
       port: 0,
@@ -367,6 +384,16 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     await expect(
       serve({ ...common, authentikRedirectUri: "https://gla.example/auth/callback" }),
     ).rejects.toThrow(/path prefix/i);
+    await expect(
+      serve({ ...common, authentikRedirectUri: "https://gla.example/team-a/outpost/callback" }),
+    ).rejects.toThrow(/GLA gateway callback path \/team-a\/auth\/callback/i);
+    await expect(
+      serve({
+        ...common,
+        publicBaseUrl: "https://gla.example/",
+        authentikRedirectUri: "https://gla.example/outpost.goauthentik.io/callback",
+      }),
+    ).rejects.toThrow(/GLA gateway callback path \/auth\/callback/i);
 
     const ok = await serve({
       ...common,
@@ -390,6 +417,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
       authentikClientId: "gla-client-canary",
       authentikClientSecret: secret,
       authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+      authDeploymentRolesJson: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
       dependencyBindings: referenceWpmDependencyBindings(),
       deliverySink: { write: () => {} },
       log: (line) => void logs.push(line),
@@ -400,11 +428,15 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     expect(text).toContain("https://gla.example/team-a/");
     expect(text).toContain("https://idp.example/application/o/gla/");
     expect(text).toContain("phishing-resistant");
+    expect(text).toMatch(/auth edge guard.*authentik.*outer guard/i);
+    expect(text).toContain("GLA still verifies handoff/enrollment grants");
+    expect(text).toContain("proxy session alone cannot bypass");
     expect(text).not.toContain(secret);
+    expect(text).not.toContain("EDGE_TOKEN_CANARY_087");
     expect(text).not.toContain("grant=");
   });
 
-  it("auth diagnostics over the local daemon socket expose the declared authentik enrollment policy", async () => {
+  it("auth diagnostics over the local daemon socket expose the declared authentik enrollment policy and edge guards", async () => {
     const secret = "CLIENT_SECRET_CANARY_085";
     const handle = await serve({
       host: "127.0.0.1",
@@ -418,6 +450,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
       authentikClientSecret: secret,
       authentikRedirectUri: "https://gla.example/team-a/auth/callback",
       authEnrollmentPolicyJson: AUTHENTIK_ENROLLMENT_POLICY_JSON,
+      authDeploymentRolesJson: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
       dependencyBindings: referenceWpmDependencyBindings(),
       deliverySink: { write: () => {} },
       log: () => {},
@@ -435,6 +468,12 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         externalSources?: Array<{ kind: string; name: string }>;
         optionalRecipientChoices?: Array<{ choices: string[] }>;
       };
+      deploymentRoles?: Array<{
+        role?: string;
+        recognizedRole?: string;
+        providerEvidence?: unknown;
+      }>;
+      edgeGuard?: { summary?: string };
       bindingSemantics?: { providerAccount?: string; glaBinding?: string };
     };
     expect(body.authProvider).toBe("authentik");
@@ -451,7 +490,15 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
       "webauthn-passkey",
     );
     expect(body.bindingSemantics?.providerAccount).toMatch(/not a GLA enrollment/i);
+    expect(body.deploymentRoles?.map((r) => r.role)).toEqual([
+      "authentik-forward-auth",
+      "gla-oidc-provider",
+    ]);
+    expect(body.deploymentRoles?.[0]?.recognizedRole).toBe("authentik-forward-auth");
+    expect(body.edgeGuard?.summary).toMatch(/GLA OIDC provider selected/i);
+    expect(diag.stdout).toContain("GLA still verifies handoff/enrollment grants");
     expect(diag.stdout).not.toContain(secret);
+    expect(diag.stdout).not.toContain("EDGE_TOKEN_CANARY_087");
 
     const scoped = await cliOverDaemon(handle.bridgeEndpoint, [
       "auth",
@@ -481,6 +528,30 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
       /does not make this recipient enrolled/i,
     );
     expect(scoped.stdout).not.toContain(secret);
+  });
+
+  it("auth diagnostics make proxy-only authentik deployments actionable without exposing secrets", async () => {
+    const handle = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: join(scratch("gla-auth-proxy-only-"), "gla.sock"),
+      publicBaseUrl: "https://gla.example/team-a/",
+      authProvider: "webauthn",
+      authDeploymentRolesJson: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: () => {},
+    });
+    liveHandles.push(handle);
+
+    const diag = await cliOverDaemon(handle.bridgeEndpoint, ["auth", "diagnostics"]);
+    expect(diag.code, diag.stderr).toBe(0);
+    expect(diag.stdout).toMatch(/outer proxy.*does not perform GLA handoff step-up/i);
+    expect(diag.stdout).toContain("GLA_AUTH_PROVIDER=authentik");
+    expect(diag.stdout).toContain("GLA_AUTHENTIK_ISSUER_URL");
+    expect(diag.stdout).toContain("GLA_AUTHENTIK_REDIRECT_URI");
+    expect(diag.stdout).toMatch(/intentionally.*WebAuthn/i);
+    expect(diag.stdout).not.toContain("EDGE_TOKEN_CANARY_087");
   });
 
   it("graceful shutdown closes BOTH listeners (gateway HTTP + bridge socket) and is idempotent", async () => {
@@ -616,6 +687,28 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
     }
   });
 
+  it("parses auth deployment roles from env and flags for auth diagnostics", () => {
+    const envParsed = parseServeArgs([], {
+      GLA_AUTH_DEPLOYMENT_ROLES_JSON: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
+    } as NodeJS.ProcessEnv);
+    expect(envParsed.help).toBe(false);
+    if (!envParsed.help) {
+      expect(envParsed.options.authDeploymentRoles?.map((r) => r.role)).toEqual([
+        "authentik-forward-auth",
+        "gla-oidc-provider",
+      ]);
+    }
+
+    const flagParsed = parseServeArgs(
+      ["--auth-edge-guard-roles-json", AUTHENTIK_EDGE_GUARD_ROLES_JSON],
+      {} as NodeJS.ProcessEnv,
+    );
+    expect(flagParsed.help).toBe(false);
+    if (!flagParsed.help) {
+      expect(flagParsed.options.authDeploymentRoles?.[0]?.mode).toBe("forward-auth");
+    }
+  });
+
   it("--help returns help; an invalid --port / --launcher throws a stable error", () => {
     expect(parseServeArgs(["--help"], {} as NodeJS.ProcessEnv)).toEqual({ help: true });
     expect(() => parseServeArgs(["--port", "notnum"], {} as NodeJS.ProcessEnv)).toThrow(/port/i);
@@ -700,7 +793,17 @@ describe("deployment templates — public base path guidance", () => {
       "utf8",
     );
     const coreAdvisor = readFileSync("wpm/wip/installer-skills/gla-core-advisor/SKILL.md", "utf8");
-    const combined = `${edge}\n${env}\n${edgeAdvisor}\n${coreAdvisor}`;
+    const identityAdvisor = readFileSync(
+      "wpm/wip/installer-skills/identity-provider-advisor/SKILL.md",
+      "utf8",
+    );
+    const callback = readFileSync(
+      "wpm/wip/bundles/identity-provider/payload/templates/caddy-authentik-callback.snippet",
+      "utf8",
+    );
+    const standup = readFileSync("docs/architecture/authentik-service-standup.md", "utf8");
+    const integration = readFileSync("docs/architecture/authentik-integration.md", "utf8");
+    const combined = `${edge}\n${env}\n${edgeAdvisor}\n${coreAdvisor}\n${identityAdvisor}\n${callback}\n${standup}\n${integration}`;
 
     expect(combined).toMatch(/GLA_PUBLIC_BASE_URL=https:\/\/gla\.example\//);
     expect(combined).toMatch(/GLA_PUBLIC_BASE_URL=https:\/\/gla\.example\/team-a\//);
@@ -712,6 +815,12 @@ describe("deployment templates — public base path guidance", () => {
     expect(combined).toMatch(
       /GLA_AUTHENTIK_REDIRECT_URI=https:\/\/gla\.example\/team-a\/auth\/callback/i,
     );
+    expect(combined).toMatch(/forward_auth/i);
+    expect(combined).toMatch(/\/outpost\.goauthentik\.io\/\*/i);
+    expect(combined).toMatch(/defense-in-depth/i);
+    expect(combined).toMatch(/not (a )?GLA grant/i);
+    expect(combined).toMatch(/GLA_AUTH_PROVIDER=authentik/i);
+    expect(combined).toMatch(/Agent Bridge[\s\S]*Never expose|bridge remains local-only/i);
   });
 });
 

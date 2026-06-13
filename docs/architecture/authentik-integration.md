@@ -371,6 +371,22 @@ today — it is always WebAuthn.** This design fixes the switch and the config i
 at authentik). The composition records the *chosen* adapter in its `Wiring.auth` field (today
 `AUTH_WEBAUTHN_MODULE`; under opt-in, `AUTH_AUTHENTIK_MODULE`) so the wiring record stays truthful.
 
+### §7.1 · Deployment role distinction — OIDC provider vs optional proxy/forward-auth
+
+authentik can appear in an operator's edge stack in two **different** roles, and only one of them satisfies
+GLA's handoff step-up contract:
+
+| Role | What it protects | Required for GLA handoff step-up? | Authorization owner |
+|---|---|---:|---|
+| **authentik as GLA OIDC provider** | The recipient authentication ceremony GLA delegates through `AuthProviderPort`: hosted login/enrollment, authorization-code callback, token/JWKS validation, `sub` binding, `amr`/`acr` evidence. | **Yes, when `GLA_AUTH_PROVIDER=authentik`.** | authentik authenticates the human and reports facts; **GLA Access Gateway** still decides whether a grant-bound handoff/enrollment may proceed. |
+| **authentik proxy / forward-auth / outpost** | HTTP applications sitting behind a reverse proxy, including other upstream apps or an optional outer guard in front of GLA's public routes. | **No.** It can be defense-in-depth only. | authentik/outpost may admit an outer browser session; **GLA Access Gateway** still verifies GLA grants, recipient caveats, route scope, TTL/revocation, and assurance before proxying a capsule route. |
+
+So a deployment that has only authentik proxy/forward-auth but leaves `GLA_AUTH_PROVIDER` at the default
+`webauthn` has **not** configured authentik as GLA's identity provider. Conversely, a deployment may use both:
+Caddy can call authentik forward-auth before sending traffic to GLA, while GLA still performs the recipient-bound
+grant check and, when selected, redirects to authentik through the OIDC provider flow above. A valid authentik
+proxy cookie/header/session is never a GLA grant, never a recipient binding, and never a capsule-route bypass.
+
 > **Invariant honored:** changing the provider is *install/select a different plugin* with **no core /
 > `gla`-command change** (`docs/03 §13`, `baseline.md §6`). The default is unchanged; the opt-in is a single
 > env switch at the one composition root that is already the sole adapter-importing package.
@@ -437,10 +453,16 @@ the adapter build; the table lists one **legal serialization**.
    host Caddy** as the gateway and under `GLA_PUBLIC_BASE_URL` (for example `/auth/callback`, or
    `/team-a/auth/callback` for a subpath). The **bridge** stays local (`daemon.ts` S-6 guard); the callback is a
    public gateway page, never the local bridge.
-5. **Confidential-client secret handling.** `GLA_AUTHENTIK_CLIENT_SECRET` is `sensitive` — held as a
+5. **authentik proxy/forward-auth confusion.** authentik's proxy provider and forward-auth modes are valid
+   exposure-layer tools for upstream applications, but they are **not** the GLA `AuthProviderPort`. If an
+   operator declares proxy/forward-auth without `GLA_AUTH_PROVIDER=authentik` plus the OIDC issuer/client/
+   callback wiring above, diagnostics must say that authentik is only an outer guard and cannot complete GLA
+   handoff step-up. If both are configured, gateway tests must keep proving proxy headers/cookies cannot
+   authorize a handoff without a valid GLA grant and recipient binding.
+6. **Confidential-client secret handling.** `GLA_AUTHENTIK_CLIENT_SECRET` is `sensitive` — held as a
    secret-ref, never logged, never in the audit trail (`kernel-contracts.md §1.7` redaction, `§4` `sensitive`).
    GLA-068 must route it through the secret seam, not a plain env echo.
-6. **Provider availability fail-closed.** A down authentik (`server`/`worker`/Postgres/Redis) must surface as
+7. **Provider availability fail-closed.** A down authentik (`server`/`worker`/Postgres/Redis) must surface as
    `dependency.unavailable` at step-up (the gateway already maps a provider failure to a catchable refusal,
    `see packages/gateway/src/index.ts`), and the `DependencyBinding` probe must show `unavailable` — never a
    silent pass. GLA-076 must cover the down-provider path.
@@ -466,7 +488,10 @@ the adapter build; the table lists one **legal serialization**.
    `packages/app` composition root, with the authentik OIDC config (issuer / client id / client secret /
    redirect URI), and deployment strength is selected through **`GLA_AUTH_ASSURANCE_POLICY`**
    (`phishing-resistant` default, `password-permitted` explicit fallback) (**§7**).
-7. A valid **build order** — 068 → 070 → 072 → 074 → 076, each preceded by 069/071/073/075 — consistent with
+7. authentik proxy/forward-auth is an **optional outer application guard**, not the GLA delegated-identity
+   provider. It may wrap GLA's public routes, but it never replaces Access Gateway grant/recipient checks or the
+   OIDC provider wiring required for delegated step-up (**§7.1**).
+8. A valid **build order** — 068 → 070 → 072 → 074 → 076, each preceded by 069/071/073/075 — consistent with
    the dependency graph (**§8**).
 
 ## Related

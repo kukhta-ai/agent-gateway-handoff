@@ -273,6 +273,42 @@ remains the authorization membrane for grants, recipient caveats, auth assurance
 > it, and browser referrers are disabled on GLA HTML. (This is the security property
 > `authentik-dual-method-flow.md §8.3/§8.5` requires the review to confirm.)
 
+### §5.2 · Route ownership and optional authentik proxy/forward-auth
+
+authentik's proxy provider / forward-auth mode is a **separate exposure-layer role** from the OIDC provider GLA
+uses for step-up. It can guard other upstream applications, and an operator may also place it in front of GLA as
+defense-in-depth. It does **not** replace the GLA OIDC configuration, and it does **not** authorize a capsule
+route.
+
+| Surface | Public? | Typical root shape | Subpath shape | Owner of the authorization decision |
+|---|---:|---|---|---|
+| Caddy / exposure layer | yes | `https://gla.example/` → GLA gateway upstream | `https://gla.example/team-a/*` → GLA gateway upstream, prefix preserved or sanitized `X-Forwarded-Prefix` | Caddy owns TLS and path routing only. Optional authentik forward-auth may pre-screen the browser, but does not decide GLA handoff authorization. |
+| GLA public gateway | yes, under `GLA_PUBLIC_BASE_URL` only | `/enroll`, `/auth/callback`, `/handoff/auth/*`, `/handoff/<id>` | `/team-a/enroll`, `/team-a/auth/callback`, `/team-a/handoff/auth/*`, `/team-a/handoff/<id>` | **GLA Access Gateway** verifies grants, recipient caveats, TTL/revocation, route scope, enrollment state, and selected auth assurance. |
+| authentik OIDC issuer | yes, usually a separate origin | `https://idp.example/application/o/gla/...` | same, unless the operator deliberately hosts authentik under its own routed prefix | authentik authenticates the human and emits OIDC facts (`sub`, `amr`/`acr`, tokens). GLA validates and decides. |
+| GLA OIDC callback | yes, but only as a GLA gateway page | `https://gla.example/auth/callback` | `https://gla.example/team-a/auth/callback` | GLA callback page restores same-origin state and reposts to GLA verify routes; authentik sees only OIDC `code/state`. |
+| authentik proxy/outpost | optional public edge endpoint | `/outpost.goauthentik.io/*` or a proxy host chosen by the operator | same under the operator's exposure layout | authentik/outpost owns only the outer application-session check. It cannot mint or verify GLA grants. |
+| Agent Bridge | no | Unix socket or loopback endpoint | same | Local operator/agent surface; daemon refuses non-local bridge binds. Never expose through Caddy or authentik. |
+| Capsule human entrypoint / noVNC / websockify / CDP | no | internal worker/capsule addresses only | same | Reached only through an authorized GLA gateway route/WS upgrade. Never publish directly. |
+| authentik worker/database/Redis | no | authentik-internal network/volumes | same | authentik service internals; GLA dials only the OIDC issuer endpoints. |
+
+Supported deployment examples:
+
+- **Root + separate IdP domain:** `GLA_PUBLIC_BASE_URL=https://gla.example/`,
+  `GLA_AUTHENTIK_REDIRECT_URI=https://gla.example/auth/callback`,
+  `GLA_AUTHENTIK_ISSUER_URL=https://idp.example/application/o/gla/`.
+- **Subpath + separate IdP domain:** `GLA_PUBLIC_BASE_URL=https://gla.example/team-a/`,
+  `GLA_AUTHENTIK_REDIRECT_URI=https://gla.example/team-a/auth/callback`,
+  `GLA_AUTHENTIK_ISSUER_URL=https://idp.example/application/o/gla/`. If the proxy strips `/team-a`, it must set
+  sanitized `X-Forwarded-Prefix: /team-a` and GLA must set `GLA_TRUST_FORWARDED_PREFIX=true`; prefix-preserving
+  proxies should leave the trust flag false.
+- **Optional forward-auth wrapper:** Caddy may route `/outpost.goauthentik.io/*` to an authentik outpost and use
+  `forward_auth` before `reverse_proxy` to the GLA gateway. This proves only an outer authentik browser session;
+  GLA still requires a valid GLA grant and, when selected, the OIDC provider wiring above.
+
+Unsupported examples: callback URL on authentik's origin, direct public bridge socket/TCP bridge, direct public
+noVNC/websockify/CDP endpoints, direct public host/container forwards to private daemon internals, or treating
+`X-Authentik-*`/outpost cookies as GLA grants.
+
 ---
 
 ## §6 · The in-tree WebAuthn default needs NONE of this (AC #5)

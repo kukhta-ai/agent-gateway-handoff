@@ -16,6 +16,7 @@ import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { describe, expect, it } from "vitest";
 import {
   authEnrollmentDiagnostics,
+  parseAuthDeploymentRolesJson,
   parseAuthEnrollmentPolicyJson,
 } from "./auth-enrollment-policy.js";
 import { authAssuranceProviderDiagnostic, parseServeArgs } from "./daemon.js";
@@ -95,6 +96,25 @@ const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
   ],
   notes: ["WPM verified invitation flow exposes password, passkey, and OAuth source choices."],
 });
+
+const AUTHENTIK_EDGE_GUARD_ROLES_JSON = JSON.stringify([
+  {
+    role: "authentik-forward-auth",
+    provider: "authentik",
+    mode: "forward-auth",
+    label: "authentik outpost in front of GLA",
+    optional: true,
+    publicSurface: "https://gla.example/team-a/",
+    providerEvidence: { outpost: "embedded", access_token: "EDGE_TOKEN_CANARY_087" },
+  },
+  {
+    role: "future-zero-trust-edge",
+    provider: "future-idp",
+    mode: "browser-session-guard",
+    label: "future outer guard",
+    optional: true,
+  },
+]);
 
 function repoRootFromHere(): string {
   const here = fileURLToPath(import.meta.url);
@@ -257,6 +277,29 @@ describe("AC#6 · daemon parseServeArgs threads the provider switch + the authen
     }
   });
 
+  it("parses provider-extensible deployment roles from env and flags without closing the role vocabulary", () => {
+    const envParsed = parseServeArgs([], {
+      GLA_AUTH_DEPLOYMENT_ROLES_JSON: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
+    } as NodeJS.ProcessEnv);
+    expect(envParsed.help).toBe(false);
+    if (!envParsed.help) {
+      expect(envParsed.options.authDeploymentRoles?.map((r) => r.role)).toEqual([
+        "authentik-forward-auth",
+        "future-zero-trust-edge",
+      ]);
+      expect(envParsed.options.authDeploymentRoles?.[1]?.provider).toBe("future-idp");
+    }
+
+    const flagParsed = parseServeArgs(
+      ["--auth-deployment-roles-json", AUTHENTIK_EDGE_GUARD_ROLES_JSON],
+      {} as NodeJS.ProcessEnv,
+    );
+    expect(flagParsed.help).toBe(false);
+    if (!flagParsed.help) {
+      expect(flagParsed.options.authDeploymentRoles?.[0]?.mode).toBe("forward-auth");
+    }
+  });
+
   it("an invalid --auth-assurance-policy throws a stable actionable error", () => {
     expect(() =>
       parseServeArgs(["--auth-assurance-policy", "totp"], {} as NodeJS.ProcessEnv),
@@ -322,6 +365,43 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
     ]);
     expect(d.bindingSemantics.providerAccount).toMatch(/not a GLA enrollment/i);
     expect(d.actions.join("\n")).toMatch(/MFA\/recovery factors as provider evidence/i);
+  });
+
+  it("flags authentik proxy/forward-auth as an outer guard when GLA OIDC is not selected", () => {
+    const deploymentRoles = parseAuthDeploymentRolesJson(AUTHENTIK_EDGE_GUARD_ROLES_JSON);
+    const d = authEnrollmentDiagnostics({
+      authProvider: "webauthn",
+      deploymentRoles,
+    });
+    expect(d.deploymentRoles.map((r) => r.role)).toEqual([
+      "authentik-forward-auth",
+      "future-zero-trust-edge",
+    ]);
+    expect(d.deploymentRoles[0]?.recognizedRole).toBe("authentik-forward-auth");
+    expect(d.deploymentRoles[1]?.recognizedRole).toBe("other");
+    expect(d.edgeGuard.summary).toMatch(/authentik.*outer guard/i);
+    expect(d.concerns.join("\n")).toMatch(/outer proxy.*does not perform GLA handoff step-up/i);
+    expect(d.actions.join("\n")).toMatch(/GLA_AUTH_PROVIDER=authentik/i);
+    expect(d.actions.join("\n")).toMatch(/GLA_AUTHENTIK_ISSUER_URL/i);
+    expect(d.actions.join("\n")).toMatch(/GLA_AUTHENTIK_REDIRECT_URI/i);
+    expect(d.actions.join("\n")).toMatch(/intentionally.*WebAuthn/i);
+  });
+
+  it("reports authentik proxy/forward-auth plus OIDC as defense-in-depth, not a bypass of GLA grants", () => {
+    const policy = parseAuthEnrollmentPolicyJson(AUTHENTIK_ENROLLMENT_POLICY_JSON, "authentik");
+    const deploymentRoles = parseAuthDeploymentRolesJson(AUTHENTIK_EDGE_GUARD_ROLES_JSON);
+    const d = authEnrollmentDiagnostics({
+      authProvider: "authentik",
+      authAssuranceProfile: "phishing-resistant",
+      enrollmentPolicy: policy,
+      deploymentRoles,
+    });
+    expect(d.concerns).toEqual([]);
+    expect(d.edgeGuard.summary).toMatch(/GLA OIDC provider selected/i);
+    expect(d.actions.join("\n")).toMatch(/GLA still verifies handoff\/enrollment grants/i);
+    expect(d.actions.join("\n")).toMatch(/proxy session alone cannot bypass/i);
+    expect(JSON.stringify(d)).not.toContain("EDGE_TOKEN_CANARY_087");
+    expect(JSON.stringify(d)).toContain("<redacted>");
   });
 
   it("flags a password-only authentik policy before relying on phishing-resistant handoff", () => {

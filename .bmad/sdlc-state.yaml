@@ -4,15 +4,15 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — ready for next backlog task"
+phase_name: "Autonomous build — authentik hardening backlog"
 branch: feature/authentik
 epic: authentik-hardening-077-094
 active_story: null
-review_cycle: 2
+review_cycle: 1
 follow_on_scope:
   tasks: "GLA-077..GLA-094"
   branch_base: "feature/authentik"
-  next_ready_sequence: "GLA-087, GLA-088, GLA-089, GLA-090, GLA-091, GLA-092, GLA-094; then GLA-077/086; then GLA-093"
+  next_ready_sequence: "GLA-088, GLA-089, GLA-090, GLA-091, GLA-092, GLA-094; then GLA-077/086; then GLA-093"
   note: "2026-06-12 user goal: implement backlog 077-094 according to project SDLC, architecture, and vision; first initialize persistent Codex-native specialists."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
@@ -78,11 +78,11 @@ specialists:
   analyst:      {spawned: true, id: "019ebe27-1609-7391-80a3-45fca1a78f9b", open: false, resumable: true, role: "product brief / requirements conformance", last_skill: "bmad-product-brief loaded; init only; no workflow run"}
   pm:           {spawned: true, id: "019ebe27-164c-7230-bf2a-28a944582133", open: false, resumable: true, role: "PRD / plan-of-record conformance", last_skill: "bmad-prd loaded; init only; no workflow run"}
   ux-designer:  {spawned: true, id: "019ebe27-1674-76b0-8420-f493ce2d0a6b", open: false, resumable: true, role: "UX spec for capsule/access surfaces", last_skill: "bmad-ux loaded; init only; no artifact produced"}
-  architect:    {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: false, resumable: true, role: "architecture baseline + epics/stories + readiness", last_skill: "bmad-create-architecture for GLA-082 loaded; docs-driven fallback recorded after specialist artifact was unavailable"}
-  tea:          {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test design / trace / NFR / quality gate", last_skill: "GLA-085 TEA/security review found no blockers after delegated-grant lifecycle fixes; final pnpm gate passed"}
+  architect:    {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: false, resumable: true, role: "architecture baseline + epics/stories + readiness", last_skill: "GLA-087 authentik edge-guard seam review; clarified OIDC-provider vs proxy/forward-auth roles"}
+  tea:          {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test design / trace / NFR / quality gate", last_skill: "GLA-087 TEA/security review PASS; final pnpm gate passed"}
   sm:           {spawned: true, id: "019ebe27-1702-75a3-b8de-ab1c33162e33", open: true, resumable: true, role: "sprint setup + create-story", last_skill: "bmad-create-story loaded; task order verified; init only"}
-  worker:       {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation + E2E generation", last_skill: "bmad-create-story + bmad-dev-story loaded for GLA-085; implementation completed; pnpm gate passed"}
-  reviewer:     {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "separate-lane story review", last_skill: "GLA-085 story review approved after delegated-grant and referrer-leak blockers were fixed"}
+  worker:       {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation + E2E generation", last_skill: "GLA-087 bmad-create-story + bmad-dev-story; implementation completed; pnpm gate passed"}
+  reviewer:     {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "separate-lane story review", last_skill: "GLA-087 story-automator review requested story metadata correction only; source review clean"}
   investigator: {spawned: true, id: "019ebe2c-d1e4-7c80-958e-dcab9457d9e4", open: true, resumable: true, role: "systematic debugging at the epic gate", last_skill: "bmad-investigate loaded and workflow resolved; init only"}
   retro:        {spawned: true, id: "019ebe2c-d23e-7520-85b7-3e08ad373179", open: true, resumable: true, role: "epic retrospective", last_skill: "bmad-retrospective loaded and workflow resolved; init only"}
 specialist_runtime_note: "Collaboration limit allows six open agents. Analyst/PM/UX/architect were initialized, then closed to free capacity; their IDs remain resumable."

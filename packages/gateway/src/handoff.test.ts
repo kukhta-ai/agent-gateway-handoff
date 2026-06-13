@@ -37,6 +37,11 @@ const recipient = "tg:user:123" as RecipientRef;
 const GRANT_ID = "cap_grant1" as CapabilityId;
 const SESS = "sess_abc1" as SessionId;
 const ROUTE_PATH = `/handoff/${SESS}`;
+const OUTER_PROXY_HEADERS = {
+  "X-Outer-Proxy-User": "recipient@example.com",
+  "X-Outer-Proxy-Groups": "gla-users",
+  Cookie: "outer_proxy_session=outer-session",
+};
 
 /**
  * A stub handoff-grant seam: a `valid` token verifies (reporting `recipient` + the grant id); anything else fails
@@ -365,6 +370,26 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     const res = await fetch(`${base}${ROUTE_PATH}`);
     expect(res.status).toBe(400);
     expect(await res.text()).toMatch(/invalid|expired|recipient/i);
+  });
+
+  it("outer proxy headers/cookies do not replace the GLA handoff grant", async () => {
+    const stepUp = new StubStepUp();
+    const { base, gateway, close } = await bootHandoffGateway(new StubSessionGrants(), stepUp);
+    closers.push(close);
+    await gateway.mount(mountReq("ws://127.0.0.1:1/"));
+
+    const page = await fetch(`${base}${ROUTE_PATH}`, {
+      headers: OUTER_PROXY_HEADERS,
+    });
+    expect(page.status).toBe(400);
+
+    const options = await fetch(`${base}/handoff/auth/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...OUTER_PROXY_HEADERS },
+      body: JSON.stringify({ path: ROUTE_PATH }),
+    });
+    expect(options.status).toBe(400);
+    expect(stepUp.optionsCalls).toBe(0);
   });
 
   it("a request to an UNMOUNTED path → 404 (reachable only within an open window — GLA-039 AC#2)", async () => {
@@ -735,6 +760,22 @@ describe("Access Gateway — WS upgrade proxy to the capsule (GLA-038/039)", () 
     const up = await openUpgrade(host, port, ROUTE_PATH, "valid");
     expect(up.firstChunk).toMatch(/401/);
     expect(up.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+  });
+
+  it("an outer proxy session alone does not authorize the handoff WebSocket upgrade", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const { host, port, gateway, close } = await bootHandoffGateway(
+      new StubSessionGrants(),
+      new StubStepUp(),
+    );
+    closers.push(close);
+    await gateway.mount(mountReq(upstream.endpoint));
+
+    const up = await openUpgrade(host, port, ROUTE_PATH, "valid", OUTER_PROXY_HEADERS);
+    expect(up.firstChunk).toMatch(/401/);
+    expect(up.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+    up.socket.destroy();
   });
 
   it("a WRONG-RECIPIENT grant upgrade is REFUSED at the edge (GLA-035 AC#3)", async () => {

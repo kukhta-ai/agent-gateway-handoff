@@ -79,6 +79,10 @@ rest are resolvable prerequisites, not blockers.
   on GLA's public base, e.g.
   `GLA_AUTHENTIK_REDIRECT_URI=https://gla.example/team-a/auth/callback`. That callback is routed to GLA, not
   authentik, so authentik sees OIDC `code`/`state` only and never the GLA grant.
+- **Optional authentik proxy/forward-auth role.** This is separate from the delegated OIDC provider above. It
+  may wrap GLA's public HTTP routes as an outer browser-session guard, but it cannot authorize GLA handoff or
+  enrollment and it does not remove the need for `GLA_AUTH_PROVIDER=authentik` plus `GLA_AUTHENTIK_*` when
+  authentik is the selected step-up provider. The bridge remains local-only and private either way.
 - **Supervisor scope.** User-scope systemd (least privilege; socket at `/run/user/<uid>/gla.sock`, needs
   lingering) vs system-scope (needs root; set `User=`/`Group=` and a fixed bridge socket) vs a documented
   foreground run command where no supervisor exists.
