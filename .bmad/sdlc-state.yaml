@@ -4,11 +4,11 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — authentik hardening backlog"
-branch: feature/authentik
+phase_name: "Autonomous build — GLA-088 runtime connector/entrypoint contracts"
+branch: feature/authentik-task-088
 epic: authentik-hardening-077-094
-active_story: null
-review_cycle: 1
+active_story: GLA-088
+review_cycle: 0
 follow_on_scope:
   tasks: "GLA-077..GLA-094"
   branch_base: "feature/authentik"

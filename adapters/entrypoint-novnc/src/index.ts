@@ -14,10 +14,12 @@
 // adapter; the boundary lint forbids adapter→adapter). It is injected at `app`; core never imports it.
 
 import {
+  type HumanEntrypointBinding,
   type HumanEntrypointPort,
   type RuntimeHandle,
   decodeRuntimeHandle,
   glaError,
+  runtimeEndpoint,
 } from "@gla/kernel";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
@@ -39,30 +41,53 @@ export class EntrypointNovncAdapter implements HumanEntrypointPort {
    * gateway proxies. Throws `dependency.unavailable` when the capsule is headless (no noVNC endpoint on
    * the runtime) — the honest "this path is unavailable in this mode" the worker degrades on.
    */
-  async open(handle: RuntimeHandle): Promise<{ internalEndpoint: string }> {
+  async open(handle: RuntimeHandle): Promise<HumanEntrypointBinding> {
     const runtime = decodeRuntimeHandle(handle);
     if (runtime === undefined) {
       throw glaError("state.no_live_capsule", "no live capsule to open a human entrypoint on", {});
     }
-    const novnc = typeof runtime.novncEndpoint === "string" ? runtime.novncEndpoint : undefined;
-    if (runtime.mode === "headless" || novnc === undefined) {
+    const endpoint = runtimeEndpoint(runtime, {
+      family: "human-entrypoint",
+      provider: "novnc",
+      transport: "websocket",
+    });
+    const novnc = typeof endpoint?.address === "string" ? endpoint.address : undefined;
+    const launchMode =
+      typeof runtime.launchMode === "string"
+        ? runtime.launchMode
+        : typeof runtime.mode === "string"
+          ? runtime.mode
+          : undefined;
+    if (launchMode === "headless" || endpoint === undefined || novnc === undefined) {
       // Headless: no human-view stack → the noVNC entrypoint is unavailable. Real in hermes-1 (full mode).
       throw glaError(
         "dependency.unavailable",
         "noVNC human entrypoint is unavailable in headless mode (no human-view stack)",
-        { detail: { mode: runtime.mode } },
+        { detail: { mode: launchMode } },
       );
     }
-    return { internalEndpoint: novnc };
+    return {
+      resourceId: endpoint.resourceId,
+      provider: endpoint.provider,
+      client: endpoint.client ?? { kind: "gateway-page", ref: "handoff" },
+      transport: { kind: "reverse-proxy", protocol: "websocket", upstream: novnc },
+    };
   }
 
   /** Is a human entrypoint available for this runtime? (Convenience for the worker / a probe.) */
   isAvailable(handle: RuntimeHandle): boolean {
     const runtime = decodeRuntimeHandle(handle);
+    const endpoint = runtimeEndpoint(runtime, {
+      family: "human-entrypoint",
+      provider: "novnc",
+      transport: "websocket",
+    });
     return (
-      runtime !== undefined && runtime.mode === "full" && typeof runtime.novncEndpoint === "string"
+      runtime !== undefined &&
+      runtime.launchMode === "full" &&
+      typeof endpoint?.address === "string"
     );
   }
 }
 
-export type { HumanEntrypointPort, RuntimeHandle };
+export type { HumanEntrypointBinding, HumanEntrypointPort, RuntimeHandle };

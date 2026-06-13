@@ -14,13 +14,13 @@ The Worker plane is where capsules actually run. It hides the choice of isolatio
 
 - **Spawner Registry** — the abstract spawner interface and its concrete launchers (start with `local-process` and `container`; add `systemd-user`, `rootless`, `remote-worker` only as providers demand); each launcher declares its **mount capability** — which host mounts it can realize (file / directory, `ro`/`rw`, or none for a remote worker).
 - **Capsule Lifecycle Manager** — spawn → health-probe → stop; per-session runtime tracking; orphan detection.
-- **Workspace Manager** — realize the declared workspace strategy (e.g. `browser-profile-temp`) and the agent's requested host mounts (with the agent's *own* authority, within the operator allowed-set — `../04-capsule-assembly.md` §6), enforce path-safety, reap the capsule's own ephemeral materials.
+- **Workspace Manager** — realize the declared workspace strategy (e.g. `browser-profile-temp`) and the agent's requested host mounts (with the agent's *own* authority, within the operator allowed-set — `../04-capsule-assembly.md` §6), enforce path-safety, reap the capsule's own ephemeral materials. It does not invent a default workspace at realization time; missing resolved workspace state is a typed fail-closed dependency error before host mutation.
 - **Cleanup Reconciler** — idempotent, restart-safe teardown of terminal sessions; periodic orphan scans; terminal audit emission.
 
 ## Interfaces
 
 **Receives** — from the Session service: spawn/attach/stop a capsule for a given assembly.
-**Produces** — a runtime handle back to the Session service; a running capsule; teardown + audit on completion.
+**Produces** — a runtime handle back to the Session service; a running capsule; teardown + audit on completion. Runtime handles publish provider-neutral endpoint descriptors for agent connectors and human entrypoints; launcher-private process details remain opaque.
 
 ## What it does NOT do
 
@@ -36,7 +36,7 @@ Phase 3 — spawns the browser capsule (temp profile, isolation tier) and return
 
 ## Failure modes
 
-Spawn failure → session `failed`, contained. A health-probe failure → the lifecycle manager stops/replaces the runtime. The cleanup reconciler is idempotent and restart-safe, so a crash mid-teardown converges on a clean state.
+Missing workspace/provider resolution → typed `dependency.unavailable` before the workspace adapter or launcher mutates the host. Spawn failure → session `failed`, contained. A health-probe failure → the lifecycle manager stops/replaces the runtime. The cleanup reconciler is idempotent and restart-safe, so a crash mid-teardown converges on a clean state.
 
 ## Invariants
 

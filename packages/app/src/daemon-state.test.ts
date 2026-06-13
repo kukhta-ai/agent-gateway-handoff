@@ -122,6 +122,7 @@ function resolvedSpec(): ResolvedAssemblySpec {
       template: "browser-handoff",
       recipient: "tg:user:123" as RecipientRef,
       launcher: { use: "launcher-process" },
+      workspace: { use: "browser-profile-temp" },
     },
     __resolved: true,
   };
@@ -135,7 +136,17 @@ class StubLauncher implements LauncherPort {
 
   async spawn(_spec: ResolvedAssemblySpec, _uid: number): Promise<RuntimeHandle> {
     return JSON.stringify({
+      launchMode: "headless",
       cdpWebSocketUrl: "ws://127.0.0.1:777/devtools",
+      endpoints: [
+        {
+          resourceId: "connector:daemon-state",
+          family: "agent-connector",
+          provider: "fake-cdp",
+          transport: "websocket",
+          address: "ws://127.0.0.1:777/devtools",
+        },
+      ],
       pid: 777,
     }) as RuntimeHandle;
   }
@@ -538,14 +549,35 @@ describe("restart-safe security state wiring", () => {
       worker: {
         spawn: async () => ({
           runtime: JSON.stringify({
+            launchMode: "headless",
             cdpWebSocketUrl: "ws://127.0.0.1:777/devtools",
+            endpoints: [
+              {
+                resourceId: "connector:daemon-restart",
+                family: "agent-connector",
+                provider: "fake-cdp",
+                transport: "websocket",
+                address: "ws://127.0.0.1:777/devtools",
+              },
+            ],
           }) as RuntimeHandle,
           launcherName: "launcher-process",
         }),
         teardown: async () => undefined,
         hasLive: () => true,
         runtimeOf: () =>
-          JSON.stringify({ cdpWebSocketUrl: "ws://127.0.0.1:777/devtools" }) as RuntimeHandle,
+          JSON.stringify({
+            launchMode: "headless",
+            endpoints: [
+              {
+                resourceId: "connector:daemon-restart",
+                family: "agent-connector",
+                provider: "fake-cdp",
+                transport: "websocket",
+                address: "ws://127.0.0.1:777/devtools",
+              },
+            ],
+          }) as RuntimeHandle,
       },
       capability: {
         mintConnector: async () => ({
@@ -558,7 +590,9 @@ describe("restart-safe security state wiring", () => {
       },
       connector: {
         attach: async () => ({
-          type: "cdp",
+          type: "fake-cdp",
+          provider: "fake-cdp",
+          resourceId: "connector:daemon-restart",
           cdp_url: "ws://127.0.0.1:777/devtools",
           secret_ref: "cap_connector" as never,
         }),
@@ -581,18 +615,29 @@ describe("restart-safe security state wiring", () => {
         },
       },
       route: {
-        program: async () => ({
+        program: async (_window, grantId, entrypoint, path) => ({
           id: "route_restart" as never,
-          path: "/handoff/sess_restart",
-          internalEndpoint: "ws://127.0.0.1:5901",
-          boundGrantId: "cap_handoff" as never,
+          path: path ?? "/handoff/sess_restart",
+          entrypointResourceId: entrypoint.resourceId,
+          client: entrypoint.client,
+          transport: entrypoint.transport,
+          boundGrantId: grantId,
         }),
         unmount: async () => {
           handoffRouteUnmounted = true;
         },
       },
       entrypoint: {
-        open: async () => ({ internalEndpoint: "ws://127.0.0.1:5901" }),
+        open: async () => ({
+          resourceId: "entrypoint:daemon-restart",
+          provider: "fake-view",
+          client: { kind: "provider-asset", ref: "fake-viewer" },
+          transport: {
+            kind: "reverse-proxy" as const,
+            protocol: "websocket",
+            upstream: "ws://127.0.0.1:5901",
+          },
+        }),
       },
       channel: {
         deliver: async () => undefined,
@@ -658,7 +703,7 @@ describe("restart-safe security state wiring", () => {
     expect(handoffRouteUnmounted).toBe(true);
     expect(second.connectorTeardownInfo("sess_restart" as never)).toEqual({
       connectorCapId: "cap_connector",
-      cdpUrl: "ws://127.0.0.1:777/devtools",
+      connectorResourceId: "connector:daemon-restart",
     });
 
     await second.teardownSession("sess_restart" as never);

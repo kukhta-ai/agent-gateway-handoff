@@ -359,13 +359,13 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
     /** A shared identity service (so enrollment + handoff use the SAME enrolled credential store). */
     identity?: IdentityService;
     /**
-     * Override the human-entrypoint resolver the open-window saga proxies to (the capsule's noVNC address). Defaults
-     * to the real noVNC adapter (full mode only — headless dev has no X stack). Tests inject a stub returning a stub
-     * WS upstream so the handoff path runs end-to-end in headless dev (the same posture as the Slice-4b test); the
-     * REAL noVNC proxy is gated for hermes-1.
+     * Override the human-entrypoint resolver the open-window saga exposes. Tests inject stubs with different
+     * provider/client/transport bindings; the real adapter supplies the current live-view transport in full mode.
      */
     entrypoint?: {
-      open(handle: import("@gla/kernel").RuntimeHandle): Promise<{ internalEndpoint: string }>;
+      open(
+        handle: import("@gla/kernel").RuntimeHandle,
+      ): Promise<import("@gla/kernel").HumanEntrypointBinding>;
     };
     /**
      * Wire the Slice-5 COMPLETION-CLOSE pipeline (so a validated done-signal RETURNS to `handoff wait` and CLOSES
@@ -409,7 +409,7 @@ export interface ProvisioningStack {
   reconciler: CleanupReconciler;
   /** The spawner registry (so a test can register a second launcher — the pluggability proof). */
   registry: SpawnerRegistry;
-  /** The noVNC human-entrypoint adapter (full mode: a ws endpoint; headless: reports unavailable). */
+  /** The default human-entrypoint adapter. */
   entrypoint: EntrypointNovncAdapter;
   /** The SHARED capability service (one signer for the anchor + task + connector caps). */
   capability: CapabilityService;
@@ -417,7 +417,7 @@ export interface ProvisioningStack {
   task: TaskService;
   /** The provision-capable session service (so a caller can observe connector lineage / teardown). */
   session: SessionService;
-  /** The CDP connector adapter (so a caller can observe its secret_ref→cdpUrl binding map). */
+  /** The default agent connector adapter. */
   connector: ConnectorCdpAdapter;
   /** The Access Gateway (Slice 4b: the sole public entry; serves the handoff step-up + proxies the WS). Present only when handoff is wired. */
   gateway?: AccessGateway;
@@ -626,11 +626,11 @@ export function createProvisioningBridge(
         forceCloseGrant: (grantId) => gateway?.forceCloseGrant(grantId),
       },
       route: {
-        program: (window, grantId, endpoint, path) => {
+        program: (window, grantId, entrypointBinding, path) => {
           if (route === undefined) {
             throw new Error("route controller not wired");
           }
-          return route.program(window, grantId, endpoint, path);
+          return route.program(window, grantId, entrypointBinding, path);
         },
         unmount: (windowId) => (route ? route.unmount(windowId) : Promise.resolve()),
       },
@@ -686,20 +686,21 @@ export function createProvisioningBridge(
         detector: urlDetector,
         // The params the url-watcher watches with — the session's declared `complete_on`/`intermediate`.
         detectorParamsFor: (sessionId) => urlWatcherParams(sessionRef.svc, sessionId),
-        // S-2 agent-blind: SEVER/resume the agent connector by the session's brokered capsule CDP url. `suspend`
-        // destroys the agent's live socket at the broker (not a flag — its existing CDP connection is cut), so the
-        // agent has NO channel onto the capsule while a recipient-bound window is open; `resume` re-allows it.
+        // S-2 agent-blind: SEVER/resume the agent connector by the session's connector resource id. The provider
+        // adapter owns how that id maps to live sockets, so session/app do not key lifecycle to a transport URL.
         connectorControl: {
           suspend: (sessionId) => {
-            const url = sessionRef.svc?.connectorTeardownInfo(sessionId)?.cdpUrl;
-            if (url !== undefined && url.length > 0) {
-              connector.suspendByCdpUrl(url);
+            const resourceId =
+              sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
+            if (resourceId !== undefined && resourceId.length > 0) {
+              connector.suspendByResourceId(resourceId);
             }
           },
           resume: (sessionId) => {
-            const url = sessionRef.svc?.connectorTeardownInfo(sessionId)?.cdpUrl;
-            if (url !== undefined && url.length > 0) {
-              connector.resumeByCdpUrl(url);
+            const resourceId =
+              sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
+            if (resourceId !== undefined && resourceId.length > 0) {
+              connector.resumeByResourceId(resourceId);
             }
           },
         },
@@ -771,8 +772,8 @@ export function createProvisioningBridge(
       if (info === undefined) {
         return; // never provisioned / already cleaned — idempotent no-op.
       }
-      // Drop the agent-blind secret_ref→cdpUrl binding (no residual) and revoke the connector cap.
-      connector.unbindSecretRef(info.cdpUrl);
+      // Drop the agent-blind resource binding (no residual) and revoke the connector cap.
+      connector.unbindSecretRef(info.connectorResourceId);
       await capability.revoke(info.connectorCapId);
       // Forget the provision bookkeeping so a second teardown is a clean no-op (idempotent).
       session.clearProvisioned(sessionId as never);

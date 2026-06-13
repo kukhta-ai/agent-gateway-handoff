@@ -345,7 +345,16 @@ async function coldAuthentikStack(opts: {
       deliverySink: sink,
       entrypoint: {
         async open() {
-          return { internalEndpoint: opts.upstream };
+          return {
+            resourceId: "entrypoint:fake-view:authentik-scenario",
+            provider: "fake-view",
+            client: { kind: "provider-asset", ref: "fake-viewer" },
+            transport: {
+              kind: "reverse-proxy" as const,
+              protocol: "websocket",
+              upstream: opts.upstream,
+            },
+          };
         },
       },
       completion: { pollMs: 100 },

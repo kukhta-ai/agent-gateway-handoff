@@ -12,7 +12,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ConnectorCdpAdapter } from "./index.js";
 
 function runtimeWithCdp(url: string): RuntimeHandle {
-  return encodeRuntimeHandle({ mode: "headless", cdpWebSocketUrl: url, cdpPort: 9 });
+  return encodeRuntimeHandle({
+    launchMode: "headless",
+    endpoints: [
+      {
+        resourceId: "connector:cdp:test",
+        family: "agent-connector",
+        provider: "cdp",
+        transport: "websocket",
+        address: url,
+      },
+    ],
+    cdpPort: 9,
+  });
 }
 
 const FAKE_SECRET_REF = "cap_connector_abc" as unknown as Ref<"secret-ref">;
@@ -42,6 +54,7 @@ describe("ConnectorCdpAdapter.attach — the agent's BROKERED CDP handle (GLA-02
     const realUrl = "ws://127.0.0.1:42799/devtools/browser/abc-123";
     const connector = await c.attach(runtimeWithCdp(realUrl));
     expect(connector.type).toBe("cdp");
+    expect(connector.resourceId).toBe("connector:cdp:test");
     // The agent's cdp_url is the BROKERED url — a loopback broker port, the SAME CDP path, NOT the real Chromium port.
     expect(connector.cdp_url).toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/abc-123$/);
     expect(connector.cdp_url).not.toBe(realUrl);
@@ -53,7 +66,7 @@ describe("ConnectorCdpAdapter.attach — the agent's BROKERED CDP handle (GLA-02
     const realUrl = "ws://127.0.0.1:42799/devtools/browser/abc-123";
     // First attach to learn the (stable) brokered url, then bind the secret_ref against it, then re-attach.
     const first = await c.attach(runtimeWithCdp(realUrl));
-    c.bindSecretRef(first.cdp_url as string, FAKE_SECRET_REF);
+    c.bindSecretRef(first.resourceId, FAKE_SECRET_REF);
     const connector = await c.attach(runtimeWithCdp(realUrl));
     expect(connector.secret_ref).toBe(FAKE_SECRET_REF);
     // SCAN the connector JSON: it carries a secret_ref (a cap ref) and NO raw secret / signing material.
@@ -90,15 +103,15 @@ describe("ConnectorCdpAdapter.attach — the agent's BROKERED CDP handle (GLA-02
     const c = newAdapter();
     const realUrl = "ws://127.0.0.1:42799/devtools/browser/abc-123";
     const first = await c.attach(runtimeWithCdp(realUrl));
-    c.bindSecretRef(first.cdp_url as string, FAKE_SECRET_REF);
+    c.bindSecretRef(first.resourceId, FAKE_SECRET_REF);
     expect((await c.attach(runtimeWithCdp(realUrl))).secret_ref).toBe(FAKE_SECRET_REF);
-    c.unbindSecretRef(first.cdp_url as string);
+    c.unbindSecretRef(first.resourceId);
     expect((await c.attach(runtimeWithCdp(realUrl))).secret_ref).toBeUndefined();
   });
 
   it("a runtime handle with no CDP endpoint → state.no_live_capsule (not a crash)", async () => {
     const c = newAdapter();
-    const noCdp = encodeRuntimeHandle({ mode: "headless" });
+    const noCdp = encodeRuntimeHandle({ launchMode: "headless" });
     await expect(c.attach(noCdp)).rejects.toMatchObject({ code: "state.no_live_capsule" });
     await expect(c.attach("garbage" as unknown as RuntimeHandle)).rejects.toMatchObject({
       code: "state.no_live_capsule",
