@@ -176,7 +176,7 @@ One row per leaf command. The **Group** column is blank when it carries from the
 
 ### Connection & auth
 
-- **Local profile** (reference): the endpoint is a local socket (`GLA_ENDPOINT`, or a default); no token, no `login`. (Consistent with "we don't authenticate the agent in the local profile" — see `components/identity-and-auth.md`.)
+- **Local profile** (reference): the endpoint is a verified local socket (`GLA_ENDPOINT`, or a default); no token, no `login`. For the default Unix-domain socket profile, the daemon only serves after confirming the runtime directory and socket path are daemon-owned and not group/other writable/openable, with symlinks, regular files, directories, wrong-owner paths, unsafe parents, and already-active sockets refused. A same-owner stale socket may be removed after it no longer accepts connections. Loopback TCP (`127.0.0.1:<port>`, `[::1]:<port>`, `localhost:<port>`) is a development/advanced fallback, not equivalent to a private Unix socket for cross-user isolation. Same-UID compromise is out of scope for this profile. (Consistent with "we don't authenticate the agent in the local profile" — see `components/identity-and-auth.md` and `components/agent-bridge.md`.)
 - **Authenticated profiles:** `gla auth login` (mTLS / token) or a token supplied via `GLA_TOKEN` in the environment — **never** on argv.
 
 ---

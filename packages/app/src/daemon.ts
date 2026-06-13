@@ -18,9 +18,13 @@
 // them to ports. The bridge transport protocol itself lives in the edge `surfaces/cli` package (the CLI is
 // the other end); here we only bind a `node:net` server and hand each accepted socket to that protocol.
 
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { type Server as NetServer, createServer as createIpcServer } from "node:net";
-import { dirname } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import {
+  type Server as NetServer,
+  createServer as createIpcServer,
+  createConnection as createNetConnection,
+} from "node:net";
+import { dirname, isAbsolute } from "node:path";
 import type { AgentBridge } from "@gla/bridge";
 import type { DependencyBinding } from "@gla/catalog";
 import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
@@ -47,6 +51,10 @@ import {
 } from "./auth-enrollment-policy.js";
 import { redactDaemonState } from "./daemon-state.js";
 import { type AuthentikConfig, createProvisioningBridge } from "./index.js";
+
+const BRIDGE_SOCKET_MODE = 0o600;
+const BRIDGE_RUNTIME_DIR_MODE = 0o700;
+const BRIDGE_ENDPOINT_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
 export interface ServeOptions {
@@ -178,6 +186,9 @@ export function defaultBridgeEndpoint(env: NodeJS.ProcessEnv = process.env): str
 
 /** Is an endpoint LOCAL — a uds PATH, or a loopback `127.0.0.1`/`::1`/`localhost` host:port — and NOT 0.0.0.0? */
 export function endpointIsLocal(endpoint: string): boolean {
+  if (BRIDGE_ENDPOINT_URL_RE.test(endpoint)) {
+    return false;
+  }
   const m = endpoint.match(/^(\[?[^\]]*\]?|[^:]+):(\d+)$/);
   if (m === null) {
     // No `host:port` form ⇒ a unix-domain-socket path ⇒ inherently local (filesystem-scoped, not network).
@@ -186,6 +197,16 @@ export function endpointIsLocal(endpoint: string): boolean {
   const host = (m[1] ?? "").replace(/^\[|\]$/g, "").toLowerCase();
   // A loopback host is local; 0.0.0.0 / :: / any other interface is NOT (S-6: the bridge is never public).
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
+/** Does the endpoint use the trusted-local private Unix-socket profile rather than loopback TCP? */
+function endpointIsUnixSocket(endpoint: string): boolean {
+  return "path" in endpointToListenTarget(endpoint);
+}
+
+/** Operator-facing endpoint text, preserving repair context but redacting grant/secret-shaped material. */
+function bridgeEndpointForDiagnostic(endpoint: string): string {
+  return redactDaemonState(endpoint);
 }
 
 function authDiagnosticsInput(opts: {
@@ -338,7 +359,9 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   //    config that asks to bind the bridge publicly is REFUSED before anything binds (fail closed, loud).
   if (!endpointIsLocal(bridgeEndpoint)) {
     throw new Error(
-      `refusing to bind the Agent Bridge on a non-local endpoint "${bridgeEndpoint}" — the bridge is LOCAL-only (baseline §3 single-public-entry). Use a unix socket or 127.0.0.1:<port>.`,
+      `refusing to bind the Agent Bridge on a non-local endpoint "${bridgeEndpointForDiagnostic(
+        bridgeEndpoint,
+      )}" — the bridge is LOCAL-only (baseline §3 single-public-entry). Use a unix socket or 127.0.0.1:<port>.`,
     );
   }
 
@@ -433,16 +456,26 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   // ── Bind the Agent Bridge on the LOCAL endpoint: a node:net server that hands each accepted socket to the
   //    line-delimited JSON-RPC protocol (surfaces/cli), dispatching every op onto the SHARED bridge above (+
   //    the operator ops). The agent surface and the operator op share the LOCAL socket (both operator-trusted).
-  const ipc = await bindBridgeServer(bridgeEndpoint, stack.bridge, operators);
+  let ipc: NetServer;
+  try {
+    ipc = await bindBridgeServer(bridgeEndpoint, stack.bridge, operators);
+  } catch (error) {
+    await stack.close().catch(() => {});
+    throw error;
+  }
 
   const bridgeIsLocal = endpointIsLocal(bridgeEndpoint);
+  const bridgeProfile = endpointIsUnixSocket(bridgeEndpoint)
+    ? "private Unix socket (trusted-local profile)"
+    : "loopback TCP (development/advanced; not equivalent to a private Unix socket for cross-user isolation)";
 
   // ── Startup banner + the S-6 doctor line (so an operator can SEE the bridge is not public). ──
   log("── gla serve ──");
   log(
     `  gateway (PUBLIC) : http://${bound.host}:${bound.port}  (front with Caddy → ${publicBaseUrl})`,
   );
-  log(`  bridge  (LOCAL)  : ${bridgeEndpoint}`);
+  log(`  bridge  (LOCAL)  : ${bridgeEndpointForDiagnostic(bridgeEndpoint)}`);
+  log(`  bridge profile   : ${bridgeProfile}`);
   log(
     `  auth provider    : ${stack.authModule}${
       authentikConfig !== undefined ? `  (issuer ${authentikConfig.issuerUrl})` : ""
@@ -490,20 +523,24 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
 }
 
 /** Bind the node:net bridge server at `endpoint` (a uds path or `host:port`), serving the JSON-RPC protocol. */
-function bindBridgeServer(
+async function bindBridgeServer(
   endpoint: string,
   bridge: AgentBridge,
   operators: OperatorOps,
 ): Promise<NetServer> {
+  let verifiedLocalBoundary = false;
   const server = createIpcServer((socket) => {
+    if (!verifiedLocalBoundary) {
+      socket.destroy();
+      return;
+    }
     serveBridgeConnection(socket, bridge, operators);
   });
   const target = endpointToListenTarget(endpoint);
   if ("path" in target) {
-    // A stale socket file from a previous (crashed) run blocks `listen` with EADDRINUSE — remove it first.
-    prepareUdsPath(target.path);
+    await prepareUdsPath(target.path);
   }
-  return new Promise<NetServer>((resolve, reject) => {
+  const listeningServer = await new Promise<NetServer>((resolve, reject) => {
     const onErr = (e: Error): void => {
       server.removeAllListeners("listening");
       reject(e);
@@ -514,6 +551,16 @@ function bindBridgeServer(
       resolve(server);
     });
   });
+  try {
+    if ("path" in target) {
+      secureBoundUdsPath(target.path);
+    }
+  } catch (error) {
+    await closeBridgeServer(listeningServer, endpoint).catch(() => {});
+    throw error;
+  }
+  verifiedLocalBoundary = true;
+  return listeningServer;
 }
 
 /** Close the bridge server + remove the uds path (idempotent) so a restart re-binds cleanly. */
@@ -523,9 +570,9 @@ function closeBridgeServer(server: NetServer, endpoint: string): Promise<void> {
       const target = endpointToListenTarget(endpoint);
       if ("path" in target && existsSync(target.path)) {
         try {
-          unlinkSync(target.path);
+          unlinkOwnedSocket(target.path);
         } catch {
-          // best-effort — a leftover socket file is harmless (the next bind removes it).
+          // best-effort — startup validates before reusing or removing any leftover path.
         }
       }
       resolve();
@@ -548,22 +595,183 @@ function endpointToListenTarget(
   return { path: endpoint };
 }
 
-/** Ensure a uds path's directory exists and any stale socket file is removed (so `listen` can bind). */
-function prepareUdsPath(path: string): void {
+/** Ensure a uds path is safe before listening; only verified stale socket files may be removed. */
+async function prepareUdsPath(path: string): Promise<void> {
+  if (!isAbsolute(path)) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — Unix-domain bridge endpoints must be absolute paths.`,
+    );
+  }
   const dir = dirname(path);
+  assertExistingRuntimeAncestorChain(dir, path);
   if (dir.length > 0 && !existsSync(dir)) {
-    try {
-      mkdirSync(dir, { recursive: true });
-    } catch {
-      // If the dir cannot be created, `listen` will surface the real error — don't mask it here.
+    mkdirSync(dir, { recursive: true, mode: BRIDGE_RUNTIME_DIR_MODE });
+    chmodSync(dir, BRIDGE_RUNTIME_DIR_MODE);
+  }
+  assertSecureRuntimeDir(dir, path);
+  if (!existsSync(path)) {
+    return;
+  }
+
+  const st = lstatSync(path);
+  assertOwnedByCurrentUid(
+    st.uid,
+    `Agent Bridge socket path "${bridgeEndpointForDiagnostic(path)}"`,
+  );
+  if (st.isSymbolicLink()) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — endpoint must not be a symlink.`,
+    );
+  }
+  if (st.isDirectory()) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — endpoint is a directory, not a Unix socket.`,
+    );
+  }
+  if (!st.isSocket()) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — endpoint is not a Unix socket; remove or move the regular file first.`,
+    );
+  }
+  if (await socketAcceptsConnections(path)) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — a bridge socket already accepts connections there; stop the owning daemon first.`,
+    );
+  }
+  unlinkSync(path);
+}
+
+/** Lock down and verify the freshly bound Unix socket before any bridge operation can be accepted. */
+function secureBoundUdsPath(path: string): void {
+  chmodSync(path, BRIDGE_SOCKET_MODE);
+  const st = lstatSync(path);
+  assertOwnedByCurrentUid(
+    st.uid,
+    `Agent Bridge socket path "${bridgeEndpointForDiagnostic(path)}"`,
+  );
+  if (st.isSymbolicLink() || !st.isSocket()) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — bound endpoint was replaced before verification.`,
+    );
+  }
+  if ((st.mode & 0o077) !== 0) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — bound socket is group/other accessible.`,
+    );
+  }
+}
+
+/** Verify the runtime dir can protect the socket from other local users replacing or pre-creating it. */
+function assertSecureRuntimeDir(dir: string, socketPath: string): void {
+  assertExistingRuntimeAncestorChain(dir, socketPath);
+  const st = lstatSync(dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(
+      `refusing Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(
+        socketPath,
+      )}" — parent must be a real directory, not a symlink or file.`,
+    );
+  }
+  assertOwnedByCurrentUid(
+    st.uid,
+    `Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(socketPath)}"`,
+  );
+  if ((st.mode & 0o022) !== 0) {
+    throw new Error(
+      `refusing Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(
+        socketPath,
+      )}" — group/other write permissions would let another local user pre-create or replace the socket.`,
+    );
+  }
+}
+
+function assertExistingRuntimeAncestorChain(dir: string, socketPath: string): void {
+  if (!isAbsolute(dir)) {
+    return;
+  }
+  const parts = dir.split("/").filter((part) => part.length > 0);
+  let current = "/";
+  for (const part of parts) {
+    current = current === "/" ? `/${part}` : `${current}/${part}`;
+    if (!existsSync(current)) {
+      assertAncestorNotReplaceable(dirname(current), socketPath);
+      return;
+    }
+    const st = lstatSync(current);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error(
+        `refusing Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(
+          socketPath,
+        )}" — parent path component "${bridgeEndpointForDiagnostic(
+          current,
+        )}" must be a real directory, not a symlink or file.`,
+      );
+    }
+    if (current !== dir) {
+      assertAncestorNotReplaceable(current, socketPath);
     }
   }
-  if (existsSync(path)) {
-    try {
-      unlinkSync(path);
-    } catch {
-      // A leftover that cannot be removed will surface as EADDRINUSE on listen — let that be the error.
-    }
+}
+
+function assertAncestorNotReplaceable(dir: string, socketPath: string): void {
+  const st = lstatSync(dir);
+  if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) {
+    throw new Error(
+      `refusing Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(
+        socketPath,
+      )}" — writable ancestor "${bridgeEndpointForDiagnostic(
+        dir,
+      )}" is not sticky and could replace the socket directory.`,
+    );
+  }
+}
+
+function assertOwnedByCurrentUid(ownerUid: number, label: string): void {
+  const getuid = process.getuid;
+  if (typeof getuid !== "function") {
+    return;
+  }
+  const uid = getuid.call(process);
+  if (ownerUid !== uid) {
+    throw new Error(`${label} is owned by uid ${ownerUid}, not the daemon uid ${uid}.`);
+  }
+}
+
+function socketAcceptsConnections(path: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createNetConnection({ path });
+    const finish = (ok: boolean): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+function unlinkOwnedSocket(path: string): void {
+  const st = lstatSync(path);
+  if (st.isSocket()) {
+    assertOwnedByCurrentUid(
+      st.uid,
+      `Agent Bridge socket path "${bridgeEndpointForDiagnostic(path)}"`,
+    );
+    unlinkSync(path);
   }
 }
 

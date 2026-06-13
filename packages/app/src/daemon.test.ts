@@ -17,9 +17,28 @@
 // it spawns a real browser — but the no-orphan teardown logic is ALSO proven by teardown-e2e + the worker
 // unit tests, so the property holds regardless.
 
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  chmodSync,
+  chownSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { request as httpRequest } from "node:http";
-import { type Socket, connect as netConnect } from "node:net";
+import {
+  type AddressInfo,
+  type Server as NetServer,
+  type Socket,
+  createServer as createNetServer,
+  connect as netConnect,
+} from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
@@ -197,6 +216,78 @@ function canConnect(endpoint: string): Promise<boolean> {
   });
 }
 
+function closeNetServer(server: NetServer): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()));
+}
+
+function listenNetServer(server: NetServer, endpoint: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ path: endpoint }, () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function freeLoopbackPort(): Promise<number> {
+  const server = createNetServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  await closeNetServer(server);
+  return address.port;
+}
+
+function currentUid(): number | undefined {
+  const getuid = process.getuid;
+  return typeof getuid === "function" ? getuid.call(process) : undefined;
+}
+
+function canChangeOwner(): boolean {
+  return currentUid() === 0;
+}
+
+async function createCrashedSocket(path: string): Promise<void> {
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `
+        const { createServer } = require("node:net");
+        const server = createServer();
+        server.listen(process.argv[1], () => {
+          if (process.send) process.send("ready");
+        });
+        setInterval(() => {}, 1000);
+      `,
+      path,
+    ],
+    { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+  );
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out creating stale socket")), 5000);
+    child.once("message", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.once("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+  });
+  child.kill("SIGKILL");
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  if (!existsSync(path)) {
+    throw new Error("test setup failed: crashed process did not leave a socket file");
+  }
+}
+
 describe("gla serve daemon — deployable long-running service (round-trip, gateway, public base, shutdown)", () => {
   it("daemon round-trip + SHARED STATE: a 2nd CLI call sees the task the 1st created (whoami, task create, session create --dry-run)", async () => {
     const handle = await startDaemon({ publicBaseUrl: "https://203.0.113.10/" });
@@ -343,6 +434,196 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         log: () => {},
       }),
     ).rejects.toThrow(/local-only|0\.0\.0\.0|LOCAL/i);
+  });
+
+  it("trusted-local Unix socket remains credential-free for the same user and is bound with private socket permissions", async () => {
+    const handle = await startDaemon({ publicBaseUrl: "https://203.0.113.10/" });
+    const ep = handle.bridgeEndpoint;
+    const socket = lstatSync(ep);
+    expect(socket.isSocket()).toBe(true);
+    expect(socket.mode & 0o077).toBe(0);
+    const uid = currentUid();
+    if (uid !== undefined) {
+      expect(socket.uid).toBe(uid);
+    }
+
+    const who = await cliOverDaemon(ep, ["whoami"]);
+    expect(who.code, who.stderr).toBe(0);
+    expect(who.stderr).not.toMatch(/login|bearer|token|mTLS|certificate/i);
+  });
+
+  it("refuses unsafe Unix socket runtime directories before serving bridge operations", async () => {
+    const dir = scratch("gla-unsafe-runtime-");
+    chmodSync(dir, 0o777);
+    const sock = join(dir, "gla.sock");
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: sock,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/runtime directory|group\/other write|pre-create|replace/i);
+  });
+
+  it("refuses symlink, regular-file, and directory bridge endpoints instead of unlinking them", async () => {
+    const symlinkDir = scratch("gla-symlink-endpoint-");
+    const symlinkEndpoint = join(symlinkDir, "gla.sock");
+    symlinkSync(join(symlinkDir, "target.sock"), symlinkEndpoint);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: symlinkEndpoint,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/symlink/i);
+    expect(lstatSync(symlinkEndpoint).isSymbolicLink()).toBe(true);
+
+    const parentDir = scratch("gla-symlink-parent-");
+    const realParent = join(parentDir, "real-parent");
+    const linkedParent = join(parentDir, "linked-parent");
+    mkdirSync(realParent);
+    symlinkSync(realParent, linkedParent);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: join(linkedParent, "gla.sock"),
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/parent path component|symlink/i);
+
+    const regularDir = scratch("gla-regular-endpoint-");
+    const regularEndpoint = join(regularDir, "gla.sock");
+    writeFileSync(regularEndpoint, "not a socket");
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: regularEndpoint,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/not a Unix socket|regular file/i);
+    expect(readFileSync(regularEndpoint, "utf8")).toBe("not a socket");
+
+    const directoryDir = scratch("gla-directory-endpoint-");
+    const directoryEndpoint = join(directoryDir, "gla.sock");
+    mkdirSync(directoryEndpoint);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: directoryEndpoint,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/directory/i);
+    expect(lstatSync(directoryEndpoint).isDirectory()).toBe(true);
+  });
+
+  it("refuses an already-active or replaced Unix socket, but safely removes a same-owner stale socket", async () => {
+    const activeEndpoint = join(scratch("gla-active-endpoint-"), "gla.sock");
+    const holder = createNetServer();
+    await listenNetServer(holder, activeEndpoint);
+    try {
+      await expect(
+        serve({
+          host: "127.0.0.1",
+          port: 0,
+          bridgeEndpoint: activeEndpoint,
+          publicBaseUrl: "https://203.0.113.10/",
+          log: () => {},
+        }),
+      ).rejects.toThrow(/already accepts connections|owning daemon/i);
+      expect(await canConnect(activeEndpoint)).toBe(true);
+    } finally {
+      await closeNetServer(holder);
+    }
+
+    const staleEndpoint = join(scratch("gla-stale-endpoint-"), "gla.sock");
+    await createCrashedSocket(staleEndpoint);
+    const handle = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: staleEndpoint,
+      publicBaseUrl: "https://203.0.113.10/",
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: () => {},
+    });
+    liveHandles.push(handle);
+    expect(await canConnect(staleEndpoint)).toBe(true);
+    const who = await cliOverDaemon(staleEndpoint, ["whoami"]);
+    expect(who.code, who.stderr).toBe(0);
+  });
+
+  it.runIf(canChangeOwner())("refuses wrong-owner Unix socket runtime directories", async () => {
+    const dir = scratch("gla-wrong-owner-runtime-");
+    chownSync(dir, 65534, 65534);
+    chmodSync(dir, 0o700);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: join(dir, "gla.sock"),
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/owned by uid 65534|daemon uid/i);
+  });
+
+  it("refuses non-local bridge endpoints, redacts secret-shaped diagnostics, and documents loopback as dev/advanced mode", async () => {
+    const nonLocal =
+      "https://bridge.example/handoff/sess_1?grant=BRIDGE_GRANT_CANARY_090&secret=RAW_SECRET_CANARY_090";
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: nonLocal,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/non-local endpoint/i);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: nonLocal,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.not.toThrow(/BRIDGE_GRANT_CANARY_090|RAW_SECRET_CANARY_090/);
+
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: "10.0.0.8:7423",
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/non-local endpoint|LOCAL-only/i);
+
+    const port = await freeLoopbackPort();
+    const logs: string[] = [];
+    const loopback = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: `127.0.0.1:${port}`,
+      publicBaseUrl: "https://203.0.113.10/",
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: (line) => void logs.push(line),
+    });
+    liveHandles.push(loopback);
+    expect(await canConnect(`127.0.0.1:${port}`)).toBe(true);
+    expect(logs.join("\n")).toMatch(/loopback TCP.*development\/advanced/i);
+    expect(logs.join("\n")).toMatch(/not equivalent to a private Unix socket/i);
   });
 
   it("invalid public base values fail before serving starts with actionable errors", async () => {
