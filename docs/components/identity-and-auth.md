@@ -8,14 +8,14 @@
 
 ## Role
 
-Identity + Auth maps channel-specific recipients to stable `UserIdentity` records, tracks the provenance and strength of each binding, and triggers step-up authentication through a pluggable Auth Provider. It also owns **enrollment** — the one-time, operator-initiated registration that establishes a recipient's credential (a passkey, or a password) bound to their identity, the precondition that makes any later verification possible. It is the single place credentials and assertions are verified. It is *not* a policy decision point — it answers "who is this, and how sure are we," never "is this allowed."
+Identity + Auth maps channel-specific recipients to stable `UserIdentity` records, tracks the provenance and strength of each binding, and triggers step-up authentication through a pluggable Auth Provider. It also owns **enrollment** — the one-time, operator-initiated registration that establishes a recipient's credential (a passkey, or a password) bound to their identity, the precondition that makes any later verification possible. It is the single place credentials and assertions are verified. It is *not* a policy decision point — it answers "who is this, and how sure are we," never "is this allowed." Deployment-facing requirements are expressed as provider-neutral **auth assurance policy profiles** (`phishing-resistant`, `password-permitted`) over those facts.
 
 ## Responsibilities (owns)
 
 - Map a channel-specific recipient → `UserIdentity`; maintain `RecipientBinding` with provenance and `auth_strength`.
 - **Enroll** a recipient — register a credential (a WebAuthn passkey, or a password) bound to their `UserIdentity`, establishing the binding and its initial `auth_strength`. This is a one-time, operator-initiated precondition, *not* part of any task flow, and its first-run experience (invite, registration, recovery) is a first-class UX surface.
 - Trigger step-up via the configured Auth Provider (gateway-identity-only, webauthn-internal, OIDC, authentik, Authelia — each ships as a plugin).
-- Verify credentials/assertions and report the result — *ok + auth_strength + identity* — back to whichever enforcement point asked.
+- Verify credentials/assertions and report the result — *ok + auth_strength + identity* — back to whichever enforcement point asked; adapters may additionally project provider evidence into the common auth-assurance evidence shape for diagnostics.
 - On the agent side, where a profile requires it: verify the agent credential and resolve the matched `AuthorityProfile`.
 
 ## Interfaces
@@ -25,15 +25,15 @@ Identity + Auth maps channel-specific recipients to stable `UserIdentity` record
 
 ## What it does NOT do
 
-It is **not** a policy decision point (that is Cedar, in Admission — authentication ≠ authorization). It does **not** mint capabilities (Capability service). It does **not** decide *when* to demand authentication at run time — the enforcement points and the deployment profile do that; Identity + Auth supplies the *mechanism* and the `auth_strength` fact.
+It is **not** a policy decision point (that is Cedar, in Admission — authentication ≠ authorization). It does **not** mint capabilities (Capability service). It does **not** decide *when* to demand authentication at run time — the enforcement points and the deployment auth-assurance policy do that; Identity + Auth supplies the *mechanism* and the `auth_strength` / assurance evidence facts.
 
 ## Entities & data
 
-`UserIdentity`, `RecipientBinding`, `auth_strength`, the enrolled credential (a passkey or password, established at enrollment); `AuthorityProfile` (resolved for an authenticated agent). Auth Providers are catalog plugins.
+`UserIdentity`, `RecipientBinding`, `auth_strength`, `AuthAssuranceEvidence`, `AuthAssurancePolicy`, the enrolled credential (a passkey or password, established at enrollment); `AuthorityProfile` (resolved for an authenticated agent). Auth Providers are catalog plugins.
 
 ## In scenario 01
 
-Phase E (one-time prerequisite) — recipient enrollment: the operator invites the recipient, who registers a passkey; Identity + Auth stores the credential bound to the recipient identity. This is the precondition Phase 6 relies on. Phase 6 — the user's step-up: the passkey path verifies the WebAuthn assertion against that registered credential and records `auth_strength = webauthn`; the password fallback yields `auth_strength = password`. Phase 12 — asked whether the recipient's auth is still valid; if so, no re-prompt, else re-auth.
+Phase E (one-time prerequisite) — recipient enrollment: the operator invites the recipient, who registers a passkey; Identity + Auth stores the credential bound to the recipient identity. This is the precondition Phase 6 relies on. Phase 6 — the user's step-up: the passkey path verifies the WebAuthn assertion against that registered credential and records `auth_strength = webauthn`; the password fallback yields `auth_strength = password`. The default `phishing-resistant` policy accepts only passkey-grade assurance; `password-permitted` is the explicit profile that admits password-grade evidence. Phase 12 — asked whether the recipient's auth is still valid; if so, no re-prompt, else re-auth.
 
 ## Authenticating the agent
 
@@ -67,7 +67,13 @@ Auth Provider down → step-up fails → the enforcement point denies. **Recipie
 
 ## Invariants
 
-Authentication ≠ authorization, never conflated. The verifier reports *facts* (ok + `auth_strength`); it does not make access decisions. Recipient-binding originates from the channel and is only ever narrowed, never widened. A recipient can be verified only if previously **enrolled**; enrollment is one-time and operator-initiated, never a per-task or per-handoff step.
+Authentication ≠ authorization, never conflated. The verifier reports *facts* (ok + `auth_strength` / auth-assurance evidence); it does not make access decisions. Policy profiles are provider-neutral; provider-specific `amr`, `acr`, factor, source, or future claims are mapped by the adapter before any enforcement point evaluates sufficiency. Recipient-binding originates from the channel and is only ever narrowed, never widened. A recipient can be verified only if previously **enrolled**; enrollment is one-time and operator-initiated, never a per-task or per-handoff step.
+
+## Adding an Auth Provider
+
+Implement `AuthProviderPort` behind a new adapter package and wire it only from `packages/app`; kernel, identity, and gateway code must not import the concrete provider. The adapter verifies provider-native credentials or tokens, returns the stable `{ok, authStrength}` fact, and maps provider evidence into `AuthAssuranceEvidence` for diagnostics. Unknown or ambiguous valid evidence must degrade to the lowest safe tier (usually password-grade), never up-map to phishing-resistant.
+
+The installer/doctor path must prove the provider can satisfy the selected `GLA_AUTH_ASSURANCE_POLICY`: default `phishing-resistant` requires passkey/phishing-resistant evidence; `password-permitted` is the explicit fallback profile. Required tests are: adapter evidence mapping, invalid/unknown profile diagnostics, gateway handoff/reuse decisions against the common policy, and a boundary check showing `packages/gateway` contains no provider-specific route logic or raw provider claim checks.
 
 ## Related
 

@@ -106,8 +106,11 @@ export type { RuntimeDescriptor, SpawnContext, WorkspaceHandleRef } from "./runt
 export type {
   AgentConnector,
   AgentConnectorPort,
+  AuthAssuranceFact,
   AuthChallenge,
+  AuthProviderEnrollmentResult,
   AuthProviderPort,
+  AuthProviderVerificationResult,
   AuthStrength,
   CatalogEntity,
   CatalogPort,
@@ -116,6 +119,7 @@ export type {
   EnrollmentChallenge,
   HumanEntrypointPort,
   IdentityPort,
+  IdentityVerificationResult,
   InjectionTarget,
   LauncherPort,
   MountCapability,
@@ -130,6 +134,26 @@ export type {
   WorkspaceHandle,
   WorkspacePort,
 } from "./ports.js";
+
+// ── K7b · provider-neutral auth assurance policy ─────────────────────────────
+export {
+  AUTH_ASSURANCE_PROFILE_VALUES,
+  DEFAULT_AUTH_ASSURANCE_PROFILE,
+  assuranceFromAuthStrength,
+  assuranceLevelFromAuthStrength,
+  authAssurancePolicyFromProfile,
+  authAssurancePolicyFromRequiredAuthStrength,
+  authAssuranceSufficient,
+  isAuthAssuranceProfile,
+  parseAuthAssuranceProfile,
+} from "./auth-assurance.js";
+export type {
+  AuthAssuranceEvidence,
+  AuthAssuranceLevel,
+  AuthAssurancePolicy,
+  AuthAssuranceProfile,
+  AuthAssuranceProfileParseResult,
+} from "./auth-assurance.js";
 
 // ── K8 · state-transition functions (pure reducers per lifecycle) ──────────────
 export {

@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_METHOD_MAPS,
   type MethodClaims,
+  mapMethodToAssurance,
   mapMethodToStrength,
   methodMaps,
   methodResolvable,
@@ -81,6 +82,26 @@ describe("AC#5 · valid token but unresolvable method → password (NEVER webaut
     expect(methodResolvable({ amr: ["pwd"] })).toBe(true);
     expect(methodResolvable({ acr: "phr" })).toBe(true);
     expect(methodResolvable({ amr: ["nonsense"] })).toBe(false);
+  });
+});
+
+describe("AC#4 · authentik claims project into provider-neutral assurance evidence", () => {
+  it("passkey amr claims produce phishing-resistant assurance evidence", () => {
+    expect(mapMethodToAssurance({ amr: ["swk"] })).toEqual({
+      authStrength: "webauthn",
+      level: "phishing-resistant",
+      methodResolvable: true,
+      providerEvidence: { amr: ["swk"] },
+    });
+  });
+
+  it("ambiguous valid claims degrade only to the password-grade floor", () => {
+    expect(mapMethodToAssurance({ amr: ["mfa"], acr: "unknown" })).toEqual({
+      authStrength: "password",
+      level: "password",
+      methodResolvable: false,
+      providerEvidence: { amr: ["mfa"], acr: "unknown" },
+    });
   });
 });
 

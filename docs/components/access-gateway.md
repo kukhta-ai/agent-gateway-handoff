@@ -14,7 +14,7 @@ The Access Gateway is the user's policy-enforcement point and the only door open
 
 - Verify the macaroon grant cryptographically on every request and WS upgrade (signature, recipient caveat, TTL, scope).
 - Consult the revocation cache; force-close WebSockets when a grant is revoked.
-- Trigger recipient step-up via Identity + Auth when `auth_strength` is insufficient.
+- Trigger recipient step-up via Identity + Auth when the reported auth assurance is insufficient for the selected deployment policy.
 - Proxy authorized traffic to the capsule's internal human-entrypoint endpoint.
 
 ## Interfaces
@@ -32,15 +32,15 @@ Grant capabilities (verified), `RevocationEntry` cache, `Route` (consumed).
 
 ## In scenario 01
 
-Phase E (one-time) — fronts recipient enrollment: verifies the single-use `operator-discharge` enrollment grant the invite carries, then forwards the passkey-registration flow to Identity + Auth. Phase 6 — verify `grant-1`, find auth insufficient → trigger step-up, then authorize the WS upgrade and proxy the noVNC stream. Phase 12 — verify `grant-2`, reuse auth, proxy to the same capsule. Phases 8 / 13 — on revoke, force-close the WebSocket.
+Phase E (one-time) — fronts recipient enrollment: verifies the single-use `operator-discharge` enrollment grant the invite carries, then forwards the registration flow to Identity + Auth. Phase 6 — verify `grant-1`, find auth assurance insufficient for the deployment policy → trigger step-up, then authorize the WS upgrade and proxy the noVNC stream. Phase 12 — verify `grant-2`, reuse auth only if the retained assurance still satisfies the same policy, proxy to the same capsule. Phases 8 / 13 — on revoke, force-close the WebSocket.
 
 ## Failure modes
 
-A forwarded link (wrong recipient) fails the recipient caveat → denied. An expired grant → denied; window TTL-closed. Revocation-cache lag is bounded; a revoked-but-not-yet-propagated grant is the residual risk the cache size/TTL controls.
+A forwarded link (wrong recipient) fails the recipient caveat → denied. An expired grant → denied; window TTL-closed. Password-grade or ambiguous provider evidence under the default `phishing-resistant` policy → denied with `auth.insufficient`; no silent fallback. Revocation-cache lag is bounded; a revoked-but-not-yet-propagated grant is the residual risk the cache size/TTL controls.
 
 ## Invariants
 
-No public path bypasses it. Verification is cryptographic and, in the common case, free of a database round-trip. The recipient caveat is enforced on every request and every upgrade. A revoked grant cannot hold a live WebSocket open.
+No public path bypasses it. Verification is cryptographic and, in the common case, free of a database round-trip. The recipient caveat is enforced on every request and every upgrade. A revoked grant cannot hold a live WebSocket open. Auth decisions read only the provider-neutral assurance contract plus grant and recipient facts; gateway authorization never branches on raw provider method names such as `amr`/`acr` or concrete provider identities.
 
 ## Related
 

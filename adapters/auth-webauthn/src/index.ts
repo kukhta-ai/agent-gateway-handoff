@@ -4,8 +4,8 @@
 //   beginEnrollment(userId, discharge)  → generateRegistrationOptions (a registration challenge), bound to the user
 //   finishEnrollment(userId, assertion) → verifyRegistrationResponse → an ATOMICALLY-stored credential (pubkey, counter)
 //   challenge(userId)                   → generateAuthenticationOptions (an authn challenge), scoped to the user's credential
-//   verifyAssertion(userId, assertion)  → verifyAuthenticationResponse → { ok, authStrength } (counter bumped on success)
-// It reports FACTS (ok + auth_strength), never an access decision (the port's guarantee). It is the in-tree
+//   verifyAssertion(userId, assertion)  → verifyAuthenticationResponse → facts (counter bumped on success)
+// It reports FACTS (ok + auth_strength + assurance evidence), never an access decision. It is the in-tree
 // default IdP; a different provider (authentik/OIDC) is a DIFFERENT adapter behind the SAME port — only `app`
 // imports either (the swap-IdP property, GLA-013 AC#5; baseline §6).
 //
@@ -19,10 +19,12 @@
 // The WebAuthn credential material is provider-specific, so it lives in THIS adapter (an authentik adapter would
 // hold nothing locally); the identity service owns the identity-level enrollment FACT (auth_strength) on top.
 
+import { assuranceFromAuthStrength } from "@gla/kernel";
 import type {
   AuthChallenge,
+  AuthProviderEnrollmentResult,
   AuthProviderPort,
-  AuthStrength,
+  AuthProviderVerificationResult,
   EnrollmentChallenge,
   OpaqueToken,
   UserIdentity,
@@ -183,12 +185,13 @@ export class AuthWebauthnProvider implements AuthProviderPort {
    * pending challenge and store the credential. **Atomic from the adapter's view:** the credential is written to the
    * store ONLY when `verifyRegistrationResponse` reports `verified` AND yields a credential; otherwise it throws and
    * stores nothing (so the caller — identity — records no enrollment fact: the no-half-bound property GLA-013 AC#4).
-   * On success the pending challenge is cleared and `{ credentialId, authStrength: "webauthn" }` (a FACT) is returned.
+   * On success the pending challenge is cleared and `{ credentialId, authStrength: "webauthn", assurance }` (a
+   * FACT) is returned.
    */
   async finishEnrollment(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ credentialId: string; authStrength: AuthStrength }> {
+  ): Promise<AuthProviderEnrollmentResult> {
     const pending = this.challenges.get(userId);
     if (pending === undefined || pending.kind !== "register") {
       throw new Error("no pending registration challenge for this user");
@@ -221,7 +224,11 @@ export class AuthWebauthnProvider implements AuthProviderPort {
     // Commit only now (after a verified ceremony) — the atomic write.
     this.credentials.set(userId, stored);
     this.challenges.delete(userId);
-    return { credentialId: stored.id, authStrength: "webauthn" };
+    return {
+      credentialId: stored.id,
+      authStrength: "webauthn",
+      assurance: assuranceFromAuthStrength("webauthn", { methodResolvable: true }),
+    };
   }
 
   /**
@@ -251,13 +258,14 @@ export class AuthWebauthnProvider implements AuthProviderPort {
   /**
    * Verify an authentication assertion (kernel `AuthProviderPort.verifyAssertion`): check the assertion against the
    * stored credential + the pending challenge. Returns FACTS — `{ ok, authStrength }` — never an allow/deny. On a
-   * verified assertion the stored counter is bumped (replay-defense) and `ok: true, authStrength: "webauthn"` is
-   * returned; an un-enrolled user, a wrong/forged assertion, or no pending challenge yields `ok: false`.
+   * verified assertion the stored counter is bumped (replay-defense) and `ok: true, authStrength: "webauthn",
+   * assurance` is returned; an un-enrolled user, a wrong/forged assertion, or no pending challenge yields
+   * `ok: false`.
    */
   async verifyAssertion(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength }> {
+  ): Promise<AuthProviderVerificationResult> {
     const cred = this.credentials.get(userId);
     const pending = this.challenges.get(userId);
     if (cred === undefined || pending === undefined || pending.kind !== "authenticate") {
@@ -287,7 +295,11 @@ export class AuthWebauthnProvider implements AuthProviderPort {
     // Bump the stored counter (replay-defense) and clear the consumed challenge.
     this.credentials.set(userId, { ...cred, counter: verification.authenticationInfo.newCounter });
     this.challenges.delete(userId);
-    return { ok: true, authStrength: "webauthn" };
+    return {
+      ok: true,
+      authStrength: "webauthn",
+      assurance: assuranceFromAuthStrength("webauthn", { methodResolvable: true }),
+    };
   }
 
   /** Is a credential stored for this user? (Identity uses this to derive the enrollment fact.) */

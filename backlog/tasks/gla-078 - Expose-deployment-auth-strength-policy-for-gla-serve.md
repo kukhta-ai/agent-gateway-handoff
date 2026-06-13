@@ -1,10 +1,10 @@
 ---
 id: GLA-078
 title: Architect provider-extensible auth assurance policy
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-12 20:01'
-updated_date: '2026-06-12 23:01'
+updated_date: '2026-06-13 00:22'
 labels:
   - hardening
   - authentik
@@ -48,36 +48,30 @@ Boundaries: GLA remains the grant-checking enforcement point; AuthProvider adapt
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A provider-neutral auth-assurance contract is available at the GLA boundary and can represent verified evidence from different AuthProvider adapters without requiring core or gateway code to depend on provider-specific method names.
-- [ ] #2 Deployment policy selects required assurance by a stable GLA policy/profile contract rather than by an app-local enum tied to today's provider methods.
-- [ ] #3 The shipped policy profiles preserve the current secure default and current password-permitted behaviour: unset policy demands phishing-resistant/passkey-grade assurance, and password-grade evidence is accepted only by a policy that explicitly permits it.
-- [ ] #4 AuthProvider adapters can map provider evidence into the common assurance contract, including authentik amr/acr/factor/source evidence and future provider-specific claims, while unmapped or ambiguous evidence fails closed or degrades only to the lowest safe assurance.
-- [ ] #5 The Access Gateway authorizes handoff and auth-reuse decisions from the common assurance contract plus grant and recipient facts, with no provider-specific route logic, raw amr/acr checks, or concrete provider names in gateway authorization decisions.
-- [ ] #6 CLI, environment, WPM templates, and operator diagnostics expose the selected assurance policy and report whether the configured provider can satisfy it before a deployment relies on handoff.
-- [ ] #7 Invalid policy values, unknown policy profiles, and provider evidence that cannot satisfy the selected policy produce stable actionable diagnostics rather than silent fallback.
-- [ ] #8 Developer documentation explains how to add a new auth provider: which port to implement, how verified provider evidence maps into GLA assurance, how installer/doctor verification proves the mapping, and what tests demonstrate gateway independence.
+- [x] #1 A provider-neutral auth-assurance contract is available at the GLA boundary and can represent verified evidence from different AuthProvider adapters without requiring core or gateway code to depend on provider-specific method names.
+- [x] #2 Deployment policy selects required assurance by a stable GLA policy/profile contract rather than by an app-local enum tied to today's provider methods.
+- [x] #3 The shipped policy profiles preserve the current secure default and current password-permitted behaviour: unset policy demands phishing-resistant/passkey-grade assurance, and password-grade evidence is accepted only by a policy that explicitly permits it.
+- [x] #4 AuthProvider adapters can map provider evidence into the common assurance contract, including authentik amr/acr/factor/source evidence and future provider-specific claims, while unmapped or ambiguous evidence fails closed or degrades only to the lowest safe assurance.
+- [x] #5 The Access Gateway authorizes handoff and auth-reuse decisions from the common assurance contract plus grant and recipient facts, with no provider-specific route logic, raw amr/acr checks, or concrete provider names in gateway authorization decisions.
+- [x] #6 CLI, environment, WPM templates, and operator diagnostics expose the selected assurance policy and report whether the configured provider can satisfy it before a deployment relies on handoff.
+- [x] #7 Invalid policy values, unknown policy profiles, and provider evidence that cannot satisfy the selected policy produce stable actionable diagnostics rather than silent fallback.
+- [x] #8 Developer documentation explains how to add a new auth provider: which port to implement, how verified provider evidence maps into GLA assurance, how installer/doctor verification proves the mapping, and what tests demonstrate gateway independence.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Prepared from the transcript comparison and independent subagent draft: Hooke/auth-strength.
-
-Scope clarification from authentik expectation review: this task only exposes GLA's required auth-strength policy. It does not make authentik show passkey/source choices, create recipient-owned authentik accounts, or define authentik's edge-guard role. Those missing deployed behaviours are tracked by GLA-085, GLA-086, and GLA-087.
-
-Architecture clarification: this task must not expose another narrow string enum as the long-term model. It must define the provider-extensible assurance layer that future auth providers and richer authentik methods map into, while preserving today's password/passkey outcomes as initial profiles.
-
-Review mapping update: auth-extensibility findings are covered here. Evidence: packages/app/src/index.ts and packages/app/src/daemon.ts currently expose closed auth-provider/policy strings; packages/gateway/src/index.ts currently admits password fallback from narrow config; adapters/auth-authentik/src/strength.ts and adapters/auth-authentik/src/index.ts already model richer amr/acr evidence but app/daemon config does not fully carry it. Documentation must avoid overclaiming hardware-backed assurance when provider evidence only proves a weaker method.
+BMAD evidence: create-story ran via worker using spec-exists fallback into _bmad-output/implementation-artifacts/gla-078-provider-extensible-auth-assurance-policy.md; dev-story ran via worker; story-automator-review ran via separate reviewer and applied fixes. Final pnpm gate passed twice after review/final JSDoc fix (54 test files, 563 passed, 12 skipped); only pre-existing wpm/CLAUDE.md broken-symlink warning remains.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Typecheck passes with no errors.
-- [ ] #2 Linter passes clean.
-- [ ] #3 Tests are added for the change and the full suite is green.
-- [ ] #4 Public functions and exported types are documented.
-- [ ] #5 No dead code or unused exports are introduced.
-- [ ] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
-- [ ] #7 Architecture and developer-integration docs are updated to define the auth-assurance layer, provider evidence mapping boundary, deployment policy profiles, diagnostics, and the process for adding a new AuthProvider adapter.
-- [ ] #8 Security review notes cover assurance ordering, fail-closed/degrade-only behavior, authentik amr/acr ambiguity, auth-reuse safety, and why provider-specific evidence does not enter gateway authorization logic.
+- [x] #1 Typecheck passes with no errors.
+- [x] #2 Linter passes clean.
+- [x] #3 Tests are added for the change and the full suite is green.
+- [x] #4 Public functions and exported types are documented.
+- [x] #5 No dead code or unused exports are introduced.
+- [x] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
+- [x] #7 Architecture and developer-integration docs are updated to define the auth-assurance layer, provider evidence mapping boundary, deployment policy profiles, diagnostics, and the process for adding a new AuthProvider adapter.
+- [x] #8 Security review notes cover assurance ordering, fail-closed/degrade-only behavior, authentik amr/acr ambiguity, auth-reuse safety, and why provider-specific evidence does not enter gateway authorization logic.
 <!-- DOD:END -->

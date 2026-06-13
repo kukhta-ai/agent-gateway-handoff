@@ -70,10 +70,10 @@ adapter (`see adapters/auth-authentik/src/index.ts`):
    §5`).
 3. **Read.** authentik redirects back to the adapter callback with `?code&state`;
    `verifyAssertion(userId, {code,state})` exchanges + validates the `id_token`, checks `sub` against the
-   binding, and **derives the strength from `amr`/`acr`** (`§3`). Either method, validated, **independently
-   satisfies the step-up** — the gateway sees a single `{ok, authStrength}` fact and never knows (or needs to
-   know) which method produced it.
-4. **Gate.** The gateway compares the reported strength to the route's requirement (`§4`).
+   binding, and **derives provider-neutral assurance from `amr`/`acr`** (`§3`). Either method, validated,
+   **independently satisfies the step-up** under the right policy — the gateway sees `{ok, authStrength,
+   assurance?}` facts and never inspects the provider-local method values.
+4. **Gate.** The gateway compares the common assurance fact to the route's policy (`§4`).
 
 **Contrast with the in-tree default** (so the difference is explicit): there, passkey is an **in-page**
 `navigator.credentials.get`, there is no password fallback in one provider, and there is no redirect. The
@@ -81,8 +81,9 @@ authentik provider trades the same-page ceremony for a redirect **precisely beca
 (and MFA) in one hosted flow — the whole point of the delegated provider (`see authentik-integration.md`).
 
 > **No provider-specific gateway knowledge.** "Both methods" is entirely an authentik-flow + adapter concern.
-> The gateway only ever sees `{ok, authStrength}` — the same fact the WebAuthn provider returns — so the
-> dual-method capability adds **zero** method-awareness to core (`§4`, `§5`).
+> The gateway only ever sees provider-neutral facts (`authStrength` plus optional `AuthAssuranceEvidence`) — the
+> same boundary the WebAuthn provider uses — so the dual-method capability adds **zero** method-awareness to core
+> (`§4`, `§5`).
 
 ---
 
@@ -115,35 +116,37 @@ An enforcement point can **require a minimum strength**, so a step demanding the
 password-only result**. This is **already** the gateway's mechanism and needs **no change** — confirmed in the
 real code (`see packages/gateway/src/index.ts`):
 
-**Where the requirement is set.** The Access Gateway carries `requiredAuthStrength: RequiredAuthStrength`
-(`= Exclude<AuthStrength,"none">`), constructed from `GatewayOptions.requiredAuthStrength` and **defaulting to
-`"webauthn"`** (`this.requiredAuthStrength = opts.requiredAuthStrength ?? "webauthn"`). It is set at
-composition time (`packages/app`), per-deployment; a deployment that wants to *permit* the password fallback
-sets it to `"password"`, one that demands phishing-resistance leaves it `"webauthn"`.
+**Where the requirement is set.** The Access Gateway carries an `AuthAssurancePolicy`, constructed from the
+deployment profile in `packages/app` and defaulting to **`phishing-resistant`**. A deployment that wants to
+*permit* the password fallback sets **`GLA_AUTH_ASSURANCE_POLICY=password-permitted`**; one that demands
+phishing-resistance leaves the default. The older `requiredAuthStrength` input is now only a compatibility
+translation layer (`"webauthn"` → `phishing-resistant`, `"password"` → `password-permitted`).
 
-**How it gates.** `strengthSufficient(strength)` ranks `{none:0, password:1, webauthn:2}` and returns
-`rank[strength] >= rank[this.requiredAuthStrength]`. In `POST /handoff/auth/verify` the gateway calls
-`stepUp.verifyAuthentication(recipient, body.assertion)` → `{ok, authStrength}` and then:
+**How it gates.** `strengthSufficient(assurance)` delegates to the kernel's provider-neutral assurance policy
+evaluation (`none < password < phishing-resistant`; `webauthn` projects to phishing-resistant when legacy
+providers omit explicit evidence). In
+`POST /handoff/auth/verify` the gateway calls
+`stepUp.verifyAuthentication(recipient, body.assertion)` → `{ok, authStrength, assurance?}` and then:
 
-- if `!factResult.ok || !this.strengthSufficient(factResult.authStrength)` → **refuse**: HTTP **403** with
-  `{ error: { code: "auth.insufficient", message: "step-up did not satisfy the required strength" } }`, and
+- if `!factResult.ok || !this.strengthSufficient(factResult.assurance ?? factResult.authStrength)` → **refuse**:
+  HTTP **403** with
+  `{ error: { code: "auth.insufficient", message: "step-up did not satisfy the selected auth assurance policy" } }`, and
   **the grant is NOT added to `authorizedGrants`** — so the subsequent WS upgrade is refused (401) and the
   capsule is never reached;
 - else → `authorizedGrants.add(grantId)`, record the recipient-level auth-reuse validity, and respond `200
   { authorized: true, auth_strength: factResult.authStrength }`.
 
-**What a rejected result looks like, end to end.** A recipient who used the **password** stage on a route
-whose `requiredAuthStrength` is `"webauthn"` produces `{ok:true, authStrength:"password"}`;
-`strengthSufficient("password")` is `1 >= 2` → **false** → 403 `auth.insufficient`, grant unauthorized, WS
-upgrade refused, the gateway serves the catchable refusal (`§6`). A **passkey** result on the same route
-produces `{ok:true, authStrength:"webauthn"}` → `2 >= 2` → **true** → authorized, WS proxied. **Both methods
-independently satisfy** a route requiring `"password"`; **only the passkey** satisfies one requiring
-`"webauthn"`.
+**What a rejected result looks like, end to end.** A recipient who used the **password** stage under the
+default `phishing-resistant` policy produces `{ok:true, authStrength:"password"}`;
+`strengthSufficient("password")` is **false** → 403 `auth.insufficient`, grant unauthorized, WS upgrade
+refused, the gateway serves the catchable refusal (`§6`). A **passkey** result under the same policy produces
+`{ok:true, authStrength:"webauthn"}` → sufficient → authorized, WS proxied. **Both methods independently
+satisfy** the `password-permitted` profile; **only the passkey/phishing-resistant result** satisfies the
+default profile.
 
-> **The authentik password-only result yields `authStrength:"password"`** (`§3`), which the **existing**
-> `strengthSufficient` rejects under `"webauthn"` and accepts under `"password"` — with **no gateway change**.
-> The gating is provider-agnostic by construction: it reads only the `AuthStrength` fact, never the method or
-> the provider. (`docs/01-architecture-overview.md §6`: authorization is one primitive; the edge reads facts.)
+> **The authentik password-only result yields `authStrength:"password"`** (`§3`), which the gateway rejects
+> under `phishing-resistant` and accepts only under `password-permitted`. The gating is provider-agnostic by
+> construction: it reads the common assurance contract, never the raw method or provider.
 
 ---
 
@@ -259,10 +262,10 @@ The flow is designed for three cases (the page + authentik render these; GLA gat
   recipient sees authentik's branded login (not GLA's) for the credential step — a deliberate consequence of
   delegation (the credential lives there).
 - **A recipient with no passkey.** They use authentik's **password stage** (+ any MFA the operator
-  configured). The result is `authStrength:"password"`. On a route that **permits** password
-  (`requiredAuthStrength:"password"`) the session opens; on a route that **requires** `"webauthn"` they are
-  **refused** with the catchable "did not satisfy the required strength" message (`§4`) — the design lets the
-  *operator* decide per deployment whether the password fallback is acceptable, by setting the requirement.
+  configured). The result is `authStrength:"password"`. Under the explicit `password-permitted` policy the
+  session opens; under the default `phishing-resistant` policy they are **refused** with the catchable "did not
+  satisfy the selected auth assurance policy" message (`§4`) — the design lets the *operator* decide per deployment whether
+  the password fallback is acceptable, by setting the policy.
 - **A failed attempt.** A cancelled/failed authentik login, an authentik error, or **no valid `id_token`**
   (bad signature / wrong `nonce` / expired / `sub` mismatch / token-exchange failure) yields **`ok:false`**
   from `verifyAssertion` → the gateway's `auth.insufficient` **catchable refusal** (the same "Verification was
@@ -293,16 +296,17 @@ machinery, with the two acceptance properties observable. Concrete steps:
    §8` flagged — built once here, consumed by both step-up and enrollment.
 3. **Make the `/enroll/verify` response echo the recorded strength** (`index.ts:592`), provider-agnostically
    (`§5.2.4`).
-4. **Wire the requirement.** Confirm `requiredAuthStrength` flows from composition (`packages/app`) and that a
-   deployment can set `"password"` (permit the fallback) or `"webauthn"` (demand passkey). No gateway logic
-   change — `strengthSufficient` is already correct (`§4`).
+4. **Wire the policy.** Confirm `GLA_AUTH_ASSURANCE_POLICY` / `authAssuranceProfile` flows from composition
+   (`packages/app`) and that a deployment can set `password-permitted` (permit the fallback) or leave
+   `phishing-resistant` (demand passkey-grade evidence). `requiredAuthStrength` remains only a compatibility
+   translation layer.
 5. **Tests (the acceptance evidence)** — with `FakeAuthentik` (`see adapters/auth-authentik/src/fake-authentik.ts`)
    minting `id_token`s with chosen `amr`:
    - **Both methods independently satisfy a step-up:** a passkey `amr` (`["swk"]`) → `webauthn` → authorized;
-     a password `amr` (`["pwd"]`) → `password` → authorized **on a route requiring `"password"`**. Both reach
+     a password `amr` (`["pwd"]`) → `password` → authorized **under `password-permitted`**. Both reach
      the WS-proxy authorized state.
-   - **A too-weak result is rejected where a stronger one is required:** on a route requiring `"webauthn"`, a
-     password `amr` (`["pwd"]`) → `password` → **403 `auth.insufficient`**, grant **not** in `authorizedGrants`,
+   - **A too-weak result is rejected where a stronger one is required:** under `phishing-resistant`, a password
+     `amr` (`["pwd"]`) → `password` → **403 `auth.insufficient`**, grant **not** in `authorizedGrants`,
      WS upgrade **refused** — while a passkey `amr` on the same route is authorized.
    - **Failed attempt:** an invalid `id_token` (bad nonce/signature) → `ok:false` → catchable refusal, grant
      unauthorized.
@@ -314,15 +318,15 @@ machinery, with the two acceptance properties observable. Concrete steps:
 
 | Property (AC #5) | Observable |
 |---|---|
-| **Both methods independently satisfy a step-up** | with `requiredAuthStrength:"password"`, a passkey result *and* a password result each end with the grant in `authorizedGrants` (gateway `isGrantAuthorized(grantId)` true) and the WS upgrade proxied; the verify response is `{authorized:true, auth_strength:"webauthn"|"password"}`. |
-| **A too-weak result is rejected where a stronger one is required** | with `requiredAuthStrength:"webauthn"`, a password result → `verifyAuthentication`→`{authStrength:"password"}` → gateway 403 `auth.insufficient`, `isGrantAuthorized(grantId)` **false**, the WS upgrade refused (401); the passkey result on the same route → authorized. |
+| **Both methods independently satisfy a step-up** | with `authAssuranceProfile:"password-permitted"`, a passkey result *and* a password result each end with the grant in `authorizedGrants` (gateway `isGrantAuthorized(grantId)` true) and the WS upgrade proxied; the verify response is `{authorized:true, auth_strength:"webauthn"|"password"}`. |
+| **A too-weak result is rejected where a stronger one is required** | with the default `authAssuranceProfile:"phishing-resistant"`, a password result → `verifyAuthentication`→`{authStrength:"password", assurance:{level:"password"}}` → gateway 403 `auth.insufficient`, `isGrantAuthorized(grantId)` **false**, the WS upgrade refused (401); the passkey result on the same route → authorized. |
 
 **What GLA-068/070 already provide vs what GLA-072 builds.**
 
 | Already provided (GLA-068 adapter / GLA-070 service) | GLA-072 builds |
 |---|---|
-| `challenge`→`{kind:"redirect",authorizeUrl}`, `verifyAssertion({code,state})`→`{ok,authStrength}`, the `amr`/`acr`→strength map (`strength.ts`), `FakeAuthentik` | the **generic page branch** in `handoff-page.ts`/`enroll-page.ts` (provider-agnostic) |
-| the gateway's `requiredAuthStrength`/`strengthSufficient` gating (no change needed) | the **adapter-owned callback** that re-POSTs `{code,state}` to the unchanged verify routes (shared with enroll) |
+| `challenge`→`{kind:"redirect",authorizeUrl}`, `verifyAssertion({code,state})`→`{ok,authStrength,assurance?}`, the `amr`/`acr`→assurance map (`strength.ts`), `FakeAuthentik` | the **generic page branch** in `handoff-page.ts`/`enroll-page.ts` (provider-agnostic) |
+| the gateway's provider-neutral `AuthAssurancePolicy` / `strengthSufficient` gating | the **adapter-owned callback** that re-POSTs `{code,state}` to the unchanged verify routes (shared with enroll) |
 | service-layer enrollment + `isEnrolled` (GLA-070) | the **`/enroll/verify` strength-echo** fix (`:592`) + the dual-method E2E tests |
 
 ---
@@ -358,9 +362,9 @@ concentrated in the **redirect/callback realization** — the review must prove 
    non-colliding path, it is **not** the local bridge (S-6), it leaks no token/secret/`AuthFailReason` to the
    browser (generic refusal only), and a forged callback (bad `code`/`state`) yields a clean refusal that
    authorizes nothing.
-6. **`requiredAuthStrength` is honored on the second window (reuse).** Confirm auth-reuse stores the *actual*
-   strength and a later window still enforces the route's requirement (a reused `password` validity must not
-   open a `"webauthn"` route).
+6. **Auth assurance policy is honored on the second window (reuse).** Confirm auth-reuse stores the *actual*
+   strength and a later window still enforces the selected policy (a reused `password` validity must not open
+   under `phishing-resistant`).
 7. **`amr` fidelity / never-up-map (carried).** If authentik cannot emit an `amr` that distinguishes passkey
    from password (a GLA-073/074 config matter), a passkey login could be mis-mapped to `password` (a safe
    under-grant, just a UX failure) — but a password login must **never** map to `webauthn`. Confirm the
@@ -375,10 +379,10 @@ concentrated in the **redirect/callback realization** — the review must prove 
    read → gate (`§2`).
 2. Passkey (`{hwk,swk,webauthn,fido}`) → `webauthn`; password (`{pwd}`) → `password`; `none<password<webauthn`;
    never up-map (`§3`).
-3. The strength gate is the **existing** gateway mechanism — `requiredAuthStrength` (default `"webauthn"`) +
-   `strengthSufficient` — **unchanged**: a password-only result (`"password"`) is rejected (403
-   `auth.insufficient`, grant unauthorized) under `"webauthn"` and accepted under `"password"`; a passkey
-   result is accepted under either (`§4`).
+3. The strength gate is the gateway's provider-neutral auth assurance policy — `phishing-resistant` by default
+   and `password-permitted` only when explicit. A password-only result (`"password"`) is rejected (403
+   `auth.insufficient`, grant unauthorized) under the default and accepted only under `password-permitted`; a
+   passkey result is accepted under either (`§4`).
 4. **Finalized page mechanism = option (i) + a minimal generic (ii):** GLA-072 generalizes
    `handoff-page.ts`/`enroll-page.ts` to branch on the opaque options' `kind` (`redirect` →
    `location.assign(authorizeUrl)`; else the in-page WebAuthn ceremony) — **provider-agnostic** — and builds
@@ -398,7 +402,7 @@ concentrated in the **redirect/callback realization** — the review must prove 
 `docs/components/identity-and-auth.md` (the `auth_strength` model + invariants) ·
 `docs/components/access-gateway.md` (the sole-public-entry + step-up invariants) ·
 `docs/01-architecture-overview.md §6` (the authorization & security model) ·
-`packages/gateway/src/index.ts` (`requiredAuthStrength`/`strengthSufficient`, `/handoff/auth/*`, `/enroll/*`,
+`packages/gateway/src/index.ts` (`AuthAssurancePolicy`/`strengthSufficient`, `/handoff/auth/*`, `/enroll/*`,
 the `:592` enroll-response, the `:752` handoff-response) ·
 `packages/gateway/src/handoff-page.ts` + `enroll-page.ts` (the served pages GLA-072 generalizes) ·
 `adapters/auth-authentik/src/index.ts` (`challenge`/`verifyAssertion`, the `RedirectChallenge`) ·

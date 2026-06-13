@@ -63,8 +63,8 @@ mechanism is genuinely added.
 SIGNED grant** (never client-supplied), TTL-bounded by `authReuseTtlMs` (default ≈15 min, the handoff-window TTL; `0`
 disables reuse). On a later window:
 
-- **Reuse (no re-prompt).** If the bound recipient has an **unexpired** validity whose `auth_strength` meets the
-  required strength, the gateway authorizes THIS window's grant **without** a WebAuthn ceremony and serves a
+- **Reuse (no re-prompt).** If the bound recipient has an **unexpired** validity whose auth assurance satisfies the
+  selected deployment policy, the gateway authorizes THIS window's grant **without** a fresh ceremony and serves a
   *reused-auth* page that opens the noVNC stream directly. The WS upgrade also reuses (a client that goes straight to
   the upgrade is authorized by the same recipient-validity check).
 - **Re-prompt (Phase 6 behaviour).** An **expired** validity (pruned on read) or an **absent** one (a different
