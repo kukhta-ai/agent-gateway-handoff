@@ -53,6 +53,7 @@ import {
   type RecipientRef,
   authAssurancePolicyFromProfile,
   authAssurancePolicyFromRequiredAuthStrength,
+  redactOperatorText,
 } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
@@ -433,8 +434,8 @@ export interface ProvisioningStack {
   /**
    * The OPERATOR enrollment action (Phase E; present only when handoff is wired, since the gateway then fronts
    * enrollment too). Mint a single-use operator-discharge grant bound to the recipient + deliver the enrollment
-   * invite link. Lets a caller/test enroll the recipient (the precondition for any handoff) on the SAME gateway +
-   * credential store the step-up verifies against — so a full two-handoff scenario runs end to end.
+   * invite link. Returns an operator-safe read model; the usable grant-bearing link is delivered only through the
+   * recipient channel.
    */
   enrollInvite?: (
     recipient: RecipientRef,
@@ -652,7 +653,7 @@ export function createProvisioningBridge(
       const minted = await capability.mintEnrollmentGrant(recipient);
       const link = AccessGateway.enrollLink(h.publicBaseUrl, minted.token);
       await channel.deliver(recipient, link, minted.token);
-      return { link, grant: minted.token, nonce: minted.nonce };
+      return redactedEnrollmentInvite(link, minted.token, minted.nonce);
     };
 
     // ── Slice 5 — the COMPLETION-CLOSE pipeline (the Completion service + the url-watcher detector + the
@@ -926,7 +927,8 @@ export interface EnrollmentStack {
   /**
    * The OPERATOR enrollment action (docs/05 §3: NOT on the agent surface). Mint a single-use operator-discharge
    * grant bound to the recipient, then deliver the enrollment invite link (carrying the grant) to exactly that
-   * recipient via the channel. Returns the invite link + the grant token + its nonce (for observation/teardown).
+   * recipient via the channel. Returns only an operator-safe redacted read model; tests or channels that need the
+   * usable link must observe recipient delivery.
    */
   enrollInvite(
     recipient: RecipientRef,
@@ -1005,8 +1007,22 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
       const link = AccessGateway.enrollLink(opts.publicBaseUrl, minted.token);
       // The channel-delegation token would gate a richer channel; the CLI fallback records it but does not enforce.
       await channel.deliver(recipient, link, minted.token);
-      return { link, grant: minted.token, nonce: minted.nonce };
+      return redactedEnrollmentInvite(link, minted.token, minted.nonce);
     },
+  };
+}
+
+function redactedEnrollmentInvite(
+  link: string,
+  grant: OpaqueToken,
+  nonce: string,
+): { link: string; grant: OpaqueToken; nonce: string } {
+  void grant;
+  void nonce;
+  return {
+    link: redactOperatorText(link),
+    grant: "<redacted>" as OpaqueToken,
+    nonce: "<redacted>",
   };
 }
 

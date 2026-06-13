@@ -16,6 +16,9 @@ import {
   type ConfigSchema,
   type TemplateDescriptor,
   glaError,
+  isRedactionOrTemplatePlaceholder,
+  redactOperatorEgress,
+  redactOperatorText,
   validateSchemaShape,
 } from "@gla/kernel";
 import {
@@ -99,6 +102,46 @@ function hasText(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function hasUsableText(value: unknown): value is string {
+  return hasText(value) && !isRedactionOrTemplatePlaceholder(value);
+}
+
+function hasSafeOperatorText(value: unknown): value is string {
+  return hasUsableText(value) && redactOperatorText(value) === value;
+}
+
+function validateSafeOperatorText(
+  value: unknown,
+  missing: string[],
+  evidencePath: string,
+  opts: { required?: boolean } = {},
+): boolean {
+  if (value === undefined && opts.required !== true) {
+    return true;
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    missing.push(evidencePath);
+    return false;
+  }
+  if (isRedactionOrTemplatePlaceholder(value)) {
+    missing.push(`${evidencePath}.placeholder`);
+    return false;
+  }
+  if (redactOperatorText(value) !== value) {
+    missing.push(`${evidencePath}.unsafe`);
+    return false;
+  }
+  return true;
+}
+
+function safeEvidenceSegment(key: string): string {
+  return isRedactionOrTemplatePlaceholder(key) || redactOperatorText(key) !== key ? "key" : key;
+}
+
+function operatorSafeClone<T>(value: T): T {
+  return redactOperatorEgress(structuredClone(value)) as T;
+}
+
 function validBundle(
   bundle: unknown,
   requirement: DependencyRequirement,
@@ -137,15 +180,71 @@ function validBundle(
   return valid;
 }
 
-function validReceipt(receipt: unknown): receipt is DependencyReceiptEvidence {
-  return isRecord(receipt) && hasText(receipt.taskId) && receipt.status === "Done";
+function validReceipt(receipt: unknown, missing: string[]): receipt is DependencyReceiptEvidence {
+  if (!isRecord(receipt) || receipt.status !== "Done") {
+    missing.push("receipt");
+    return false;
+  }
+  let valid = true;
+  valid =
+    validateSafeOperatorText(receipt.taskId, missing, "receipt.taskId", { required: true }) &&
+    valid;
+  valid = validateSafeOperatorText(receipt.recordedAt, missing, "receipt.recordedAt") && valid;
+  if (Array.isArray(receipt.refs)) {
+    for (const [index, ref] of receipt.refs.entries()) {
+      if (typeof ref !== "string") {
+        missing.push(`receipt.refs.${index}`);
+        valid = false;
+      } else if (isRedactionOrTemplatePlaceholder(ref)) {
+        missing.push(`receipt.refs.${index}.placeholder`);
+        valid = false;
+      } else if (redactOperatorText(ref) !== ref) {
+        missing.push(`receipt.refs.${index}.unsafe`);
+        valid = false;
+      }
+    }
+  }
+  if (isRecord(receipt.checksums)) {
+    for (const [key, checksum] of Object.entries(receipt.checksums)) {
+      const keyPath = safeEvidenceSegment(key);
+      if (isRedactionOrTemplatePlaceholder(key)) {
+        missing.push(`receipt.checksums.${keyPath}.placeholder`);
+        valid = false;
+      } else if (redactOperatorText(key) !== key) {
+        missing.push(`receipt.checksums.${keyPath}.unsafe`);
+        valid = false;
+      }
+      if (typeof checksum !== "string") {
+        missing.push(`receipt.checksums.${keyPath}`);
+        valid = false;
+      } else if (isRedactionOrTemplatePlaceholder(checksum)) {
+        missing.push(`receipt.checksums.${keyPath}.placeholder`);
+        valid = false;
+      } else if (redactOperatorText(checksum) !== checksum) {
+        missing.push(`receipt.checksums.${keyPath}.unsafe`);
+        valid = false;
+      }
+    }
+  }
+  return valid;
 }
 
-function validProbe(probe: unknown): probe is DependencyProbeEvidence {
-  return (
-    isRecord(probe) &&
-    (probe.result === "available" || probe.result === "degraded" || probe.result === "unavailable")
-  );
+function validProbe(
+  probe: unknown,
+  missing: string[] = [],
+  evidencePath = "lastProbe",
+): probe is DependencyProbeEvidence {
+  if (
+    !isRecord(probe) ||
+    (probe.result !== "available" && probe.result !== "degraded" && probe.result !== "unavailable")
+  ) {
+    return false;
+  }
+  if (probe.at !== undefined && !hasSafeOperatorText(probe.at)) {
+    missing.push(`${evidencePath}.at`);
+  }
+  validateSafeOperatorText(probe.detail, missing, `${evidencePath}.detail`);
+  return !missing.some((m) => m.startsWith(`${evidencePath}.`));
 }
 
 function validConnection(
@@ -166,17 +265,83 @@ function validConnection(
       missing.push(`connection.refs.${requiredRef}`);
     }
   }
-  const allowedKinds = new Set(["secret-ref", "path-ref", "uri-ref", "service-ref", "socket-ref"]);
+  const allowedKinds = new Set([
+    "literal",
+    "secret-ref",
+    "path-ref",
+    "uri-ref",
+    "service-ref",
+    "socket-ref",
+  ]);
   for (const [key, ref] of Object.entries(refs)) {
+    const keyPath = safeEvidenceSegment(key);
+    if (isRedactionOrTemplatePlaceholder(key)) {
+      missing.push(`connection.refs.${keyPath}.placeholder`);
+    } else if (redactOperatorText(key) !== key) {
+      missing.push(`connection.refs.${keyPath}.unsafe`);
+    }
     if (!isRecord(ref) || !hasText(ref.kind) || !allowedKinds.has(ref.kind) || !hasText(ref.ref)) {
-      missing.push(`connection.refs.${key}`);
+      missing.push(`connection.refs.${keyPath}`);
       continue;
     }
+    if (isRedactionOrTemplatePlaceholder(ref.ref)) {
+      missing.push(`connection.refs.${keyPath}.placeholder`);
+    }
+    if (redactOperatorText(ref.ref) !== ref.ref) {
+      missing.push(`connection.refs.${keyPath}.unsafe`);
+    }
     if (SECRET_KEY_RE.test(key) && ref.kind !== "secret-ref") {
-      missing.push(`connection.refs.${key}.secret-ref`);
+      missing.push(`connection.refs.${keyPath}.secret-ref`);
+    }
+    if (ref.kind === "secret-ref" && !ref.ref.startsWith("secret:")) {
+      missing.push(`connection.refs.${keyPath}.secret-ref-pointer`);
     }
   }
   return !missing.some((m) => m.startsWith("connection."));
+}
+
+function validInverseOperation(
+  inverseOp: unknown,
+  missing: string[],
+): inverseOp is DependencyInverseOperation {
+  if (!isRecord(inverseOp)) {
+    missing.push("inverseOp");
+    return false;
+  }
+  let valid = true;
+  valid =
+    validateSafeOperatorText(inverseOp.description, missing, "inverseOp.description", {
+      required: true,
+    }) && valid;
+  valid = validateSafeOperatorText(inverseOp.command, missing, "inverseOp.command") && valid;
+  valid = validateSafeOperatorText(inverseOp.condition, missing, "inverseOp.condition") && valid;
+  return valid;
+}
+
+function validDecisionNotes(notes: unknown, missing: string[]): notes is DependencyDecisionNote[] {
+  if (notes === undefined) {
+    return true;
+  }
+  if (!Array.isArray(notes)) {
+    missing.push("decisionNotes");
+    return false;
+  }
+  let valid = true;
+  for (const [index, note] of notes.entries()) {
+    if (!isRecord(note)) {
+      missing.push(`decisionNotes.${index}`);
+      valid = false;
+      continue;
+    }
+    valid =
+      validateSafeOperatorText(note.note, missing, `decisionNotes.${index}.note`, {
+        required: true,
+      }) && valid;
+    valid =
+      validateSafeOperatorText(note.rationale, missing, `decisionNotes.${index}.rationale`) &&
+      valid;
+  }
+  return valid;
 }
 
 function stateMatchesOwnership(ownershipMode: OwnershipMode, state: DependencyState): boolean {
@@ -216,7 +381,7 @@ function sanitizedConnection(
   if (connection === undefined) {
     return undefined;
   }
-  return structuredClone(connection);
+  return operatorSafeClone(connection);
 }
 
 function evaluateRequirement(
@@ -245,10 +410,8 @@ function evaluateRequirement(
       missingEvidence.push("dependency.match");
     }
     validBundle(binding.bundle, requirement, missingEvidence);
-    if (!validReceipt(binding.receipt)) {
-      missingEvidence.push("receipt");
-    }
-    if (!validProbe(binding.lastProbe)) {
+    validReceipt(binding.receipt, missingEvidence);
+    if (!validProbe(binding.lastProbe, missingEvidence)) {
       missingEvidence.push("lastProbe");
     }
     if (
@@ -276,7 +439,10 @@ function evaluateRequirement(
     }
     if (binding.ownershipMode === "managed" && binding.inverseOp === undefined) {
       missingEvidence.push("inverseOp");
+    } else if (binding.inverseOp !== undefined) {
+      validInverseOperation(binding.inverseOp, missingEvidence);
     }
+    validDecisionNotes(binding.decisionNotes, missingEvidence);
   }
 
   const status = statusFromMissing(binding, missingEvidence);
@@ -301,19 +467,19 @@ function evaluateRequirement(
     ...base,
     ownershipMode: binding.ownershipMode,
     state: binding.state,
-    bundle: structuredClone(binding.bundle),
-    receipt: structuredClone(binding.receipt),
-    lastProbe: structuredClone(binding.lastProbe),
+    bundle: operatorSafeClone(binding.bundle),
+    receipt: operatorSafeClone(binding.receipt),
+    lastProbe: operatorSafeClone(binding.lastProbe),
   };
   const connection = sanitizedConnection(binding.connection);
   if (connection !== undefined) {
     out.connection = connection;
   }
   if (binding.inverseOp !== undefined) {
-    out.inverseOp = structuredClone(binding.inverseOp) as DependencyInverseOperation;
+    out.inverseOp = operatorSafeClone(binding.inverseOp) as DependencyInverseOperation;
   }
   if (binding.decisionNotes !== undefined) {
-    out.decisionNotes = structuredClone(binding.decisionNotes) as DependencyDecisionNote[];
+    out.decisionNotes = operatorSafeClone(binding.decisionNotes) as DependencyDecisionNote[];
   }
   return out;
 }

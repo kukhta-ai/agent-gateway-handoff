@@ -536,7 +536,10 @@ class FakeHandoffBridge extends AgentBridge {
       handoff_id: id as `hand_${string}`,
       status: "submitted",
       state: "completed" as const,
-      result: { url: "https://acme.example/verify", match: "/verify" },
+      result: {
+        url: "https://acme.example/verify?token=completion-token-canary&ok=1",
+        match: "/verify",
+      },
       next: "email-verification",
     };
   }
@@ -566,7 +569,7 @@ class FakeHandoffBridge extends AgentBridge {
 }
 
 describe("gla handoff verbs (Slice 4b)", () => {
-  it("`handoff open --session S --reason r` prints {handoff_id, link, recipient, expires_at} (exit 0)", async () => {
+  it("`handoff open --session S --reason r` prints a redacted read model (exit 0)", async () => {
     const c = capture(false);
     const bridge = new FakeHandoffBridge();
     const code = await run(
@@ -577,7 +580,9 @@ describe("gla handoff verbs (Slice 4b)", () => {
     expect(code).toBe(ExitCode.OK);
     const out = JSON.parse(c.stdout());
     expect(out.handoff_id).toBe("hand_1");
-    expect(out.link).toContain("grant=");
+    expect(out.link).toBe("<redacted-url>");
+    expect(c.stdout()).not.toContain("grant=");
+    expect(c.stdout()).not.toContain("tok");
     expect(out.recipient).toBe("tg:user:123");
     expect(out.expires_at).toBeTruthy();
     // The CLI passed the flags through to the bridge.
@@ -602,10 +607,14 @@ describe("gla handoff verbs (Slice 4b)", () => {
     const code = await run(["handoff", "wait", "hand_1"], c.out, services(bridge));
     expect(code).toBe(ExitCode.OK);
     const out = JSON.parse(c.stdout());
-    // The CLI passes the envelope through verbatim (the JSON contract): status + result + the next hint.
+    // The CLI preserves completion structure while redacting operator-visible result details.
     expect(out.status).toBe("submitted");
-    expect(out.result).toEqual({ url: "https://acme.example/verify", match: "/verify" });
+    expect(out.result).toEqual({
+      url: "https://acme.example/verify?token=<redacted>&ok=1",
+      match: "/verify",
+    });
     expect(out.next).toBe("email-verification");
+    expect(c.stdout()).not.toContain("completion-token-canary");
   });
 
   it("`handoff wait <id>` on a timeout/expiry exits 6 (TIMEOUT), not 4 (auth)", async () => {
@@ -625,7 +634,10 @@ describe("gla handoff verbs (Slice 4b)", () => {
     const c = capture(false);
     const code = await run(["handoff", "get", "hand_1"], c.out, services(new FakeHandoffBridge()));
     expect(code).toBe(ExitCode.OK);
-    expect(JSON.parse(c.stdout()).state).toBe("open");
+    const out = JSON.parse(c.stdout());
+    expect(out.state).toBe("open");
+    expect(out.link).toBe("<redacted-url>");
+    expect(c.stdout()).not.toContain("grant=");
   });
 
   it("`handoff cancel <id>` closes the window (exit 0)", async () => {
@@ -636,7 +648,10 @@ describe("gla handoff verbs (Slice 4b)", () => {
       services(new FakeHandoffBridge()),
     );
     expect(code).toBe(ExitCode.OK);
-    expect(JSON.parse(c.stdout()).state).toBe("cancelled");
+    const out = JSON.parse(c.stdout());
+    expect(out.state).toBe("cancelled");
+    expect(out.link).toBe("<redacted-url>");
+    expect(c.stdout()).not.toContain("grant=");
   });
 
   it("`handoff list` returns an array (exit 0)", async () => {

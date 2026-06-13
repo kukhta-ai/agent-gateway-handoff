@@ -283,11 +283,13 @@ describe("CatalogService.list — WPM receipt-derived availability (GLA-082)", (
     receipt(bindings, "browser-runtime").connection = {
       refs: {
         chromium: { kind: "path-ref", ref: "playwright:chromium" },
+        clientId: { kind: "literal", ref: "gla-client" },
         clientSecret: { kind: "secret-ref", ref: "secret:gla/browser-runtime/client" },
       },
     };
     const cat = new CatalogService({ dependencyBindings: bindings });
     const conn = cat.show("launcher-process")?.requires[0]?.connection;
+    expect(conn?.refs.clientId).toEqual({ kind: "literal", ref: "gla-client" });
     expect(conn?.refs.clientSecret).toEqual({
       kind: "secret-ref",
       ref: "secret:gla/browser-runtime/client",
@@ -306,6 +308,130 @@ describe("CatalogService.list — WPM receipt-derived availability (GLA-082)", (
     const dep = cat.show("launcher-process")?.requires[0];
     expect(dep?.status).toBe("unbound");
     expect(dep?.missingEvidence).toContain("connection.refs.clientSecret.secret-ref");
+
+    const literalSecretRef = referenceWpmDependencyBindings();
+    receipt(literalSecretRef, "browser-runtime").connection = {
+      refs: {
+        chromium: { kind: "path-ref", ref: "playwright:chromium" },
+        clientSecret: { kind: "secret-ref", ref: "super-secret-literal" },
+      },
+    };
+    const literalSecretCat = new CatalogService({ dependencyBindings: literalSecretRef });
+    expect(literalSecretCat.show("launcher-process")?.requires[0]?.missingEvidence).toContain(
+      "connection.refs.clientSecret.secret-ref-pointer",
+    );
+  });
+
+  it("redaction and unresolved template placeholders cannot bind receipt or connection evidence", () => {
+    const placeholderConnection = referenceWpmDependencyBindings();
+    receipt(placeholderConnection, "browser-runtime").connection = {
+      refs: {
+        chromium: { kind: "path-ref", ref: "<redacted>" },
+      },
+    };
+    const placeholderConnectionCat = new CatalogService({
+      dependencyBindings: placeholderConnection,
+    });
+    expect(placeholderConnectionCat.show("launcher-process")?.requires[0]).toMatchObject({
+      status: "unbound",
+      missingEvidence: expect.arrayContaining(["connection.refs.chromium.placeholder"]),
+    });
+
+    const placeholderReceipt = referenceWpmDependencyBindings();
+    receipt(placeholderReceipt, "browser-runtime").receipt = {
+      taskId: "browser-runtime-3",
+      status: "Done",
+      refs: ["⟨placed-file⟩"],
+      checksums: { "wpm/file": "***" },
+    };
+    const placeholderReceiptCat = new CatalogService({ dependencyBindings: placeholderReceipt });
+    expect(placeholderReceiptCat.show("launcher-process")?.requires[0]).toMatchObject({
+      status: "unbound",
+      missingEvidence: expect.arrayContaining([
+        "receipt.refs.0.placeholder",
+        "receipt.checksums.wpm/file.placeholder",
+      ]),
+    });
+
+    const unsafeReceiptAndConnection = referenceWpmDependencyBindings();
+    const unsafeBinding = receipt(unsafeReceiptAndConnection, "browser-runtime");
+    unsafeBinding.receipt = {
+      taskId: "grant=task-grant-canary",
+      status: "Done",
+      recordedAt: "token=recorded-token-canary",
+      refs: ["https://gla.example/handoff/sess_secret?grant=grant-canary"],
+      checksums: { "token=checksum-token-canary": "sha256:abc" },
+    };
+    unsafeBinding.connection = {
+      refs: {
+        "grant=connection-grant-canary": {
+          kind: "uri-ref",
+          ref: "runtime:ok",
+        },
+        endpoint: {
+          kind: "uri-ref",
+          ref: "https://gla.example/enroll?grant=enroll-grant-canary",
+        },
+        chromium: { kind: "path-ref", ref: "playwright:chromium" },
+      },
+    };
+    const unsafeReceiptAndConnectionCat = new CatalogService({
+      dependencyBindings: unsafeReceiptAndConnection,
+    });
+    const unsafeDep = unsafeReceiptAndConnectionCat.show("launcher-process")?.requires[0];
+    expect(unsafeDep).toMatchObject({
+      status: "unbound",
+      missingEvidence: expect.arrayContaining([
+        "receipt.taskId.unsafe",
+        "receipt.recordedAt.unsafe",
+        "receipt.refs.0.unsafe",
+        "receipt.checksums.key.unsafe",
+        "connection.refs.key.unsafe",
+        "connection.refs.endpoint.unsafe",
+      ]),
+    });
+    const unsafeSerialized = JSON.stringify(unsafeDep);
+    for (const raw of [
+      "task-grant-canary",
+      "recorded-token-canary",
+      "grant-canary",
+      "checksum-token-canary",
+      "connection-grant-canary",
+      "enroll-grant-canary",
+      "sess_secret",
+    ]) {
+      expect(unsafeSerialized).not.toContain(raw);
+    }
+
+    const placeholderDiagnostics = referenceWpmDependencyBindings();
+    const binding = receipt(placeholderDiagnostics, "browser-runtime");
+    binding.lastProbe = {
+      result: "available",
+      detail: "connected through <redacted>",
+    };
+    binding.inverseOp = {
+      description: "Remove only files installed by this bundle.",
+      command: "rm --token=raw-token-canary",
+      condition: "Only after https://gla.example/handoff/sess_secret?grant=grant-canary",
+    };
+    binding.decisionNotes = [
+      {
+        note: "adopted existing service",
+        rationale: "client_secret=raw-client-secret-canary",
+      },
+    ];
+    const placeholderDiagnosticsCat = new CatalogService({
+      dependencyBindings: placeholderDiagnostics,
+    });
+    expect(placeholderDiagnosticsCat.show("launcher-process")?.requires[0]).toMatchObject({
+      status: "unbound",
+      missingEvidence: expect.arrayContaining([
+        "lastProbe.detail.placeholder",
+        "inverseOp.command.unsafe",
+        "inverseOp.condition.unsafe",
+        "decisionNotes.0.rationale.unsafe",
+      ]),
+    });
   });
 });
 

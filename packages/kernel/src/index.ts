@@ -156,6 +156,13 @@ export type {
   AuthAssuranceProfileParseResult,
 } from "./auth-assurance.js";
 
+// ── K7c · operator redaction / placeholder guards ─────────────────────────────
+export {
+  isRedactionOrTemplatePlaceholder,
+  redactOperatorEgress,
+  redactOperatorText,
+} from "./redaction.js";
+
 // ── K8 · state-transition functions (pure reducers per lifecycle) ──────────────
 export {
   assertCompletionInContract,
