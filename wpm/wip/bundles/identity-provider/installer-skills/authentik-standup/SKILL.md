@@ -1,6 +1,6 @@
 ---
 name: authentik-standup
-description: "Install-time helper for the identity-provider bundle's authentik branch. Active while identity-provider is in focus and GLA_AUTH_PROVIDER=authentik. Guides the agent to stand up OR adopt an authentik IdP at the right ownership mode, configure the OIDC relying-party application + a passkey-and-password flow that emits a distinguishing amr, wire the same-origin redirect_uri callback, and verify+record the DependencyBinding — outcome-level, not a click-script."
+description: "Install-time helper for the identity-provider bundle's authentik branch. Active while identity-provider is in focus and GLA_AUTH_PROVIDER=authentik. Guides the agent to stand up OR adopt an authentik IdP at the right ownership mode, configure the OIDC relying-party application + a passkey-and-password flow that emits distinguishing amr/acr plus GLA's UV proof claim, wire the same-origin redirect_uri callback, and verify+record the DependencyBinding — outcome-level, not a click-script."
 ---
 
 # authentik standup (identity-provider · authentik branch)
@@ -56,10 +56,10 @@ to find on the instance; `payload/templates/oidc-app-and-flow.outcomes.md` is th
 - **An OIDC relying-party application for GLA** — a **confidential client** with a client id + client secret,
   whose **single allowed redirect URI equals** GLA's configured callback on **GLA's own public origin** (the
   `GLA_AUTHENTIK_REDIRECT_URI`, e.g. `https://<gla-public-host>/auth/callback`). authentik exact-matches the
-  redirect URI. Turn **"include claims in id_token"** on so `sub`, `amr`/`acr`, `nonce`, `aud`, `exp` ride in
+  redirect URI. Turn **"include claims in id_token"** on so `sub`, `amr`/`acr`, `gla_uv`, `nonce`, `aud`, `exp` ride in
   the **id_token** (the adapter validates the id_token, not a userinfo round-trip). Scope `openid profile`
   suffices. The discovery doc's `issuer` must **equal** `GLA_AUTHENTIK_ISSUER_URL` (the adapter validates `iss`).
-- **An authentication flow offering passkey AND password**, emitting a **distinguishing `amr`** — an
+- **An authentication flow offering passkey AND password**, emitting a **distinguishing `amr` and UV proof** — an
   Identification stage leading to a WebAuthn-validator stage **and** a Password stage (plus any MFA), the user
   chooses. Then the **critical, version-sensitive, LOAD-BEARING** part (`§3.2`/`§8.2`), confirmed by the GLA-074
   rehearsal: **authentik 2025.10 emits `amr: []` (empty) by default** and only a generic `acr` — it does **not**
@@ -67,13 +67,15 @@ to find on the instance; `payload/templates/oidc-app-and-flow.outcomes.md` is th
   (the dual-method *strength* claim can't be realized). The **REQUIRED, PROVEN fix** ships in this bundle: apply
   **`payload/templates/amr-scope-mapping.py`** as a **custom OAuth2 provider scope mapping** (`scope_name:
   "openid"`, attached to GLA's provider's property mappings). Its expression reads authentik's recorded login
-  method and populates `amr`: a **password** login → `["pwd"]` → `password`; a **passkey** login → `["swk"]` →
-  `webauthn`. (See `amr-scope-mapping.md` for how to apply it via the API.) This **matches GLA's default amr map**
-  (`adapters/auth-authentik/src/strength.ts` `DEFAULT_METHOD_MAPS`: `{pwd}→password`, `{hwk,swk,webauthn,fido}→
-  webauthn`), so **no adapter change and no `GLA_AUTHENTIK_AMR_MAP` override** is needed for this recipe. If the
-  instance's labels differ, tune the expression's branches (and/or set the map) — but the flow **must** emit
-  *something* separating the two tiers. **Verify the emitted `amr` against the running instance** (Step 2), never
-  assume. **Proven live (authentik 2025.10.4):** after applying it, a real password login yielded `amr:["pwd"]`
+  method and populates `amr` plus GLA's UV proof claim: a **password** login → `["pwd"]` + `gla_uv:false` →
+  `password`; a **passkey** login through a UV-required WebAuthn/passkey stage → `["swk"]` + `gla_uv:true` →
+  `webauthn`. (See `amr-scope-mapping.md` for how to apply it via the API.) This **matches GLA's default method map**
+  (`adapters/auth-authentik/src/strength.ts` `DEFAULT_METHOD_MAPS`: `{pwd}→password`, WebAuthn labels require
+  `gla_uv:true` before they become `webauthn`), so **no adapter change and no `GLA_AUTHENTIK_AMR_MAP` override** is
+  needed for this recipe. If the instance's labels differ, tune the expression's branches (and/or set the map) —
+  but the flow **must** emit *something* separating the two tiers and `gla_uv:true` only for a UV-required passkey
+  stage. **Verify the emitted `amr` and `gla_uv` against the running instance** (Step 2), never assume. **Proven live
+  (authentik 2025.10.4):** after applying it, a real password login yielded `amr:["pwd"]`
   and GLA resolved `{ok:true, authStrength:"password", methodResolvable:true}`. If it cannot be made to
   distinguish the methods, the integration **safely degrades to `password`-only** (the adapter never up-maps) and
   the operator must be **warned**.
@@ -122,8 +124,8 @@ receipt. Use the probes (next section); the acceptance evidence (`§7`):
 
 - the discovery doc answers + token/JWKS answer → **the provider answers**;
 - an `/authorize` request with GLA's `client_id`+`redirect_uri` is **accepted** → **the RP app exists**;
-- a **passkey** login → `id_token.amr` maps to `webauthn`; a **password** login → maps to `password` → **both
-  methods AND the distinction**;
+- a **passkey** login → `id_token.amr` plus `gla_uv:true` maps to `webauthn`; a **password** login → maps to
+  `password` → **both methods AND the distinction**;
 - **enroll → re-auth → same `sub`** → **stable subject**;
 - `gla auth diagnostics` against the running daemon reports the declared enrollment flow/stages/sources/choices,
   `gla auth diagnostics --recipient <recipient-ref>` reports the concrete GLA-side binding state, provider-local
@@ -167,10 +169,11 @@ Real, runnable logic an operator's agent runs against the live instance:
   (expect signing keys), confirm the `issuer` field matches, and (when given a `clientId`+`redirectUri`) shape
   the `/authorize` request and report whether the client+redirect are accepted vs unknown-client/bad-redirect.
   Exits non-zero with a typed reason on any failure so the verify step can branch.
-- **`smoke-amr-strength.mjs`** — proves the `amr`→strength mapping logic the flow must feed: it mints
-  `FakeAuthentik`-style id_tokens for a passkey `amr` (`["swk"]`) and a password `amr` (`["pwd"]`) and asserts
-  they map to `webauthn` and `password` respectively (the deterministic stand-in for the real-instance proof,
-  which the verify step runs against the live flow at deploy).
+- **`smoke-amr-strength.mjs`** — proves the `amr`/`acr` + `gla_uv`→strength mapping logic the flow must feed: it
+  mints `FakeAuthentik`-style id_tokens for a passkey `amr` (`["swk"]`) with `gla_uv:true`, a passkey label
+  without UV proof, and a password `amr` (`["pwd"]`), then asserts they map to `webauthn`, password floor, and
+  `password` respectively (the deterministic stand-in for the real-instance proof, which the verify step runs
+  against the live flow at deploy).
 
 Keep the recipe and the probes correct so an operator's agent **can** run them against a real authentik — the
 real host standup + the live OIDC proof is the deploy's job, not this build's.

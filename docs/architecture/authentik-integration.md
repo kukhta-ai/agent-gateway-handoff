@@ -196,21 +196,24 @@ grants (`see packages/gateway/src/index.ts` `tryConsumeEnrollmentGrantToken`).
 
 authentik reports *how* the human authenticated in the `id_token` claims. GLA must map that onto its frozen
 three-value `AuthStrength = "none" | "password" | "webauthn"` (`kernel-contracts.md §7`) so that **a passkey
-result yields the strongest strength (`webauthn`)** and **a password result yields a lower one (`password`)**.
+result with explicit user-verification proof yields the strongest strength (`webauthn`)** and **a password result
+yields a lower one (`password`)**.
 
-**The claim keyed on: `amr` (Authentication Methods References), with `acr` as the fallback.** `amr` is an
-OIDC-standard JSON array of method identifiers (RFC 8176); it is the precise, per-method signal. `acr`
-(Authentication Context Class Reference) is a coarser single value some flows set; it is the fallback when
-`amr` is absent.
+**The claims keyed on: `amr` (Authentication Methods References), `acr` as fallback, and `gla_uv` as UV proof.**
+`amr` is an OIDC-standard JSON array of method identifiers (RFC 8176); it is the precise, per-method signal.
+`acr` (Authentication Context Class Reference) is a coarser single value some flows set; it is the fallback when
+`amr` is absent. `gla_uv` is the GLA-owned custom claim that declares the authentik WebAuthn/passkey stage was
+configured and verified to require user verification.
 
-**The exact mapping (the values GLA-072 keys on).** Highest matching method wins (a login that did both
-password *and* passkey is `webauthn`):
+**The exact mapping (the values GLA-072 keys on).** Highest verified method wins (a login that did both
+password *and* UV-proven passkey is `webauthn`):
 
 | Condition on the `id_token` | → `AuthStrength` |
 |---|---|
-| `amr` contains any of **`"hwk"`** (hardware-secured key), **`"swk"`** (software-secured key / passkey), **`"webauthn"`**, or **`"fido"`** | **`"webauthn"`** |
+| `amr` contains any of **`"hwk"`** (hardware-secured key), **`"swk"`** (software-secured key / passkey), **`"webauthn"`**, or **`"fido"`**, and `gla_uv:true` | **`"webauthn"`** |
 | else `amr` contains **`"pwd"`** (password) — optionally combined with **`"mfa"` / `"otp"` / `"sms"`** (MFA on top of a password is still **not** phishing-resistant key auth, so it stays `password`) | **`"password"`** |
-| else, if `amr` absent, `acr` resolves to a configured **passkey/phishing-resistant** context (e.g. an `acr` value the operator maps to passkey, or the OIDC well-known `"phr"` phishing-resistant indicator) | **`"webauthn"`** |
+| else, if `amr` absent, `acr` resolves to a configured **passkey/phishing-resistant** context and `gla_uv:true` | **`"webauthn"`** |
+| else, if a WebAuthn/passkey label is present but `gla_uv` is absent or false | **`"password"`** with `missing-user-verification` diagnostic |
 | else, if `amr` absent and `acr` resolves to a **password/phishing-resistant-not-asserted** context (e.g. `"phrh"` is *not* asserted, or an operator-mapped password context) | **`"password"`** |
 | token valid but no method claim resolvable to either tier | **`"password"`** (a successful authentik login is at least password-grade; never silently `webauthn`, never `none`) — *and recorded as a CONCERN for the operator (`§9`)* |
 | token invalid / exchange failed / `sub` mismatch | **`"none"`** (with `ok:false`) |
@@ -222,10 +225,11 @@ password *and* passkey is `webauthn`):
   configured flow/stages. The exact tokens authentik produces for the GLA flow are **pinned at GLA-073/074**
   (the flow/stage config) and the adapter's table is **driven from a small, operator-visible map** so a
   deployment whose authentik labels differ does not require a code change — but the **defaults above are the
-  contract**.
+  contract**. A passkey label is not enough by itself; the flow must also emit `gla_uv:true` only for a
+  UV-required WebAuthn/passkey stage.
 - The mapping is **monotonic with the gateway's provider-neutral assurance policy** (`none < password <
-  phishing-resistant`, with `webauthn` projected to phishing-resistant): the default
-  `phishing-resistant` profile **rejects** a password-only authentik login and **accepts** a passkey one;
+  phishing-resistant`): the default
+  `phishing-resistant` profile **rejects** a password-only authentik login and **accepts** a UV-proven passkey one;
   `password-permitted` is the explicit profile that accepts password-grade evidence. The gateway reads this
   common contract, never provider-specific method names.
 - **Never up-map.** A missing/ambiguous method must never yield `webauthn` (that would silently weaken the
@@ -477,8 +481,9 @@ the adapter build; the table lists one **legal serialization**.
    `verifyAssertion({code,state})` → exchange/validate the `id_token`, **`sub` checked against the binding**,
    returning the **same `{ok, authStrength}` compatibility fact plus optional assurance evidence**; `userId`
    still flows in (**§3**).
-3. **`amr`** (fallback **`acr`**) maps to `AuthStrength`: `{hwk,swk,webauthn,fido}` → **`webauthn`**, `{pwd}`
-   (+MFA companions) → **`password`**; never up-map (**§4**).
+3. **`amr`** (fallback **`acr`**) plus **`gla_uv`** maps to `AuthStrength`: `{hwk,swk,webauthn,fido}` +
+   `gla_uv:true` → **`webauthn`**, `{pwd}` (+MFA companions) → **`password`**, WebAuthn labels without UV proof
+   → **`password`**; never up-map (**§4**).
 4. The credential authority shifts to **authentik**; the recipient is bound to a **stable `sub`**, carried by
    `UserIdentity.enrolledCredentialId` / the identity `EnrollmentRecord.credentialId` (field shapes
    unchanged); enrollment becomes **subject-linking** (**§5**).

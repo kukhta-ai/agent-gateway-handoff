@@ -417,7 +417,7 @@ interface AuthProviderPort {           // WebAuthn / authentik / OIDC are adapte
   finishEnrollment(userId: UserIdentity["id"], assertion: unknown): Promise<{ credentialId: string; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence }>;
   challenge(userId: UserIdentity["id"]): Promise<AuthChallenge>;
   verifyAssertion(userId: UserIdentity["id"], assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence }>;
-}                                       // GUARANTEE: reports FACTS (ok + auth_strength + optional assurance evidence), never an access decision.
+}                                       // GUARANTEE: reports FACTS (ok + auth_strength + assurance evidence), never an access decision. `authStrength` is compatibility; phishing-resistant enforcement needs explicit assurance evidence.
 
 interface SecretStorePort {            // Vault/OpenBao/file are adapters; agent-blind
   put(value: SecretValue, audience: string): Promise<Ref<"secret-ref">>;   // returns a ref, never echoes the value
@@ -518,9 +518,14 @@ type AuthAssuranceLevel = "none" | "password" | "phishing-resistant";
 type AuthAssuranceProfile = "phishing-resistant" | "password-permitted";
 
 interface AuthAssuranceEvidence {
-  authStrength: AuthStrength;          // compatibility fact; webauthn ⇒ phishing-resistant
+  authStrength: AuthStrength;          // compatibility fact
   level: AuthAssuranceLevel;           // provider-neutral assurance tier
   methodResolvable?: boolean;          // false when a valid token degraded to the safe floor
+  userPresent?: boolean;               // local authenticator/user interaction was observed
+  userVerified?: boolean;              // user was verified by PIN/biometric/equivalent provider proof
+  recipientBound?: boolean;            // proof was bound to the intended recipient/RP/audience
+  replayResistant?: boolean;           // challenge/nonce/state/counter replay checks passed
+  diagnostics?: string[];              // redacted downgrade/fail-closed reasons
   providerEvidence?: Record<string, unknown>; // diagnostic only; never used directly by the gateway
 }
 
@@ -544,13 +549,15 @@ interface RecipientBinding {
 interface IdentityPort {
   bind(recipient: RecipientRef, ctx: { channel: string }): Promise<RecipientBinding>;  // narrow-only, never widened
   /** One-time, operator-initiated enrollment, authorized by a single-use operator-discharge grant. */
-  enroll(recipient: RecipientRef, discharge: OpaqueToken): Promise<{ binding: RecipientBinding; authStrength: AuthStrength }>;
+  enroll(recipient: RecipientRef, discharge: OpaqueToken): Promise<{ binding: RecipientBinding; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence }>;
   /** Verify a recipient at the edge; returns FACTS, not an allow/deny. */
-  verify(recipient: RecipientRef, assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }>;
+  verify(recipient: RecipientRef, assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence; userId: UserIdentity["id"] }>;
 }
 ```
 **Policy profiles:** unset policy resolves to `phishing-resistant`, which demands passkey/phishing-resistant
-assurance. `password-permitted` is the explicit profile that admits password-grade evidence. Unknown profile
+assurance with explicit user-verification, recipient-binding, and replay-resistant evidence. A legacy
+`authStrength: "webauthn"` string without an `AuthAssuranceEvidence` object is not enough for that profile.
+`password-permitted` is the explicit profile that admits password-grade evidence. Unknown profile
 values are usage errors with stable diagnostics; they never silently fall back to a weaker policy.
 
 **Invariants (frozen, `identity-and-auth.md`):** a recipient can be verified **only if previously enrolled**;

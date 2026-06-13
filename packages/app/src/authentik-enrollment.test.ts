@@ -187,7 +187,7 @@ function executeEnrollmentCallback(
 async function enrollViaService(
   h: AuthentikHarness,
   rcpt: RecipientRef,
-  opts: { sub: string; amr?: string[]; discharge?: string },
+  opts: { sub: string; amr?: string[]; discharge?: string; userVerified?: boolean },
 ): Promise<{ credentialId: string; authStrength: string }> {
   const discharge = (opts.discharge ?? "operator-discharge-grant") as never;
   const challenge = await h.identity.enrollmentOptions(rcpt, discharge);
@@ -197,6 +197,7 @@ async function enrollViaService(
     sub: opts.sub,
     nonce,
     ...(opts.amr !== undefined ? { amr: opts.amr } : {}),
+    ...(opts.userVerified !== undefined ? { userVerified: opts.userVerified } : {}),
   });
   const rec = (await h.identity.enrollComplete(rcpt, { code, state })) as {
     credentialId: string;
@@ -214,7 +215,11 @@ describe("AC#1 · a recipient enrolled through authentik is bound to a stable su
     const h = await authentikHarness();
     expect(h.identity.isEnrolled(recipient)).toBe(false);
 
-    const rec = await enrollViaService(h, recipient, { sub: "sub-stable", amr: ["swk"] });
+    const rec = await enrollViaService(h, recipient, {
+      sub: "sub-stable",
+      amr: ["swk"],
+      userVerified: true,
+    });
 
     // The identity-level fact: enrolled, credentialId is the authentik subject, strength is the derived fact.
     expect(h.identity.isEnrolled(recipient)).toBe(true);
@@ -232,7 +237,12 @@ describe("AC#1 · a recipient enrolled through authentik is bound to a stable su
     // Step-up via the identity service: authenticationOptions (begin) → mint a token for the SAME sub → verify.
     const challenge = await h.identity.authenticationOptions(recipient);
     const { state, nonce } = stateNonceFrom(challenge);
-    await h.fake.stageValidLogin(`auth-${state}`, { sub: "sub-stable", nonce, amr: ["swk"] });
+    await h.fake.stageValidLogin(`auth-${state}`, {
+      sub: "sub-stable",
+      nonce,
+      amr: ["swk"],
+      userVerified: true,
+    });
     const verified = await h.identity.verifyAuthentication(recipient, {
       code: `auth-${state}`,
       state,
@@ -246,10 +256,19 @@ describe("AC#1 · a recipient enrolled through authentik is bound to a stable su
 
   it("a step-up presenting a DIFFERENT sub fails — the binding enforces recipient identity", async () => {
     const h = await authentikHarness();
-    await enrollViaService(h, recipient, { sub: "sub-real", amr: ["swk"] });
+    await enrollViaService(h, recipient, {
+      sub: "sub-real",
+      amr: ["swk"],
+      userVerified: true,
+    });
     const challenge = await h.identity.authenticationOptions(recipient);
     const { state, nonce } = stateNonceFrom(challenge);
-    await h.fake.stageValidLogin(`auth-${state}`, { sub: "sub-IMPOSTOR", nonce, amr: ["swk"] });
+    await h.fake.stageValidLogin(`auth-${state}`, {
+      sub: "sub-IMPOSTOR",
+      nonce,
+      amr: ["swk"],
+      userVerified: true,
+    });
     const verified = await h.identity.verifyAuthentication(recipient, {
       code: `auth-${state}`,
       state,
@@ -398,7 +417,12 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     expect(optRes.status).toBe(200);
     const { state, nonce } = stateNonceFrom(await optRes.json());
     const code = `code-${state}`;
-    await fake.stageValidLogin(code, { sub: "sub-enrolled", nonce, amr: ["swk"] });
+    await fake.stageValidLogin(code, {
+      sub: "sub-enrolled",
+      nonce,
+      amr: ["swk"],
+      userVerified: true,
+    });
     const verifyRes = await fetch(`${origin}/enroll/verify`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -442,7 +466,12 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     const state = authorizeUrl.searchParams.get("state") ?? "";
     const nonce = authorizeUrl.searchParams.get("nonce") ?? "";
     const code = `callback-${state}`;
-    await fake.stageValidLogin(code, { sub: "sub-callback-enrolled", nonce, amr: ["swk"] });
+    await fake.stageValidLogin(code, {
+      sub: "sub-callback-enrolled",
+      nonce,
+      amr: ["swk"],
+      userVerified: true,
+    });
 
     const callback = await fetch(
       `${origin}${redirectUri.pathname}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
@@ -535,7 +564,12 @@ describe("AC#3 · a failed enrollment leaves no half-bound recipient; retryable 
     const h = await authentikHarness();
     await expect(
       beginThenFinish(h, recipient, async (fake, _nonce, code) => {
-        await fake.stageValidLogin(code, { sub: "sub-x", nonce: "WRONG-NONCE", amr: ["swk"] });
+        await fake.stageValidLogin(code, {
+          sub: "sub-x",
+          nonce: "WRONG-NONCE",
+          amr: ["swk"],
+          userVerified: true,
+        });
       }),
     ).rejects.toThrow();
     expect(h.identity.isEnrolled(recipient)).toBe(false);
@@ -563,7 +597,11 @@ describe("AC#3 · a failed enrollment leaves no half-bound recipient; retryable 
     ).rejects.toThrow();
     expect(h.identity.isEnrolled(recipient)).toBe(false);
     // Then: a fresh, valid enrollment succeeds and binds the subject.
-    const rec = await enrollViaService(h, recipient, { sub: "sub-good", amr: ["swk"] });
+    const rec = await enrollViaService(h, recipient, {
+      sub: "sub-good",
+      amr: ["swk"],
+      userVerified: true,
+    });
     expect(rec.credentialId).toBe("sub-good");
     expect(h.identity.isEnrolled(recipient)).toBe(true);
     expect(h.provider.getBoundSubject(userIdOf(recipient))?.sub).toBe("sub-good");
@@ -574,7 +612,11 @@ describe("AC#3 · a failed enrollment leaves no half-bound recipient; retryable 
     await enrollViaService(h, recipient, { sub: "sub-old", amr: ["pwd"] });
     expect(h.provider.getBoundSubject(userIdOf(recipient))?.sub).toBe("sub-old");
     // A second enrollment with a new round-trip rebinds cleanly to the new subject.
-    const rec = await enrollViaService(h, recipient, { sub: "sub-new", amr: ["swk"] });
+    const rec = await enrollViaService(h, recipient, {
+      sub: "sub-new",
+      amr: ["swk"],
+      userVerified: true,
+    });
     expect(rec.credentialId).toBe("sub-new");
     expect(h.provider.getBoundSubject(userIdOf(recipient))?.sub).toBe("sub-new");
     expect(h.identity.getCredential(recipient)?.credentialId).toBe("sub-new");
@@ -588,7 +630,11 @@ describe("AC#3 · a failed enrollment leaves no half-bound recipient; retryable 
 describe("AC#4 · GLA stores only the subject — no passkey/secret/password for an authentik-enrolled recipient", () => {
   it("the ONLY durable thing GLA holds is {sub}; there is no credential material anywhere in GLA", async () => {
     const h = await authentikHarness();
-    await enrollViaService(h, recipient, { sub: "sub-only-thing", amr: ["swk"] });
+    await enrollViaService(h, recipient, {
+      sub: "sub-only-thing",
+      amr: ["swk"],
+      userVerified: true,
+    });
 
     // The adapter's durable store holds EXACTLY {sub} — no public key, no counter, no secret, no password.
     const bound = h.provider.getBoundSubject(userIdOf(recipient));

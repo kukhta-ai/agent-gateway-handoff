@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-// smoke-amr-strength.mjs — prove the amr/acr → AuthStrength mapping the authentik flow must FEED is correct
+// smoke-amr-strength.mjs — prove the amr/acr + gla_uv → AuthStrength mapping the authentik flow must FEED is correct
 // (identity-provider · GLA-074). The deterministic stand-in for the real-instance "passkey→webauthn,
 // password→password" proof (authentik-service-standup.md §7): a real running authentik isn't available in a
 // constrained build, but the MAPPING the flow's emitted amr must satisfy is fixed and testable here. At the real
 // deploy, the verify task drives an actual passkey login + an actual password login through the live flow and
 // asserts the SAME outcomes (identity-provider-6 AC#3); this script proves the contract that proof checks against.
 //
-// This mirrors `adapters/auth-authentik/src/strength.ts` DEFAULT_METHOD_MAPS (the contract): passkey set
-// {hwk,swk,webauthn,fido} → webauthn; {pwd} (+ MFA companions) → password; valid-but-unresolvable → password
-// (the floor); NEVER up-map a missing/ambiguous method to webauthn. (Re-implemented inline — the wpm bundle is a
-// separate shipped artifact and cannot import GLA's runtime code; keeping it in sync with strength.ts is the
-// contract this script encodes.)
+// This mirrors `adapters/auth-authentik/src/strength.ts` DEFAULT_METHOD_MAPS (the contract): passkey labels
+// {hwk,swk,webauthn,fido} + gla_uv:true → webauthn; passkey labels without UV proof → password; {pwd}
+// (+ MFA companions) → password; valid-but-unresolvable → password (the floor); NEVER up-map a missing/ambiguous
+// method to webauthn. (Re-implemented inline — the wpm bundle is a separate shipped artifact and cannot import
+// GLA's runtime code; keeping it in sync with strength.ts is the contract this script encodes.)
 //
 // EXIT: 0 iff every case maps as expected; 1 otherwise.
 
@@ -19,14 +19,14 @@ const PASSWORD_AMR = new Set(["pwd"]);
 const WEBAUTHN_ACR = new Set(["phr"]);
 const PASSWORD_ACR = new Set(["pwd", "password"]);
 
-/** The §4 mapping (highest method wins; never up-map; floor = password for a valid token). */
-function mapMethodToStrength({ amr, acr } = {}) {
+/** The §4 mapping (highest verified method wins; never up-map; floor = password for a valid token). */
+function mapMethodToStrength({ amr, acr, gla_uv } = {}) {
   const has = (set) => Array.isArray(amr) && amr.some((m) => set.has(String(m).toLowerCase()));
-  if (has(WEBAUTHN_AMR)) return "webauthn";
+  if (has(WEBAUTHN_AMR) && gla_uv === true) return "webauthn";
   if (has(PASSWORD_AMR)) return "password";
   if (typeof acr === "string") {
     const a = acr.toLowerCase();
-    if (WEBAUTHN_ACR.has(a)) return "webauthn";
+    if (WEBAUTHN_ACR.has(a) && gla_uv === true) return "webauthn";
     if (PASSWORD_ACR.has(a)) return "password";
   }
   return "password"; // valid token, unresolvable method → the floor (NEVER webauthn, NEVER none)
@@ -35,13 +35,18 @@ function mapMethodToStrength({ amr, acr } = {}) {
 // Cases: [label, claims, expected]. These are exactly what the flow must produce for each method.
 const cases = [
   // Passkey logins → webauthn (the strongest).
-  ["passkey: amr=[swk]", { amr: ["swk"] }, "webauthn"],
-  ["passkey: amr=[hwk]", { amr: ["hwk"] }, "webauthn"],
-  ["passkey: amr=[webauthn]", { amr: ["webauthn"] }, "webauthn"],
-  ["passkey: amr=[fido]", { amr: ["fido"] }, "webauthn"],
-  ["passkey case-insensitive: amr=[SWK]", { amr: ["SWK"] }, "webauthn"],
-  ["both methods: amr=[pwd,swk] → strongest wins", { amr: ["pwd", "swk"] }, "webauthn"],
-  ["acr passkey context: acr=phr", { acr: "phr" }, "webauthn"],
+  ["passkey: amr=[swk] + gla_uv=true", { amr: ["swk"], gla_uv: true }, "webauthn"],
+  ["passkey: amr=[hwk] + gla_uv=true", { amr: ["hwk"], gla_uv: true }, "webauthn"],
+  ["passkey: amr=[webauthn] + gla_uv=true", { amr: ["webauthn"], gla_uv: true }, "webauthn"],
+  ["passkey: amr=[fido] + gla_uv=true", { amr: ["fido"], gla_uv: true }, "webauthn"],
+  ["passkey case-insensitive: amr=[SWK] + gla_uv=true", { amr: ["SWK"], gla_uv: true }, "webauthn"],
+  [
+    "both methods: amr=[pwd,swk] + gla_uv=true → strongest wins",
+    { amr: ["pwd", "swk"], gla_uv: true },
+    "webauthn",
+  ],
+  ["acr passkey context: acr=phr + gla_uv=true", { acr: "phr", gla_uv: true }, "webauthn"],
+  ["passkey label without UV proof: amr=[swk] → password floor", { amr: ["swk"] }, "password"],
   // Password logins → password (MFA never up-maps).
   ["password: amr=[pwd]", { amr: ["pwd"] }, "password"],
   ["password+MFA: amr=[pwd,mfa]", { amr: ["pwd", "mfa"] }, "password"],
@@ -80,7 +85,7 @@ if (!neverUp) {
 
 if (failures === 0) {
   console.log(
-    "SMOKE_RESULT: amr->strength mapping correct (passkey=webauthn, password=password, never up-map)",
+    "SMOKE_RESULT: amr+gla_uv->strength mapping correct (verified passkey=webauthn, password=password, never up-map)",
   );
   process.exit(0);
 }
