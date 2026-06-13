@@ -56,6 +56,17 @@ export interface RevocationSnapshot {
   version: string;
 }
 
+/**
+ * Mutable revocation cache seam used by signer adapters. The snapshot shape remains the edge-facing contract;
+ * this mutable shape lets the app composition root supply a restart-safe cache without making `verify()` do I/O.
+ */
+export interface MutableRevocations extends RevocationSnapshot {
+  /** Mark a capability id revoked and advance the cache version. */
+  add(id: CapabilityId): void;
+  /** A frozen, point-in-time copy safe to hand to an edge verifier. */
+  snapshot(): RevocationSnapshot;
+}
+
 /** The context an edge verifier supplies to {@link CapabilityPort.verify} — all pure inputs. */
 export interface VerifyContext {
   /** The wall-clock instant to evaluate `ttl` caveats against (supplied, never read from a clock here). */
@@ -136,11 +147,21 @@ export interface CapabilityPort {
  * distributed cache is an adapter concern, but the *shape* and a working default live in core so
  * tests (and the reference signer) need nothing external.
  */
-export class InMemoryRevocations implements RevocationSnapshot {
+export class InMemoryRevocations implements MutableRevocations {
   private readonly revoked = new Set<CapabilityId>();
   /** A monotonic version stamp bumped on every change, so verifiers can detect staleness. */
   version = "0";
   private counter = 0;
+
+  constructor(initial?: Iterable<CapabilityId>) {
+    if (initial !== undefined) {
+      for (const id of initial) {
+        this.revoked.add(id);
+      }
+      this.counter = this.revoked.size;
+      this.version = String(this.counter);
+    }
+  }
 
   has(id: CapabilityId): boolean {
     return this.revoked.has(id);
@@ -148,9 +169,17 @@ export class InMemoryRevocations implements RevocationSnapshot {
 
   /** Mark a capability id revoked and bump {@link version}. */
   add(id: CapabilityId): void {
+    const before = this.revoked.size;
     this.revoked.add(id);
-    this.counter += 1;
-    this.version = String(this.counter);
+    if (this.revoked.size !== before) {
+      this.counter += 1;
+      this.version = String(this.counter);
+    }
+  }
+
+  /** The revoked ids in stable order. Intended for persistence adapters, not edge verification. */
+  values(): CapabilityId[] {
+    return [...this.revoked].sort();
   }
 
   /** A frozen, point-in-time copy safe to hand to an edge verifier. */

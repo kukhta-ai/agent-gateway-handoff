@@ -182,6 +182,12 @@ export interface CapsuleRecord {
   workspace: WorkspaceHandle;
 }
 
+/** Restart-safe live-capsule record store. Concrete storage is wired by `app`. */
+export interface CapsuleLifecycleStore {
+  load(): CapsuleRecord[];
+  save(records: CapsuleRecord[]): void;
+}
+
 /** What {@link CapsuleLifecycleManager.spawn} hands back: the live capsule's handles. */
 export interface SpawnedCapsule {
   runtime: RuntimeHandle;
@@ -195,6 +201,8 @@ export interface CapsuleLifecycleOptions {
   workspace: WorkspaceManager;
   /** The uid the capsule runs as (the agent's own uid; default = the current process uid). */
   agentUid?: number;
+  /** Restart-safe live-capsule record store. Defaults to process-local memory. */
+  store?: CapsuleLifecycleStore;
 }
 
 /**
@@ -210,11 +218,19 @@ export class CapsuleLifecycleManager {
   private readonly agentUid: number;
   /** Live capsules, by session id (orphan detection compares this to session truth). */
   private readonly live = new Map<string, CapsuleRecord>();
+  private readonly store: CapsuleLifecycleStore | undefined;
 
   constructor(opts: CapsuleLifecycleOptions) {
     this.registry = opts.registry;
     this.workspace = opts.workspace;
     this.agentUid = opts.agentUid ?? defaultAgentUid();
+    this.store = opts.store;
+    const records = opts.store?.load();
+    if (records !== undefined) {
+      for (const record of records) {
+        this.live.set(record.sessionId, structuredClone(record));
+      }
+    }
   }
 
   /** The agent uid capsules run as (the agent's own authority; docs/04 §6). */
@@ -279,6 +295,7 @@ export class CapsuleLifecycleManager {
 
     const record: CapsuleRecord = { sessionId, launcherName, runtime, workspace };
     this.live.set(sessionId, record);
+    this.persist();
     return { runtime, workspace, launcherName };
   }
 
@@ -309,31 +326,33 @@ export class CapsuleLifecycleManager {
   /**
    * Tear down a session's capsule: stop the launcher process (kill the group + reap) and reap the
    * workspace, then drop the tracking record. **Idempotent + restart-safe** (GLA-023 AC#3): calling it
-   * for a session with no live capsule is a no-op; a partial failure of stop/reap still drops the
-   * record and converges (the next call is a clean no-op). Used by the Cleanup Reconciler AND as the
-   * create-saga's compensation.
+   * for a session with no live capsule is a no-op; a partial failure keeps the durable record so the
+   * next reconcile pass can retry stop/reap instead of forgetting a possible orphan. Used by the
+   * Cleanup Reconciler AND as the create-saga's compensation.
    */
   async teardown(sessionId: string): Promise<void> {
     const rec = this.live.get(sessionId);
     if (rec === undefined) {
       return; // already torn down / never spawned — idempotent no-op.
     }
-    // Drop the tracking record FIRST so a re-entrant teardown (or an orphan scan) sees it gone — the
-    // record is the single source of "this session has a live capsule". Even if stop/reap throw below,
-    // the session no longer counts as having a live capsule (restart-safe convergence).
-    this.live.delete(sessionId);
     const launcher = this.registry.has(rec.launcherName)
       ? this.registry.resolve(rec.launcherName)
       : undefined;
-    if (launcher !== undefined) {
-      await safeStop(launcher, rec.runtime);
+    const stopped = launcher !== undefined ? await safeStop(launcher, rec.runtime) : false;
+    const reaped = await safeReap(this.workspace, rec.workspace);
+    if (stopped && reaped) {
+      this.live.delete(sessionId);
+      this.persist();
     }
-    await safeReap(this.workspace, rec.workspace);
   }
 
   /** The session ids of all currently-live capsules (for orphan reconciliation against session truth). */
   liveSessions(): string[] {
     return [...this.live.keys()];
+  }
+
+  private persist(): void {
+    this.store?.save([...this.live.values()].map((record) => structuredClone(record)));
   }
 }
 
@@ -462,21 +481,23 @@ function asDependencyError(e: unknown, context: string): Error {
   return glaError("dependency.unavailable", `${context}: ${String(e)}`);
 }
 
-/** Stop a launcher's runtime, swallowing errors (teardown must converge even if stop fails). */
-async function safeStop(launcher: LauncherPort, runtime: RuntimeHandle): Promise<void> {
+/** Stop a launcher's runtime, returning whether the cleanup step converged. */
+async function safeStop(launcher: LauncherPort, runtime: RuntimeHandle): Promise<boolean> {
   try {
     await launcher.stop(runtime);
+    return true;
   } catch {
-    // Restart-safe: a stop failure does not block the rest of teardown; the reconciler converges later.
+    return false;
   }
 }
 
-/** Reap a workspace, swallowing errors (teardown must converge even if reap fails). */
-async function safeReap(manager: WorkspaceManager, h: WorkspaceHandle): Promise<void> {
+/** Reap a workspace, returning whether the cleanup step converged. */
+async function safeReap(manager: WorkspaceManager, h: WorkspaceHandle): Promise<boolean> {
   try {
     await manager.reap(h);
+    return true;
   } catch {
-    // Restart-safe: a reap failure does not block teardown; the reconciler converges later.
+    return false;
   }
 }
 

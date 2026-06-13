@@ -18,8 +18,15 @@ import {
   AUTH_AUTHENTIK_MODULE,
   type AuthAuthentikOptions,
   AuthAuthentikProvider,
+  type BoundSubject,
+  type PendingAttempt,
 } from "@gla/auth-authentik";
-import { AUTH_WEBAUTHN_MODULE, AuthWebauthnProvider } from "@gla/auth-webauthn";
+import {
+  AUTH_WEBAUTHN_MODULE,
+  AuthWebauthnProvider,
+  type PendingChallenge,
+  type StoredCredential,
+} from "@gla/auth-webauthn";
 import { AgentBridge } from "@gla/bridge";
 import { CapabilityService } from "@gla/capability";
 import { CatalogService, toAdmissionCatalog } from "@gla/catalog";
@@ -34,7 +41,7 @@ import { CONNECTOR_CDP_MODULE, ConnectorCdpAdapter } from "@gla/connector-cdp";
 import { DETECTOR_URL_MODULE, DETECTOR_URL_NAME, DetectorUrlAdapter } from "@gla/detector-url";
 import { EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
 import { AccessGateway } from "@gla/gateway";
-import { IdentityService } from "@gla/identity";
+import { type EnrollmentRecord, IdentityService } from "@gla/identity";
 // Core / core-adjacent ports (the inward side of the seam):
 import {
   type AuthAssuranceProfile,
@@ -50,16 +57,24 @@ import {
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
 import { RouteController } from "@gla/route";
-import { type CompletionDeps, type HandoffDeps, SessionService } from "@gla/session";
-import { TaskService } from "@gla/task";
+import {
+  type CompletionDeps,
+  type HandoffDeps,
+  SessionService,
+  type SessionServiceOptions,
+  type SessionServiceSnapshot,
+} from "@gla/session";
+import { TaskService, type TaskServiceSnapshot } from "@gla/task";
 import {
   CapsuleLifecycleManager,
+  type CapsuleRecord,
   CleanupReconciler,
   SpawnerRegistry,
   WorkspaceManager,
   attachConnector,
 } from "@gla/worker";
 import { WORKSPACE_PROFILE_MODULE, WorkspaceProfileAdapter } from "@gla/workspace-profile";
+import { DaemonStateRoot } from "./daemon-state.js";
 import { type DaemonHandle, runServe, serve } from "./daemon.js";
 
 /** The MVP default wiring (baseline §5): which adapter is bound to each kernel port. */
@@ -149,6 +164,29 @@ export interface AuthProviderSelection {
   authentik?: AuthentikConfig;
 }
 
+interface AuthProviderStateStores {
+  webauthnCredentials?: {
+    get(key: string): StoredCredential | undefined;
+    set(key: string, value: StoredCredential): void;
+    delete(key: string): void;
+  };
+  webauthnChallenges?: {
+    get(key: string): PendingChallenge | undefined;
+    set(key: string, value: PendingChallenge): void;
+    delete(key: string): void;
+  };
+  authentikSubjects?: {
+    get(key: string): BoundSubject | undefined;
+    set(key: string, value: BoundSubject): void;
+    delete(key: string): void;
+  };
+  authentikAttempts?: {
+    get(key: string): PendingAttempt | undefined;
+    set(key: string, value: PendingAttempt): void;
+    delete(key: string): void;
+  };
+}
+
 /**
  * Build the chosen {@link AuthProviderPort} adapter (the single provider-selection seam, doc §1/§7).
  * `"webauthn"`/unset → today's `new AuthWebauthnProvider(...)` (UNCHANGED); `"authentik"` → a
@@ -161,6 +199,7 @@ export interface AuthProviderSelection {
 function buildAuthProvider(
   selection: AuthProviderSelection,
   webauthn: { rpID: string; rpName: string; expectedOrigin: string | string[] },
+  stores: AuthProviderStateStores = {},
 ): { provider: AuthProviderPort; module: string } {
   if (selection.authProvider === "authentik") {
     if (selection.authentik === undefined) {
@@ -175,6 +214,8 @@ function buildAuthProvider(
       clientSecret: cfg.clientSecret,
       redirectUri: cfg.redirectUri,
       ...(cfg.scopes !== undefined ? { scopes: cfg.scopes } : {}),
+      ...(stores.authentikSubjects !== undefined ? { subjects: stores.authentikSubjects } : {}),
+      ...(stores.authentikAttempts !== undefined ? { attempts: stores.authentikAttempts } : {}),
     };
     return { provider: new AuthAuthentikProvider(opts), module: AUTH_AUTHENTIK_MODULE };
   }
@@ -184,8 +225,39 @@ function buildAuthProvider(
       rpID: webauthn.rpID,
       rpName: webauthn.rpName,
       expectedOrigin: webauthn.expectedOrigin,
+      ...(stores.webauthnCredentials !== undefined
+        ? { credentials: stores.webauthnCredentials }
+        : {}),
+      ...(stores.webauthnChallenges !== undefined ? { challenges: stores.webauthnChallenges } : {}),
     }),
     module: AUTH_WEBAUTHN_MODULE,
+  };
+}
+
+function providerStores(state: DaemonStateRoot | undefined): AuthProviderStateStores {
+  if (state === undefined) {
+    return {};
+  }
+  return {
+    webauthnCredentials: state.kv<StoredCredential>("auth.webauthn.credentials"),
+    webauthnChallenges: state.kv<PendingChallenge>("auth.webauthn.challenges"),
+    authentikSubjects: state.kv<BoundSubject>("auth.authentik.subjects"),
+    authentikAttempts: state.kv<PendingAttempt>("auth.authentik.attempts"),
+  };
+}
+
+function stateSlot<T>(
+  state: DaemonStateRoot | undefined,
+  kind: string,
+  fallback: T,
+): { load(): T; save(snapshot: T): void } | undefined {
+  if (state === undefined) {
+    return undefined;
+  }
+  const file = state.file<T>(kind, fallback);
+  return {
+    load: () => file.read(),
+    save: (snapshot) => file.write(snapshot),
   };
 }
 
@@ -218,6 +290,11 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
   launcherMode?: "auto" | "full" | "headless";
   /** Override the workspace root (tests pass a scratch dir under which profile dirs are created). */
   workspaceRoot?: string;
+  /**
+   * Restart-safe daemon state root. When set, security-critical daemon facts are encrypted, authenticated, and
+   * stored here with 0700/0600 permissions before the public gateway is bound.
+   */
+  stateRoot?: string;
   /** Override the Chromium executable path (default: the cached browser via playwright-core). */
   chromiumPath?: string;
   /** Override the CDP start timeout, ms. */
@@ -316,6 +393,10 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
 
 /** A provisioning bridge plus the worker handles a caller can use to reconcile/teardown (tests, shutdown). */
 export interface ProvisioningStack {
+  /** Resolves after restart recovery has converged; public listeners must not bind before this is settled. */
+  ready: Promise<void>;
+  /** Idempotently closes runtime handles owned by this stack, including the daemon state-root lock. */
+  close(): Promise<void>;
   bridge: AgentBridge;
   /** The capsule lifecycle manager (spawn/health/stop tracking). */
   lifecycle: CapsuleLifecycleManager;
@@ -376,6 +457,13 @@ export interface ProvisioningStack {
 export function createProvisioningBridge(
   opts: CreateProvisioningBridgeOptions = {},
 ): ProvisioningStack {
+  const state =
+    opts.stateRoot !== undefined
+      ? DaemonStateRoot.open({
+          root: opts.stateRoot,
+          unsafeRoots: opts.workspaceRoot !== undefined ? [opts.workspaceRoot] : [],
+        })
+      : undefined;
   const catalog = new CatalogService();
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
@@ -395,14 +483,27 @@ export function createProvisioningBridge(
     opts.workspaceRoot !== undefined ? { root: opts.workspaceRoot } : {},
   );
   const workspace = new WorkspaceManager(workspaceAdapter);
-  const lifecycle = new CapsuleLifecycleManager({ registry, workspace });
+  const lifecycleStore = stateSlot<CapsuleRecord[]>(state, "worker.lifecycle", []);
+  const lifecycle = new CapsuleLifecycleManager({
+    registry,
+    workspace,
+    ...(lifecycleStore !== undefined ? { store: lifecycleStore } : {}),
+  });
 
   // ── ONE shared capability signer underpins the agent-authority anchor, the TASK capability, AND the
   //    agent-connector capability — so the connector genuinely DESCENDS from the task cap (same key) and
   //    a revocation of the task cap CASCADES to the connector by lineage (capability-service.md). Using
   //    separate signers would break both the lineage tag and the shared revocation snapshot.
-  const signer = new HmacCapabilitySigner();
-  const capability = new CapabilityService(signer);
+  const signer = new HmacCapabilitySigner(
+    state?.secretBytes("capability.signing-key", 32),
+    state?.revocations("capability.revocations"),
+  );
+  const capability = new CapabilityService(
+    signer,
+    state !== undefined
+      ? { spentNonces: state.stringSet("capability.spent-enrollment-nonces") }
+      : {},
+  );
   const connector = new ConnectorCdpAdapter();
   // A holder so the Task service's TEARDOWN dep (Slice 7) can call the SessionService's terminal
   // `teardownSession` — the SessionService is constructed later (it needs the handoff/completion deps),
@@ -413,13 +514,21 @@ export function createProvisioningBridge(
   //    task capability (which, by lineage, stops every descendant cap — the session grants + the connector —
   //    verifying; kernel-contracts.md §2). The session teardown is delegated; the cap revoke is the Task
   //    service's own job via the shared signer it already holds.
-  const task = new TaskService({
+  const taskStore = stateSlot<TaskServiceSnapshot>(state, "task.state", {
+    tasks: [],
+    tokens: [],
+  });
+  const taskOptions: ConstructorParameters<typeof TaskService>[0] = {
     capability: signer,
     teardown: {
       teardownSession: (sessionId, disposition) =>
         sessionRef.svc?.teardownSession(sessionId, disposition) ?? Promise.resolve(),
     },
-  });
+  };
+  if (taskStore !== undefined) {
+    taskOptions.store = taskStore;
+  }
+  const task = new TaskService(taskOptions);
 
   // The noVNC human entrypoint (full mode: the ws endpoint the gateway proxies in Slice 4b; headless: reports
   // unavailable). Stood up here so the full-mode test can read it AND so the handoff saga can resolve it.
@@ -454,9 +563,17 @@ export function createProvisioningBridge(
         ...(h.authentik !== undefined ? { authentik: h.authentik } : {}),
       },
       { rpID: h.rpID ?? "localhost", rpName: h.rpName ?? "GLA", expectedOrigin: h.expectedOrigin },
+      providerStores(state),
     );
     authModule = selected.module;
-    identity = h.identity ?? new IdentityService({ authProvider: selected.provider });
+    identity =
+      h.identity ??
+      new IdentityService({
+        authProvider: selected.provider,
+        ...(state !== undefined
+          ? { enrollments: state.kv<EnrollmentRecord>("identity.enrollments") }
+          : {}),
+      });
     const channel = new ChannelCli({ identity, sink: h.deliverySink ?? deliveryToStdout });
     const authAssurancePolicy =
       h.authAssuranceProfile !== undefined
@@ -586,7 +703,13 @@ export function createProvisioningBridge(
   // ── The provision-capable SessionService: inject the worker/capability/connector seams (+ handoff when wired).
   //    `parentCapabilityRefFor` threads the session's TASK capability id down as the connector's parent
   //    (Finding #1) — so `mintConnector` produces a CHILD of the task cap, not a fresh root.
-  const sessionOpts: ConstructorParameters<typeof SessionService>[0] = {
+  const sessionStore = stateSlot<SessionServiceSnapshot>(state, "session.state", {
+    sessions: [],
+    provisioned: [],
+    handoffs: [],
+    completions: [],
+  });
+  const sessionOpts: SessionServiceOptions = {
     provision: {
       worker: lifecycle,
       capability: {
@@ -608,6 +731,9 @@ export function createProvisioningBridge(
       },
     },
   };
+  if (sessionStore !== undefined) {
+    sessionOpts.store = sessionStore;
+  }
   if (handoffDeps !== undefined) {
     sessionOpts.handoff = handoffDeps;
   }
@@ -664,7 +790,25 @@ export function createProvisioningBridge(
   // `attachConnector` is the worker's connector helper; the session uses the connector port directly,
   // but exposing the reference keeps the wired surface explicit (and tree-shake-safe).
   void attachConnector;
+  let stackClosed = false;
+  const close = async (): Promise<void> => {
+    if (stackClosed) {
+      return;
+    }
+    stackClosed = true;
+    try {
+      for (const sessionId of lifecycle.liveSessions()) {
+        await reconciler.reconcile(sessionId).catch(() => {});
+      }
+      await connector.close().catch(() => {});
+      await gateway?.close().catch(() => {});
+    } finally {
+      state?.close();
+    }
+  };
   const stack: ProvisioningStack = {
+    ready: session.recoveryComplete(),
+    close,
     bridge,
     lifecycle,
     reconciler,
