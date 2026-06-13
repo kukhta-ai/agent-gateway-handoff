@@ -67,7 +67,18 @@ rest are resolvable prerequisites, not blockers.
   `:3000`. With a TLS proxy in front (the **edge-proxy** bundle, or any reverse proxy) it is the proxy's
   `https://` URL (preferred); standalone with no proxy yet, use the host's own reachable address and port
   (e.g. `http://<public-ip>:3000/`) and update it when a proxy is added. Note: **passkeys (WebAuthn)
-  require https or localhost**, so passkey login ultimately needs the proxy.
+  require https or localhost**, so passkey login ultimately needs the proxy. Root deployments use values like
+  `GLA_PUBLIC_BASE_URL=https://gla.example/`; subpath/custom-base deployments use values like
+  `GLA_PUBLIC_BASE_URL=https://gla.example/team-a/`. For a subpath, the reverse proxy must route that prefix to
+  GLA and either strip it while setting `X-Forwarded-Prefix: /team-a`, or preserve the prefix unchanged. If the
+  proxy strips the prefix, set `GLA_TRUST_FORWARDED_PREFIX=true` only when the edge overwrites/sanitizes that
+  header; prefix-preserving proxies should leave it false. GLA builds all browser fetches, handoff links, and
+  WebSocket URLs under this base and still enforces grant and recipient authorization at the gateway.
+- **Delegated authentik callback shape.** If the identity-provider bundle selects authentik, its issuer may be
+  separate (`GLA_AUTHENTIK_ISSUER_URL=https://idp.example/application/o/gla/`), but the redirect URI must land
+  on GLA's public base, e.g.
+  `GLA_AUTHENTIK_REDIRECT_URI=https://gla.example/team-a/auth/callback`. That callback is routed to GLA, not
+  authentik, so authentik sees OIDC `code`/`state` only and never the GLA grant.
 - **Supervisor scope.** User-scope systemd (least privilege; socket at `/run/user/<uid>/gla.sock`, needs
   lingering) vs system-scope (needs root; set `User=`/`Group=` and a fixed bridge socket) vs a documented
   foreground run command where no supervisor exists.

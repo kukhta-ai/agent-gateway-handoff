@@ -93,8 +93,9 @@ class StubIdentity {
 async function bootGateway(
   grants: StubGrants,
   identity: StubIdentity,
+  extra: Partial<GatewayOptions> = {},
 ): Promise<{ base: string; close: () => Promise<void>; gateway: AccessGateway }> {
-  const opts: GatewayOptions = { grants, identity, host: "127.0.0.1", port: 0 };
+  const opts: GatewayOptions = { grants, identity, host: "127.0.0.1", port: 0, ...extra };
   const gateway = new AccessGateway(opts);
   const { host, port } = await gateway.listen();
   return { base: `http://${host}:${port}`, close: () => gateway.close(), gateway };
@@ -157,6 +158,73 @@ describe("Access Gateway — GET /enroll grant enforcement (GLA-012 AC#2)", () =
     const res = await fetch(`${base}/enroll?grant=wrongrecipient`);
     expect(res.status).toBe(403);
   });
+
+  it("serves enrollment under a configured public base path and does not publish an unprefixed alias", async () => {
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(new StubGrants(), identity, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+
+    const prefixed = await fetch(`${base}/gla/enroll?grant=valid`);
+    expect(prefixed.status).toBe(200);
+    const html = await prefixed.text();
+    expect(html).toContain('"options":"/gla/enroll/options"');
+    expect(html).toContain('"verify":"/gla/enroll/verify"');
+
+    const unprefixed = await fetch(`${base}/enroll?grant=valid`);
+    expect(unprefixed.status).toBe(404);
+  });
+
+  it("does not trust spoofed X-Forwarded-Prefix unless strip-prefix mode is explicitly enabled", async () => {
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(new StubGrants(), identity, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+
+    const spoofed = await fetch(`${base}/enroll?grant=valid`, {
+      headers: { "x-forwarded-prefix": "/gla" },
+    });
+    expect(spoofed.status).toBe(404);
+  });
+
+  it("accepts strip-prefix proxies only when explicitly trusted and X-Forwarded-Prefix matches", async () => {
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(new StubGrants(), identity, {
+      publicBaseUrl: "https://gla.example/gla/",
+      trustForwardedPrefix: true,
+    });
+    closers.push(close);
+
+    const stripped = await fetch(`${base}/enroll?grant=valid`, {
+      headers: { "x-forwarded-prefix": "/gla" },
+    });
+    expect(stripped.status).toBe(200);
+
+    const wrongPrefix = await fetch(`${base}/enroll?grant=valid`, {
+      headers: { "x-forwarded-prefix": "/other" },
+    });
+    expect(wrongPrefix.status).toBe(404);
+  });
+
+  it("serves the delegated-auth callback landing page under the configured public base path", async () => {
+    const { base, close } = await bootGateway(new StubGrants(), new StubIdentity(), {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+
+    const res = await fetch(`${base}/gla/auth/callback?code=c&state=s`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("Completing sign-in");
+    expect(html).toContain('"enrollVerify":"/gla/enroll/verify"');
+    expect(html).toContain('"handoffVerify":"/gla/handoff/auth/verify"');
+    expect(html).not.toContain("grant=secret");
+
+    const rootAlias = await fetch(`${base}/auth/callback?code=c&state=s`);
+    expect(rootAlias.status).toBe(404);
+  });
 });
 
 describe("Access Gateway — POST /enroll/options + /enroll/verify grant enforcement", () => {
@@ -188,6 +256,32 @@ describe("Access Gateway — POST /enroll/options + /enroll/verify grant enforce
     const body = (await res.json()) as { challenge?: string };
     expect(body.challenge).toBe("opts-challenge");
     expect(identity.optionsCalls).toBe(1);
+  });
+
+  it("POST /enroll/options and /enroll/verify work through a configured public base path", async () => {
+    const identity = new StubIdentity();
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+
+    const options = await fetch(`${base}/gla/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(options.status).toBe(200);
+
+    const verify = await fetch(`${base}/gla/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", attestation: { fake: "attestation" } }),
+    });
+    expect(verify.status).toBe(200);
+    expect(identity.optionsCalls).toBe(1);
+    expect(identity.completeCalls).toBe(1);
+    expect(grants.spent).toContain("nonce-1");
   });
 });
 

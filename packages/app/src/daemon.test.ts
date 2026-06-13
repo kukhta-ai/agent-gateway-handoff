@@ -17,7 +17,7 @@
 // it spawns a real browser — but the no-orphan teardown logic is ALSO proven by teardown-e2e + the worker
 // unit tests, so the property holds regardless.
 
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { type Socket, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
@@ -210,6 +210,14 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     expect(invite.link).not.toContain("localhost");
   });
 
+  it("public-base-url with a path prefix mints links under that configured public base", async () => {
+    const publicBase = "https://gla.example/team-a/";
+    const handle = await startDaemon({ publicBaseUrl: publicBase });
+    expect(handle.publicBaseUrl).toBe(publicBase);
+    const invite = await handle.enrollInvite(recipient);
+    expect(invite.link).toMatch(/^https:\/\/gla\.example\/team-a\/enroll\?grant=/);
+  });
+
   it("public-base-url over the socket: the operator `enrollInvite` daemon op returns a public-base link", async () => {
     const publicBase = "https://203.0.113.10/";
     const handle = await startDaemon({ publicBaseUrl: publicBase });
@@ -247,6 +255,55 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         log: () => {},
       }),
     ).rejects.toThrow(/local-only|0\.0\.0\.0|LOCAL/i);
+  });
+
+  it("invalid public base values fail before serving starts with actionable errors", async () => {
+    for (const publicBaseUrl of [
+      "gla.example/a",
+      "https:///a",
+      "https://gla.example/a?x=1",
+      "https://gla.example/a#frag",
+      "https://gla.example/a/../b",
+    ]) {
+      await expect(
+        serve({
+          host: "127.0.0.1",
+          port: 0,
+          bridgeEndpoint: join(scratch("gla-invalid-base-"), "gla.sock"),
+          publicBaseUrl,
+          log: () => {},
+        }),
+        publicBaseUrl,
+      ).rejects.toThrow(/GLA_PUBLIC_BASE_URL|query|fragment|dot-segment/i);
+    }
+  });
+
+  it("authentik redirect URI must land on the configured GLA public base, not a different origin or prefix", async () => {
+    const common = {
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: join(scratch("gla-authentik-base-"), "gla.sock"),
+      publicBaseUrl: "https://gla.example/team-a/",
+      authProvider: "authentik" as const,
+      authentikIssuerUrl: "https://idp.example/application/o/gla/",
+      authentikClientId: "gla-client",
+      authentikClientSecret: "secret",
+      log: () => {},
+    };
+    await expect(
+      serve({ ...common, authentikRedirectUri: "https://other.example/team-a/auth/callback" }),
+    ).rejects.toThrow(/same origin/i);
+    await expect(
+      serve({ ...common, authentikRedirectUri: "https://gla.example/auth/callback" }),
+    ).rejects.toThrow(/path prefix/i);
+
+    const ok = await serve({
+      ...common,
+      bridgeEndpoint: join(scratch("gla-authentik-base-ok-"), "gla.sock"),
+      authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+    });
+    liveHandles.push(ok);
+    expect(ok.publicBaseUrl).toBe("https://gla.example/team-a/");
   });
 
   it("graceful shutdown closes BOTH listeners (gateway HTTP + bridge socket) and is idempotent", async () => {
@@ -333,7 +390,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
 });
 
 describe("gla serve — argument parsing (flags layer over env; flags win)", () => {
-  it("parses --port/--host/--endpoint/--public-base-url/--launcher", () => {
+  it("parses --port/--host/--endpoint/--public-base-url/--trust-forwarded-prefix/--launcher", () => {
     const parsed = parseServeArgs(
       [
         "--port",
@@ -344,6 +401,8 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
         "/run/gla.sock",
         "--public-base-url",
         "https://203.0.113.10/",
+        "--trust-forwarded-prefix",
+        "true",
         "--launcher",
         "headless",
       ],
@@ -355,6 +414,7 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
       expect(parsed.options.host).toBe("0.0.0.0");
       expect(parsed.options.bridgeEndpoint).toBe("/run/gla.sock");
       expect(parsed.options.publicBaseUrl).toBe("https://203.0.113.10/");
+      expect(parsed.options.trustForwardedPrefix).toBe(true);
       expect(parsed.options.launcherMode).toBe("headless");
     }
   });
@@ -363,14 +423,19 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
     const env = {
       GLA_PORT: "3000",
       GLA_PUBLIC_BASE_URL: "https://from-env/",
+      GLA_TRUST_FORWARDED_PREFIX: "1",
       GLA_HOST: "0.0.0.0",
     } as NodeJS.ProcessEnv;
-    const parsed = parseServeArgs(["--public-base-url", "https://from-flag/"], env);
+    const parsed = parseServeArgs(
+      ["--public-base-url", "https://from-flag/", "--trust-forwarded-prefix", "false"],
+      env,
+    );
     expect(parsed.help).toBe(false);
     if (!parsed.help) {
       expect(parsed.options.port).toBe(3000); // from env
       expect(parsed.options.host).toBe("0.0.0.0"); // from env
       expect(parsed.options.publicBaseUrl).toBe("https://from-flag/"); // flag wins
+      expect(parsed.options.trustForwardedPrefix).toBe(false); // flag wins
     }
   });
 
@@ -379,6 +444,36 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
     expect(() => parseServeArgs(["--port", "notnum"], {} as NodeJS.ProcessEnv)).toThrow(/port/i);
     expect(() => parseServeArgs(["--launcher", "weird"], {} as NodeJS.ProcessEnv)).toThrow(
       /launcher/i,
+    );
+    expect(() =>
+      parseServeArgs(["--trust-forwarded-prefix", "maybe"], {} as NodeJS.ProcessEnv),
+    ).toThrow(/trust-forwarded-prefix/i);
+  });
+});
+
+describe("deployment templates — public base path guidance", () => {
+  it("documents root and subpath edge-proxy shapes plus separate authentik issuer/callback roles", () => {
+    const edge = readFileSync(
+      "wpm/wip/bundles/edge-proxy/payload/templates/Caddyfile.tmpl",
+      "utf8",
+    );
+    const env = readFileSync("wpm/wip/bundles/gla-core/payload/templates/gla.env.tmpl", "utf8");
+    const edgeAdvisor = readFileSync(
+      "wpm/wip/installer-skills/edge-proxy-advisor/SKILL.md",
+      "utf8",
+    );
+    const coreAdvisor = readFileSync("wpm/wip/installer-skills/gla-core-advisor/SKILL.md", "utf8");
+    const combined = `${edge}\n${env}\n${edgeAdvisor}\n${coreAdvisor}`;
+
+    expect(combined).toMatch(/GLA_PUBLIC_BASE_URL=https:\/\/gla\.example\//);
+    expect(combined).toMatch(/GLA_PUBLIC_BASE_URL=https:\/\/gla\.example\/team-a\//);
+    expect(combined).toMatch(/X-Forwarded-Prefix/i);
+    expect(combined).toMatch(/GLA_TRUST_FORWARDED_PREFIX=true/i);
+    expect(combined).toMatch(/sanitize|overwrites/i);
+    expect(combined).toMatch(/WebSocket/i);
+    expect(combined).toMatch(/GLA_AUTHENTIK_ISSUER_URL=https:\/\/idp\.example/i);
+    expect(combined).toMatch(
+      /GLA_AUTHENTIK_REDIRECT_URI=https:\/\/gla\.example\/team-a\/auth\/callback/i,
     );
   });
 });

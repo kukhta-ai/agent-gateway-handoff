@@ -24,6 +24,7 @@ import { dirname } from "node:path";
 import type { AgentBridge } from "@gla/bridge";
 import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
+import { parsePublicBaseUrl } from "@gla/gateway";
 import {
   AUTH_ASSURANCE_PROFILE_VALUES,
   type AuthAssuranceProfile,
@@ -51,6 +52,11 @@ export interface ServeOptions {
    * when absent (a dev convenience), but a real deploy MUST set it to the Caddy URL.
    */
   publicBaseUrl?: string;
+  /**
+   * Trust `X-Forwarded-Prefix` for strip-prefix reverse proxies. Enable only when the edge overwrites or strips
+   * incoming client-supplied values before proxying to GLA. Prefix-preserving proxying does not need it.
+   */
+  trustForwardedPrefix?: boolean;
   /**
    * The auth provider to wire behind the kernel `AuthProviderPort` (authentik-integration.md §7). Default
    * `"webauthn"` (the in-tree default — the default boot path is byte-for-byte unchanged). Set `"authentik"`
@@ -176,9 +182,11 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   const bridgeEndpoint = opts.bridgeEndpoint ?? defaultBridgeEndpoint();
   // The public base URL: explicit wins; else derive from the gateway host:port (a dev convenience — a real
   // deploy sets it to the Caddy URL so links are reachable). 0.0.0.0 is not dialable, so loopback-ize it.
-  const publicBaseUrl =
+  const configuredPublicBaseUrl =
     opts.publicBaseUrl ?? `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
-  const expectedOrigin = opts.expectedOrigin ?? originOf(publicBaseUrl);
+  const publicBase = parsePublicBaseUrl(configuredPublicBaseUrl);
+  const publicBaseUrl = publicBase.href;
+  const expectedOrigin = opts.expectedOrigin ?? publicBase.origin;
 
   // ── S-6 guard: the bridge endpoint must NEVER be 0.0.0.0 (the agent surface is LOCAL — baseline §3). A
   //    config that asks to bind the bridge publicly is REFUSED before anything binds (fail closed, loud).
@@ -192,7 +200,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   //    `GLA_AUTH_PROVIDER=authentik` opts into the delegated OIDC adapter, which needs its OIDC config. Build
   //    the authentik config object only when selected (its secret is `sensitive` — passed inward, never logged).
   const authentikConfig =
-    opts.authProvider === "authentik" ? buildAuthentikConfig(opts) : undefined;
+    opts.authProvider === "authentik" ? buildAuthentikConfig(opts, publicBase) : undefined;
 
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
@@ -209,6 +217,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       rpName: opts.rpName ?? "GLA",
       expectedOrigin,
       publicBaseUrl,
+      trustForwardedPrefix: opts.trustForwardedPrefix ?? false,
       host,
       port,
       deliverySink: opts.deliverySink ?? deliveryToStdout,
@@ -377,22 +386,16 @@ function prepareUdsPath(path: string): void {
   }
 }
 
-/** The scheme+host+port origin of a base URL (the WebAuthn expected origin), or the URL unchanged if unparseable. */
-function originOf(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).origin;
-  } catch {
-    return baseUrl;
-  }
-}
-
 /**
  * Assemble the authentik OIDC config from the daemon options (only called when `GLA_AUTH_PROVIDER=authentik`,
  * authentik-integration.md §7). The issuer / client id / client secret / redirect uri are all required —
  * a missing one is a fail-loud startup error (never a silent fallback to the default provider). The secret is
  * `sensitive`: it is carried inward to the adapter and never echoed in the banner or an error message.
  */
-function buildAuthentikConfig(opts: ServeOptions): AuthentikConfig {
+function buildAuthentikConfig(
+  opts: ServeOptions,
+  publicBase: ReturnType<typeof parsePublicBaseUrl>,
+): AuthentikConfig {
   const missing: string[] = [];
   if (opts.authentikIssuerUrl === undefined) {
     missing.push("GLA_AUTHENTIK_ISSUER_URL");
@@ -416,6 +419,21 @@ function buildAuthentikConfig(opts: ServeOptions): AuthentikConfig {
       `GLA_AUTH_PROVIDER=authentik requires the authentik OIDC config — missing: ${missing.join(", ")}`,
     );
   }
+  const redirectBase = parsePublicBaseUrl(opts.authentikRedirectUri);
+  if (redirectBase.origin !== publicBase.origin) {
+    throw new Error(
+      "GLA_AUTHENTIK_REDIRECT_URI must use the same origin as GLA_PUBLIC_BASE_URL so the callback lands on GLA's same-origin gateway page",
+    );
+  }
+  if (
+    publicBase.pathPrefix.length > 0 &&
+    redirectBase.pathPrefix !== publicBase.pathPrefix &&
+    !redirectBase.pathPrefix.startsWith(`${publicBase.pathPrefix}/`)
+  ) {
+    throw new Error(
+      "GLA_AUTHENTIK_REDIRECT_URI must be under GLA_PUBLIC_BASE_URL's path prefix so code/state return to GLA without leaking grants to authentik",
+    );
+  }
   return {
     issuerUrl: opts.authentikIssuerUrl,
     clientId: opts.authentikClientId,
@@ -434,6 +452,7 @@ const SERVE_USAGE = `gla serve — run the long-running GLA daemon (the :3000 de
 
 Usage:
   gla serve [--port <n>] [--host <h>] [--endpoint <path|host:port>] [--public-base-url <url>]
+            [--trust-forwarded-prefix <true|false>]
             [--rp-id <id>] [--rp-name <name>] [--launcher <auto|full|headless>] [--workspace-root <dir>]
             [--auth-provider <webauthn|authentik>] [--auth-assurance-policy <phishing-resistant|password-permitted>]
             [--authentik-issuer-url <url>] [--authentik-client-id <id>]
@@ -451,9 +470,10 @@ Auth provider (--auth-provider, default webauthn): the in-tree WebAuthn passkey 
 Auth assurance (--auth-assurance-policy, default phishing-resistant): unset demands passkey/phishing-resistant
   evidence; password-permitted is the explicit policy that admits password-grade evidence.
 
-Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE,
-  GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY, GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID,
-  GLA_AUTHENTIK_CLIENT_SECRET, GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
+Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_TRUST_FORWARDED_PREFIX,
+  GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY,
+  GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET,
+  GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
 
 Then drive it from another shell with the daemon's bridge endpoint:
   GLA_ENDPOINT=<endpoint> gla whoami
@@ -463,8 +483,9 @@ Then drive it from another shell with the daemon's bridge endpoint:
 /**
  * Parse `gla serve` argv (after the `serve` token) into {@link ServeOptions}, layering flags over env defaults
  * (flags win). `--help`/`-h` returns `{ help: true }`. Recognized flags: `--port`, `--host`, `--endpoint`,
- * `--public-base-url`, `--rp-id`, `--rp-name`, `--launcher`, `--workspace-root`. Unknown flags are ignored
- * (forward-compatible), an invalid `--port`/`--launcher` is a stable error the caller surfaces.
+ * `--public-base-url`, `--trust-forwarded-prefix`, `--rp-id`, `--rp-name`, `--launcher`, `--workspace-root`.
+ * Unknown flags are ignored (forward-compatible), an invalid `--port`/`--launcher`/boolean flag is a stable error
+ * the caller surfaces.
  */
 export function parseServeArgs(
   argv: readonly string[],
@@ -498,6 +519,23 @@ export function parseServeArgs(
     const e = env[envVar];
     return e !== undefined && e.length > 0 ? e : undefined;
   };
+  const bool = (flag: string, envVar: string): boolean | undefined => {
+    const v = flags.get(flag);
+    if (v === true) {
+      return true;
+    }
+    const raw = typeof v === "string" ? v : env[envVar];
+    if (raw === undefined || raw.length === 0) {
+      return undefined;
+    }
+    if (/^(1|true|yes|on)$/i.test(raw)) {
+      return true;
+    }
+    if (/^(0|false|no|off)$/i.test(raw)) {
+      return false;
+    }
+    throw new Error(`invalid --${flag} "${raw}" (expected true|false)`);
+  };
 
   const options: ServeOptions = {};
   const host = str("host", "GLA_HOST");
@@ -519,6 +557,10 @@ export function parseServeArgs(
   const publicBaseUrl = str("public-base-url", "GLA_PUBLIC_BASE_URL");
   if (publicBaseUrl !== undefined) {
     options.publicBaseUrl = publicBaseUrl;
+  }
+  const trustForwardedPrefix = bool("trust-forwarded-prefix", "GLA_TRUST_FORWARDED_PREFIX");
+  if (trustForwardedPrefix !== undefined) {
+    options.trustForwardedPrefix = trustForwardedPrefix;
   }
   const rpID = str("rp-id", "GLA_RP_ID");
   if (rpID !== undefined) {
