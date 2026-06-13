@@ -135,7 +135,7 @@ describe("handoff page RFB browser client", () => {
         await page.fill("#remote-secret-field", "typed-through-client");
         const state = await page.evaluate("window.__glaRfb");
         expect(state).toMatchObject({
-          url: `ws://127.0.0.1:${new URL(server.origin).port}/handoff/sess_browser?grant=grant-token`,
+          url: `ws://127.0.0.1:${new URL(server.origin).port}/handoff/sess_browser`,
           inputValue: "typed-through-client",
           scaleViewport: true,
           resizeSession: false,
@@ -144,6 +144,7 @@ describe("handoff page RFB browser client", () => {
         });
         const html = await page.content();
         expect(html).not.toContain("new WebSocket");
+        expect(html).not.toContain("?grant=grant-token");
       });
     },
     60_000,

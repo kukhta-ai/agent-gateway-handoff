@@ -1,1 +1,1 @@
-/home/claude/agent-gateway-handoff/gla/AGENTS.md
+../AGENTS.md

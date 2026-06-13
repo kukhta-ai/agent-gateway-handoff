@@ -83,7 +83,7 @@ describe("public base URL builder", () => {
 
 describe("public base paths in served page data", () => {
   it("enrollment page uses injected same-origin paths", () => {
-    const html = enrollPageHtml("g", "recipient", {
+    const html = enrollPageHtml("recipient", {
       options: "/gla/enroll/options",
       verify: "/gla/enroll/verify",
     });
@@ -91,6 +91,19 @@ describe("public base paths in served page data", () => {
     expect(html).toContain('"verify":"/gla/enroll/verify"');
     expect(html).toContain("fetch(cfg.paths.options");
     expect(html).toContain("fetch(cfg.paths.verify");
+    expect(html).toContain('history.replaceState(null, "", location.pathname)');
+    expect(html).toContain('new URLSearchParams(location.search).has("grant")');
+  });
+
+  it("enrollment page escapes adversarial recipient labels and path values in the JSON data island", () => {
+    const html = enrollPageHtml("recipient</script><script>globalThis.pwned=2</script>", {
+      options: "/gla/enroll/options</script><script>globalThis.pwned=3</script>",
+      verify: "/gla/enroll/verify",
+    });
+
+    expect(html).not.toContain("</script><script>globalThis.pwned=");
+    expect(html).toContain("\\u003c/script\\u003e\\u003cscript\\u003eglobalThis.pwned=2");
+    expect(html).toContain("\\u003c/script\\u003e\\u003cscript\\u003eglobalThis.pwned=3");
   });
 
   it("handoff pages keep internal route scope separate from public stream paths", () => {
@@ -119,5 +132,6 @@ describe("public base paths in served page data", () => {
     expect(reused).toContain('"streamPath":"/gla/handoff/sess_1"');
     expect(reused).toContain('"clientAssets":"/gla/handoff/client-assets"');
     expect(reused).toContain("browserStreamUrl");
+    expect(reused).not.toContain("?grant=");
   });
 });

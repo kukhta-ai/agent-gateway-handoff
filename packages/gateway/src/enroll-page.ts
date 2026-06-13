@@ -8,17 +8,19 @@
 //   • else (no `kind`)             → the in-page WebAuthn registration ceremony, UNCHANGED:
 //       1. POST /enroll/options → registration options (a challenge), bound to the recipient
 //       2. navigator.credentials.create(options) → the OS passkey UI → an attestation
-//       3. POST /enroll/verify (grant + attestation) → the gateway verifies + stores + marks spent
+//       3. POST /enroll/verify (attestation) → the gateway resolves the bootstrap ticket, verifies + stores + marks spent
 // All TRUST decisions are server-side at the gateway (grant verify, attestation verify, single-use). The page only
 // starts the ceremony and POSTs results. base64url<->ArrayBuffer conversion is inline (no deps).
 //
 // REDIRECT-FLOW NOTES (same as the handoff page; see docs/architecture, the dual-method-flow design §5): nav ONLY to
 // the SERVER-built `options.authorizeUrl` (operator config + fixed redirect_uri — no request input → no open
-// redirect); the operator-discharge grant is held SAME-ORIGIN in sessionStorage across the redirect (never sent to
-// the provider) and re-verified server-side on the return POST; the browser redirect/return path is exercised by
-// the GLA-076 E2E (the gateway tests drive the UNCHANGED verify route in-process).
+// redirect); the operator-discharge grant is held server-side behind a same-origin HttpOnly bootstrap ticket
+// (never sent to the provider or browser storage) and re-verified server-side on the return POST; the browser
+// redirect/return path is exercised by the GLA-076 E2E (the gateway tests drive the UNCHANGED verify route in-process).
 
-/** Same-origin sessionStorage key carrying the enrollment grant across delegated-auth redirects. */
+import { htmlText, jsonScriptData } from "./html-safety.js";
+
+/** Same-origin sessionStorage marker for a delegated enrollment redirect; it never carries the raw GLA grant. */
 export const ENROLL_REDIRECT_STORAGE_KEY = "gla.enroll";
 
 /** Same-origin public paths the enrollment page calls back into. */
@@ -35,19 +37,17 @@ const ROOT_ENROLL_PATHS: EnrollPagePaths = {
 };
 
 /**
- * Render the enrollment page HTML. The grant token is embedded so the page's fetches carry it; it is also still
- * verified server-side on every POST (the page cannot bypass the grant check — GLA-012 AC#2). `recipientLabel` is
- * a display-only hint (the actual recipient is bound in the grant the server verifies). `paths` are same-origin
- * public paths already joined against `GLA_PUBLIC_BASE_URL`; the page does no deployment-specific path math.
+ * Render the enrollment page HTML. The raw grant is not embedded in the page; browser POSTs are bound by a
+ * same-origin HttpOnly bootstrap ticket that the gateway resolves server-side. `recipientLabel` is a display-only
+ * hint (the actual recipient is bound in the grant the server verifies). `paths` are same-origin public paths
+ * already joined against `GLA_PUBLIC_BASE_URL`; the page does no deployment-specific path math.
  */
 export function enrollPageHtml(
-  grant: string,
   recipientLabel: string,
   paths: EnrollPagePaths = ROOT_ENROLL_PATHS,
 ): string {
-  // The grant + label are JSON-encoded into a <script> data island (safe: JSON.stringify escapes quotes; the
-  // values are a base64url token and an opaque recipient ref, neither containing `</script`).
-  const data = JSON.stringify({ grant, recipient: recipientLabel, paths });
+  // Escape HTML-significant bytes too: recipient labels and future provider metadata are not trusted.
+  const data = jsonScriptData({ recipient: recipientLabel, paths });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -71,6 +71,7 @@ export function enrollPageHtml(
 <script>
 (() => {
   const cfg = JSON.parse(document.getElementById("enroll-data").textContent);
+  try { if (new URLSearchParams(location.search).has("grant")) history.replaceState(null, "", location.pathname); } catch (e) {}
   const btn = document.getElementById("go");
   const status = document.getElementById("status");
   const say = (msg, cls) => { status.textContent = msg; status.className = cls || ""; };
@@ -117,12 +118,12 @@ export function enrollPageHtml(
 
   // POST an opaque attestation to the UNCHANGED verify route; on success show the enrolled state. Shared by the
   // in-page ceremony (a WebAuthn attestation) and the redirect-return arm (the provider's {code,state} params).
-  const submitAttestation = async (attestation, grant) => {
+  const submitAttestation = async (attestation) => {
     say("Verifying…");
     const verRes = await fetch(cfg.paths.verify, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant: grant, attestation: attestation }),
+      body: JSON.stringify({ attestation: attestation }),
     });
     const ver = await verRes.json().catch(() => ({}));
     if (verRes.ok && ver.enrolled) {
@@ -133,21 +134,20 @@ export function enrollPageHtml(
     return false;
   };
 
-  // ── Redirect-return arm: a delegated provider returned with ?code&state. Restore the grant from SAME-ORIGIN
-  //    sessionStorage (never sent to the provider) and re-POST {code,state} to the UNCHANGED /enroll/verify as the
-  //    opaque attestation. The server re-verifies+consumes the grant exactly as for an in-page attestation.
+  // ── Redirect-return arm: a delegated provider returned with ?code&state. Confirm this browser started a
+  //    same-origin enrollment redirect and re-POST {code,state} to the UNCHANGED /enroll/verify as the opaque
+  //    attestation. The server resolves the HttpOnly bootstrap ticket and re-verifies+consumes the grant.
   const params = new URLSearchParams(location.search);
-  try { if (params.has("grant")) history.replaceState(null, "", location.pathname); } catch (e) {}
   const retCode = params.get("code");
   const retState = params.get("state");
   if (retCode && retState) {
     btn.disabled = true;
-    let g = null;
-    try { g = sessionStorage.getItem("${ENROLL_REDIRECT_STORAGE_KEY}"); } catch (e) {}
+    let marker = null;
+    try { marker = sessionStorage.getItem("${ENROLL_REDIRECT_STORAGE_KEY}"); } catch (e) {}
     try { sessionStorage.removeItem("${ENROLL_REDIRECT_STORAGE_KEY}"); } catch (e) {}
     try { history.replaceState(null, "", location.pathname); } catch (e) {}
-    if (g) {
-      submitAttestation({ code: retCode, state: retState }, g).then((ok) => { if (!ok) btn.disabled = false; });
+    if (marker) {
+      submitAttestation({ code: retCode, state: retState }).then((ok) => { if (!ok) btn.disabled = false; });
     } else {
       say("Registration was not completed — try again.", "err");
       btn.disabled = false;
@@ -161,7 +161,7 @@ export function enrollPageHtml(
       const optRes = await fetch(cfg.paths.options, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ grant: cfg.grant }),
+        body: JSON.stringify({}),
       });
       if (!optRes.ok) {
         const e = await optRes.json().catch(() => ({}));
@@ -173,7 +173,7 @@ export function enrollPageHtml(
       // A delegated provider returns {kind:"redirect", authorizeUrl}; WebAuthn options have no kind and fall through
       // to the UNCHANGED in-page ceremony below.
       if (options && options.kind === "redirect") {
-        try { sessionStorage.setItem("${ENROLL_REDIRECT_STORAGE_KEY}", cfg.grant); } catch (e) {}
+        try { sessionStorage.setItem("${ENROLL_REDIRECT_STORAGE_KEY}", "pending"); } catch (e) {}
         say("Redirecting you to sign in…");
         location.assign(options.authorizeUrl); // server-built target only — no request input → no open redirect.
         return;
@@ -181,7 +181,7 @@ export function enrollPageHtml(
       say("Follow your device's prompt to create a passkey…");
       const cred = await navigator.credentials.create({ publicKey: toCreateOptions(options) });
       if (!cred) { say("Registration was not completed — try again.", "err"); btn.disabled = false; return; }
-      const ok = await submitAttestation(credToJson(cred), cfg.grant);
+      const ok = await submitAttestation(credToJson(cred));
       if (!ok) btn.disabled = false;
     } catch (err) {
       // A cancelled/failed ceremony lands here — nothing was stored server-side; let the user retry.
@@ -197,12 +197,13 @@ export function enrollPageHtml(
 
 /** A minimal refusal page (HTML) shown when the grant is absent/invalid/expired/reused — a stable message. */
 export function refusalPageHtml(reason: string): string {
+  const safeReason = htmlText(reason);
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Enrollment unavailable — GLA</title>
 <style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5}.err{color:#b3261e}</style>
 </head><body>
 <h1>Enrollment link unavailable</h1>
 <p class="err">This enrollment link is invalid or has already been used. Ask the operator for a new one.</p>
-<p style="color:#888;font-size:.85rem">(${reason})</p>
+<p style="color:#888;font-size:.85rem">(${safeReason})</p>
 </body></html>`;
 }

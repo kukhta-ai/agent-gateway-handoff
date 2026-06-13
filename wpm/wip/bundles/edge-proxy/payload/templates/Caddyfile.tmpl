@@ -44,8 +44,10 @@
 	# Caddy obtains a Let's Encrypt cert automatically.
 	# tls internal
 
-	# Optional: keep the access log so a failed handoff can be traced at the edge.
-	log
+	# Access logs are intentionally not enabled by this template: recipient links can carry short-lived bearer grants
+	# during bootstrap, and browser WebSocket upgrades use an HttpOnly same-origin stream-ticket cookie after
+	# verification. If the operator enables Caddy access logging elsewhere, query strings plus Cookie and
+	# Sec-WebSocket-Protocol header values must be omitted or redacted before the log leaves the host.
 }
 
 # ── Subpath / custom-base variant ────────────────────────────────────────────────────────────────────────
@@ -65,7 +67,7 @@
 # 		header_up X-Forwarded-Prefix /team-a
 # 		reverse_proxy ⟨127.0.0.1:13000⟩
 # 	}
-# 	log
+# 	# Access logs intentionally omitted; see the root variant note above.
 # }
 #
 # Existing/custom reverse proxies that preserve the prefix instead of stripping it are also supported by GLA

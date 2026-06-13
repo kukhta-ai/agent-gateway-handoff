@@ -14,9 +14,9 @@ export interface AuthCallbackPagePaths {
 /**
  * Render the delegated-auth callback landing page.
  *
- * The page is provider-neutral: it only sees opaque OIDC-style return parameters (`code`/`state`) and restores the
- * GLA grant from same-origin sessionStorage written by the enroll/handoff page before redirecting. The grant never
- * appears in the IdP-facing redirect URI.
+ * The page is provider-neutral: it only sees opaque OIDC-style return parameters (`code`/`state`) and restores
+ * non-secret same-origin context written by the enroll/handoff page before redirecting. The GLA grant remains
+ * server-side behind an HttpOnly bootstrap ticket and never appears in the IdP-facing redirect URI.
  */
 export function authCallbackPageHtml(paths: AuthCallbackPagePaths): string {
   const data = jsonScriptData({ paths });
@@ -67,7 +67,7 @@ ${handoffClientScript()}
     const res = await fetch(cfg.paths.handoffVerify, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant: ctx.grant, path: ctx.path, assertion: { code, state } }),
+      body: JSON.stringify({ path: ctx.path, assertion: { code, state } }),
     });
     if (!res.ok) {
       say("Verification was not completed. Ask the operator for a new link.", "err");
@@ -76,11 +76,11 @@ ${handoffClientScript()}
     try { sessionStorage.removeItem("gla.handoff"); } catch (e) {}
     await openEntrypointClient({ ...ctx, clientAssets: ctx.clientAssets || cfg.paths.clientAssets });
   };
-  const finishEnroll = async (grant) => {
+  const finishEnroll = async () => {
     const res = await fetch(cfg.paths.enrollVerify, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant, attestation: { code, state } }),
+      body: JSON.stringify({ attestation: { code, state } }),
     });
     if (res.ok) {
       try { sessionStorage.removeItem("${ENROLL_REDIRECT_STORAGE_KEY}"); } catch (e) {}
@@ -91,14 +91,14 @@ ${handoffClientScript()}
   };
 
   const handoff = readJson("gla.handoff");
-  if (handoff && handoff.grant && handoff.path && handoff.streamPath) {
+  if (handoff && handoff.path && handoff.streamPath) {
     void finishHandoff(handoff);
     return;
   }
-  let enrollGrant;
-  try { enrollGrant = sessionStorage.getItem("${ENROLL_REDIRECT_STORAGE_KEY}"); } catch (e) {}
-  if (enrollGrant) {
-    void finishEnroll(enrollGrant);
+  let enrollMarker;
+  try { enrollMarker = sessionStorage.getItem("${ENROLL_REDIRECT_STORAGE_KEY}"); } catch (e) {}
+  if (enrollMarker) {
+    void finishEnroll();
     return;
   }
   say("No GLA session state was found for this callback. Re-open the original GLA link and try again.", "err");
