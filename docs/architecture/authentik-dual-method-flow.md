@@ -68,7 +68,7 @@ adapter (`see adapters/auth-authentik/src/index.ts`):
 2. **The human picks a method at authentik.** A recipient with a passkey uses it; one without uses the
    password stage. GLA is not involved — the credential lives in authentik (`see authentik-integration.md
    §5`).
-3. **Read.** authentik redirects back to the adapter callback with `?code&state`;
+3. **Read.** authentik redirects back to GLA's callback page with `?code&state`;
    `verifyAssertion(userId, {code,state})` exchanges + validates the `id_token`, checks `sub` against the
    binding, and **derives provider-neutral assurance from `amr`/`acr`** (`§3`). Either method, validated,
    **independently satisfies the step-up** under the right policy — the gateway sees `{ok, authStrength,
@@ -152,7 +152,7 @@ default profile.
 
 ## §5 · THE LOAD-BEARING DECISION — the served-page mechanism (finalizing `authentik-integration.md §2`)
 
-`authentik-integration.md §2` left a choice between **(i)** the adapter callback re-POSTs `{code,state}` to
+`authentik-integration.md §2` left a choice between **(i)** a callback page re-POSTs `{code,state}` to
 the **existing** `/handoff/auth/verify` (so the gateway verify path is literally unchanged) and **(ii)** a
 generic page branch on the opaque options' shape. Reading the real code shows **the two are not exclusive —
 the honest, complete mechanism is (i) PLUS a minimal (ii)**, and that is what is **finalized here** so GLA-072
@@ -210,10 +210,10 @@ The generalization touches **only the served page's *completion mechanism*** and
 payload** — **none of the security-critical paths** (`docs/components/access-gateway.md`,
 `docs/01-architecture-overview.md §6`):
 
-- **Sole public entry — preserved.** The gateway remains the only door; the callback is an **adapter-owned**
-   endpoint behind the **same** Caddy, not a second gateway door and **never** the local bridge
-  (`daemon.ts`'s S-6 guard keeps the bridge local). It is a *new public surface* — the one genuinely new thing
-  — so `§8` treats it as a first-class review target.
+- **Sole public entry — preserved.** The gateway remains the only door; the callback is a **gateway-served,
+  provider-neutral page** behind the **same** Caddy, not a provider-specific listener and **never** the local bridge
+  (`daemon.ts`'s S-6 guard keeps the bridge local). It is a public edge surface — so `§8` treats it as a
+  first-class review target.
 - **Grant-verify-every-request — preserved.** The page change cannot bypass anything: `/handoff/auth/options`,
   `/handoff/auth/verify`, and **every WS upgrade** still verify the recipient-bound grant statelessly
   (signature, recipient caveat, TTL, scope, revocation) **before** anything else, exactly as today. The
@@ -395,9 +395,9 @@ concentrated in the **redirect/callback realization** — the review must prove 
    review gates on the generalization being genuinely generic (`§5`, `§8`).
 5. The recipient chooses a method at authentik; no-passkey uses the password stage; a failed attempt → a
    catchable refusal; the operator sets the requirement per deployment (`§6`).
-6. GLA-072 builds the generic page branch + the shared callback + the `/enroll/verify` strength-echo + the
-   dual-method E2E; both-methods-satisfy and too-weak-rejected are observed via `isGrantAuthorized` + the
-   verify response + the WS-upgrade outcome, with `FakeAuthentik` minting chosen `amr` (`§7`).
+6. The implemented generic page branch + shared gateway callback + `/enroll/verify` strength-echo support the
+   dual-method E2E; both-methods-satisfy and too-weak-rejected are observed via `isGrantAuthorized` + the verify
+   response + the WS-upgrade outcome, with `FakeAuthentik` minting chosen `amr` (`§7`).
 
 ## Related
 

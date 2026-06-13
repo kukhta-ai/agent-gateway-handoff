@@ -70,7 +70,7 @@ harness **intercepts the redirect and synthesizes the callback**: when the gatew
 branch starts the redirect (`location.assign(authorizeUrl)`, `see authentik-dual-method-flow.md §5.2`), the
 harness reads `state`/`nonce`/`redirect_uri` out of the `authorizeUrl`, **stages a valid login for the chosen
 `code` with `{sub: <the enrolled subject>, amr: <chosen>, nonce: <the attempt's nonce>}`**, and **drives the
-callback** (hits the adapter-owned callback / re-POSTs `{code,state}` to the **unchanged** `/handoff/auth/verify`
+callback** (lands on GLA's callback page / re-POSTs `{code,state}` to the **unchanged** `/handoff/auth/verify`
 exactly as the real callback would). From the gateway's and adapter's view this is indistinguishable from a
 real authentik round-trip — the only thing faked is the human-at-authentik leg and the network (the same
 posture the MVP used: a virtual authenticator + a stub site stand in for the real passkey device + real
@@ -139,7 +139,7 @@ The seam invariant — **the same gateway code path serves both the in-tree (Web
    not merely by behavior. (The repo already has the import-boundary selftest, `test-strategy.md §1.1`; this is
    the auth-seam analogue at the source level.)
 3. **The gateway verify path is byte-identical across the swap.** The diff that introduced authentik touched
-   **only** the provider-agnostic page branch + the adapter-owned callback + composition — **not**
+   **only** the provider-agnostic page branch + the GLA-served callback page + composition — **not**
    `/handoff/auth/verify`'s logic (`see authentik-dual-method-flow.md §5.2`). GLA-076 observes that the **same**
    `/handoff/auth/verify` handler (taking an opaque `assertion`, gating via `strengthSufficient`) serves the
    `{code,state}` assertion and the WebAuthn assertion alike.
