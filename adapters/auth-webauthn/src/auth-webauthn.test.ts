@@ -4,19 +4,47 @@
 // for real by that E2E (Chromium + a CDP virtual authenticator); here we pin the negative/atomic/option paths.
 
 import type { OpaqueToken, UserIdentity } from "@gla/kernel";
-import { describe, expect, it } from "vitest";
-import { AuthWebauthnProvider, InMemoryKv, type StoredCredential } from "./index.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  type AuthWebauthnOptions,
+  AuthWebauthnProvider,
+  InMemoryKv,
+  type StoredCredential,
+} from "./index.js";
 
 const userId = "user:tg:user:123" as UserIdentity["id"];
 const discharge = "discharge-token" as OpaqueToken;
+type AuthenticationVerifier = NonNullable<
+  NonNullable<AuthWebauthnOptions["verification"]>["authentication"]
+>;
+type AuthenticationVerification = Awaited<ReturnType<AuthenticationVerifier>>;
 
-function provider(creds?: InMemoryKv<StoredCredential>): AuthWebauthnProvider {
+function provider(
+  creds?: InMemoryKv<StoredCredential>,
+  over: Partial<AuthWebauthnOptions> = {},
+): AuthWebauthnProvider {
   return new AuthWebauthnProvider({
     rpID: "localhost",
     rpName: "GLA test",
     expectedOrigin: "http://localhost:3000",
     ...(creds !== undefined ? { credentials: creds } : {}),
+    ...over,
   });
+}
+
+function verifiedAuthentication(userVerified: boolean, newCounter = 4): AuthenticationVerification {
+  return {
+    verified: true,
+    authenticationInfo: {
+      credentialID: "cred-abc",
+      newCounter,
+      userVerified,
+      credentialDeviceType: "singleDevice",
+      credentialBackedUp: false,
+      origin: "http://localhost:3000",
+      rpID: "localhost",
+    },
+  };
 }
 
 describe("AuthWebauthnProvider — registration options (beginEnrollment)", () => {
@@ -30,6 +58,13 @@ describe("AuthWebauthnProvider — registration options (beginEnrollment)", () =
     expect(typeof options.challenge).toBe("string");
     expect(options.challenge.length).toBeGreaterThan(0);
     expect(options.rp.id).toBe("localhost");
+    expect(
+      (
+        options as {
+          authenticatorSelection?: { userVerification?: string };
+        }
+      ).authenticatorSelection?.userVerification,
+    ).toBe("required");
     // The user is bound (the username is the identity; the id is the base64url of it).
     expect(options.user.name).toBe(userId);
     // Not enrolled yet — options are not a credential.
@@ -78,6 +113,77 @@ describe("AuthWebauthnProvider — authentication preconditions (GLA-013 AC#3)",
     const p = provider(creds);
     const r = await p.verifyAssertion(userId, { any: "assertion" });
     expect(r.ok).toBe(false);
+  });
+
+  it("challenge() requests user verification for the authentication ceremony", async () => {
+    const creds = new InMemoryKv<StoredCredential>();
+    creds.set(userId, { id: "cred-abc", publicKeyB64: "AAAA", counter: 0 });
+    const p = provider(creds);
+
+    const options = (await p.challenge(userId)) as { userVerification?: string };
+
+    expect(options.userVerification).toBe("required");
+  });
+});
+
+describe("AuthWebauthnProvider — user verification is required for assurance", () => {
+  it("refuses a verifier result that lacks UV and returns an actionable diagnostic", async () => {
+    const creds = new InMemoryKv<StoredCredential>();
+    creds.set(userId, { id: "cred-abc", publicKeyB64: "AAAA", counter: 2 });
+    const verifyAuthentication = vi.fn<AuthenticationVerifier>(async (opts) => {
+      expect(opts.requireUserVerification).toBe(true);
+      return verifiedAuthentication(false);
+    });
+    const p = provider(creds, { verification: { authentication: verifyAuthentication } });
+
+    await p.challenge(userId);
+    const r = await p.verifyAssertion(userId, { any: "assertion" });
+
+    expect(r).toMatchObject({
+      ok: false,
+      authStrength: "none",
+      assurance: {
+        authStrength: "none",
+        level: "none",
+        methodResolvable: true,
+        userPresent: true,
+        userVerified: false,
+        recipientBound: true,
+        replayResistant: true,
+        diagnostics: ["missing-user-verification"],
+      },
+    });
+    expect(creds.get(userId)?.counter).toBe(2);
+  });
+
+  it("emits phishing-resistant assurance only when UV, binding, and replay-resistant verification are proven", async () => {
+    const creds = new InMemoryKv<StoredCredential>();
+    creds.set(userId, { id: "cred-abc", publicKeyB64: "AAAA", counter: 2 });
+    const verifyAuthentication = vi.fn<AuthenticationVerifier>(async (opts) => {
+      expect(opts.requireUserVerification).toBe(true);
+      expect(opts.expectedChallenge).toEqual(expect.any(String));
+      expect(opts.expectedRPID).toBe("localhost");
+      return verifiedAuthentication(true, 5);
+    });
+    const p = provider(creds, { verification: { authentication: verifyAuthentication } });
+
+    await p.challenge(userId);
+    const r = await p.verifyAssertion(userId, { any: "assertion" });
+
+    expect(r).toEqual({
+      ok: true,
+      authStrength: "webauthn",
+      assurance: {
+        authStrength: "webauthn",
+        level: "phishing-resistant",
+        methodResolvable: true,
+        userPresent: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
+    });
+    expect(creds.get(userId)?.counter).toBe(5);
   });
 });
 

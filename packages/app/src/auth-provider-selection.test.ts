@@ -64,7 +64,12 @@ const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
       assuranceLevel: "phishing-resistant",
       required: false,
       choiceGroup: "primary-credential",
-      providerEvidence: { amr: ["swk"] },
+      providerEvidence: {
+        amr: ["swk"],
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
     },
   ],
   externalSources: [
@@ -453,6 +458,35 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
     expect(d.actions.join("\n")).toMatch(/provider evidence.*password/i);
   });
 
+  it("flags a phishing-resistant credential stage that lacks UV, binding, and replay proof", () => {
+    const policy = parseAuthEnrollmentPolicyJson(
+      JSON.stringify({
+        provider: "authentik",
+        enrollmentFlow: "gla-invitation-enrollment",
+        invitationStage: "gla-invitation-stage",
+        userWriteStage: "gla-user-write-stage",
+        credentialSetupStages: [
+          {
+            method: "webauthn-passkey",
+            authStrength: "webauthn",
+            assuranceLevel: "phishing-resistant",
+            providerEvidence: { amr: ["swk"] },
+          },
+        ],
+      }),
+      "authentik",
+    );
+    const d = authEnrollmentDiagnostics({
+      authProvider: "authentik",
+      authAssuranceProfile: "phishing-resistant",
+      enrollmentPolicy: policy,
+    });
+    expect(d.concerns.join("\n")).toMatch(
+      /user-verification, recipient-binding, and replay-resistant/i,
+    );
+    expect(d.actions.join("\n")).toMatch(/provider-neutral UV\/binding\/replay proof/i);
+  });
+
   it("flags an external source claiming phishing resistance without explicit provider evidence", () => {
     const policy = parseAuthEnrollmentPolicyJson(
       JSON.stringify({
@@ -520,6 +554,9 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
             assuranceLevel: "phishing-resistant",
             providerEvidence: {
               amr: ["swk"],
+              userVerified: true,
+              recipientBound: true,
+              replayResistant: true,
               access_token: "ACCESS_TOKEN_CANARY_085",
               password: "PASSWORD_CANARY_085",
               credential: "CREDENTIAL_CANARY_085",

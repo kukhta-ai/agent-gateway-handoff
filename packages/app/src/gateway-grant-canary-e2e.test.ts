@@ -79,7 +79,20 @@ class RedirectStepUp implements IdentityStepUpPort {
     assurance?: AuthAssuranceEvidence;
     userId: string;
   }> {
-    return { ok: true, authStrength: "webauthn", userId: "user:gla089" };
+    return {
+      ok: true,
+      authStrength: "webauthn",
+      assurance: {
+        authStrength: "webauthn",
+        level: "phishing-resistant",
+        methodResolvable: true,
+        userPresent: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
+      userId: "user:gla089",
+    };
   }
 }
 

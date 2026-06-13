@@ -434,8 +434,10 @@ export class AuthAuthentikProvider implements AuthProviderPort {
       {
         ...(claims.amr !== undefined ? { amr: claims.amr } : {}),
         ...(claims.acr !== undefined ? { acr: claims.acr } : {}),
+        ...(claims.userVerified !== undefined ? { userVerified: claims.userVerified } : {}),
       },
       this.maps,
+      { recipientBound: true, replayResistant: true },
     );
     const authStrength = assurance.authStrength as "password" | "webauthn";
 

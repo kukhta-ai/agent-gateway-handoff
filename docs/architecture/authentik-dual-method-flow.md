@@ -70,9 +70,9 @@ adapter (`see adapters/auth-authentik/src/index.ts`):
    §5`).
 3. **Read.** authentik redirects back to GLA's callback page with `?code&state`;
    `verifyAssertion(userId, {code,state})` exchanges + validates the `id_token`, checks `sub` against the
-   binding, and **derives provider-neutral assurance from `amr`/`acr`** (`§3`). Either method, validated,
-   **independently satisfies the step-up** under the right policy — the gateway sees `{ok, authStrength,
-   assurance?}` facts and never inspects the provider-local method values.
+   binding, and **derives provider-neutral assurance from `amr`/`acr` plus the configured UV proof claim** (`§3`).
+   Either method, validated, **independently satisfies the step-up** under the right policy — the gateway sees
+   `{ok, authStrength, assurance?}` facts and never inspects the provider-local method values.
 4. **Gate.** The gateway compares the common assurance fact to the route's policy (`§4`).
 
 **Contrast with the in-tree default** (so the difference is explicit): there, passkey is an **in-page**
@@ -91,22 +91,25 @@ authentik provider trades the same-page ceremony for a redirect **precisely beca
 
 Each method yields a strength via the master map (`see authentik-integration.md §4`; the pure function
 `adapters/auth-authentik/src/strength.ts`), keyed on the `id_token`'s **`amr`** (RFC 8176), with **`acr`** as
-the coarse fallback:
+the coarse fallback and **`gla_uv`** as GLA's configured proof that the WebAuthn/passkey stage required user
+verification:
 
-| Method the human used at authentik | `id_token.amr` (canonical tokens) | → `AuthStrength` |
+| Method the human used at authentik | Token evidence | → `AuthStrength` |
 |---|---|---|
-| **Passkey** (phishing-resistant key) | any of `{hwk, swk, webauthn, fido}` (or `acr` ∈ `{phr}`) | **`webauthn`** (strongest) |
+| **Passkey** (phishing-resistant key) | any of `{hwk, swk, webauthn, fido}` (or `acr` ∈ `{phr}`) **and** `gla_uv:true` | **`webauthn`** (strongest) |
 | **Password** (typed) | `{pwd}` — including `["pwd","mfa"]`/`["pwd","otp"]` (MFA on a password is still **not** key auth) | **`password`** |
-| valid token, method not resolvable to either tier | neither set matches | **`password`** (the floor for a valid login; **never** silently `webauthn`) |
+| WebAuthn/passkey label without UV proof | passkey-like `amr`/`acr`, but `gla_uv` absent/false | **`password`** with `missing-user-verification` diagnostic |
+| valid token, method not resolvable to either tier | neither set matches | **`password`** with `method-unresolved` / `ambiguous-provider-evidence` diagnostics |
 | token invalid / exchange failed / `sub` mismatch | — | **`none`** (with `ok:false`) |
 
 The ranking is GLA's frozen total order **`none < password < webauthn`** (`see docs/components/identity-and-auth.md`;
-`AuthStrength` in `kernel-contracts.md §7`). **Passkey > password** is therefore a fact the gating contract
-(`§4`) reads directly. The mapping's hard rule (`strength.ts`): **never up-map** — a missing/ambiguous method
-must never become `webauthn` (that would silently weaken the phishing-resistance guarantee); the floor is
-`password` for a valid token, `none` for an invalid one. The method→token map is operator-overridable
-(deployments whose authentik labels differ) but the defaults above are the **contract**, and GLA-073/074 must
-configure authentik to **emit** an `amr` that distinguishes the two (`§8` risk).
+`AuthStrength` in `kernel-contracts.md §7`). **Passkey > password** is therefore a fact only when the adapter has
+both a passkey method signal and explicit user-verification proof. The mapping's hard rule (`strength.ts`):
+**never up-map** — a missing UV proof or ambiguous method must never become `webauthn` (that would silently weaken
+the phishing-resistance guarantee); the floor is `password` for a valid token, `none` for an invalid one. The
+method→token map is operator-overridable (deployments whose authentik labels differ) but the defaults above are
+the **contract**, and GLA-073/074 must configure authentik to **emit** an `amr` that distinguishes the two and
+`gla_uv:true` only for a UV-required passkey/WebAuthn stage (`§8` risk).
 
 ---
 
@@ -123,8 +126,8 @@ phishing-resistance leaves the default. The older `requiredAuthStrength` input i
 translation layer (`"webauthn"` → `phishing-resistant`, `"password"` → `password-permitted`).
 
 **How it gates.** `strengthSufficient(assurance)` delegates to the kernel's provider-neutral assurance policy
-evaluation (`none < password < phishing-resistant`; `webauthn` projects to phishing-resistant when legacy
-providers omit explicit evidence). In
+evaluation (`none < password < phishing-resistant`; explicit evidence at the phishing-resistant level must include
+user verification, recipient binding, and replay-resistant validation). In
 `POST /handoff/auth/verify` the gateway calls
 `stepUp.verifyAuthentication(recipient, body.assertion)` → `{ok, authStrength, assurance?}` and then:
 
@@ -139,8 +142,9 @@ providers omit explicit evidence). In
 **What a rejected result looks like, end to end.** A recipient who used the **password** stage under the
 default `phishing-resistant` policy produces `{ok:true, authStrength:"password"}`;
 `strengthSufficient("password")` is **false** → 403 `auth.insufficient`, grant unauthorized, WS upgrade
-refused, the gateway serves the catchable refusal (`§6`). A **passkey** result under the same policy produces
-`{ok:true, authStrength:"webauthn"}` → sufficient → authorized, WS proxied. **Both methods independently
+refused, the gateway serves the catchable refusal (`§6`). A **UV-proven passkey** result under the same policy
+produces `{ok:true, authStrength:"webauthn", assurance:{level:"phishing-resistant", userVerified:true,
+recipientBound:true, replayResistant:true}}` → sufficient → authorized, WS proxied. **Both methods independently
 satisfy** the `password-permitted` profile; **only the passkey/phishing-resistant result** satisfies the
 default profile.
 
@@ -307,13 +311,14 @@ machinery, with the two acceptance properties observable. Concrete steps:
    `phishing-resistant` (demand passkey-grade evidence). `requiredAuthStrength` remains only a compatibility
    translation layer.
 5. **Tests (the acceptance evidence)** — with `FakeAuthentik` (`see adapters/auth-authentik/src/fake-authentik.ts`)
-   minting `id_token`s with chosen `amr`:
-   - **Both methods independently satisfy a step-up:** a passkey `amr` (`["swk"]`) → `webauthn` → authorized;
+   minting `id_token`s with chosen `amr` and `gla_uv`:
+   - **Both methods independently satisfy a step-up:** a passkey `amr` (`["swk"]`) plus `gla_uv:true` →
+     `webauthn` → authorized;
      a password `amr` (`["pwd"]`) → `password` → authorized **under `password-permitted`**. Both reach
      the WS-proxy authorized state.
    - **A too-weak result is rejected where a stronger one is required:** under `phishing-resistant`, a password
      `amr` (`["pwd"]`) → `password` → **403 `auth.insufficient`**, grant **not** in `authorizedGrants`,
-     WS upgrade **refused** — while a passkey `amr` on the same route is authorized.
+     WS upgrade **refused** — while a UV-proven passkey result on the same route is authorized.
    - **Failed attempt:** an invalid `id_token` (bad nonce/signature) → `ok:false` → catchable refusal, grant
      unauthorized.
    - **Provider-agnostic page proof:** the WebAuthn provider's E2E still passes through the generalized page
@@ -324,8 +329,8 @@ machinery, with the two acceptance properties observable. Concrete steps:
 
 | Property (AC #5) | Observable |
 |---|---|
-| **Both methods independently satisfy a step-up** | with `authAssuranceProfile:"password-permitted"`, a passkey result *and* a password result each end with the grant in `authorizedGrants` (gateway `isGrantAuthorized(grantId)` true) and the WS upgrade proxied; the verify response is `{authorized:true, auth_strength:"webauthn"|"password"}`. |
-| **A too-weak result is rejected where a stronger one is required** | with the default `authAssuranceProfile:"phishing-resistant"`, a password result → `verifyAuthentication`→`{authStrength:"password", assurance:{level:"password"}}` → gateway 403 `auth.insufficient`, `isGrantAuthorized(grantId)` **false**, the WS upgrade refused (401); the passkey result on the same route → authorized. |
+| **Both methods independently satisfy a step-up** | with `authAssuranceProfile:"password-permitted"`, a UV-proven passkey result *and* a password result each end with the grant in `authorizedGrants` (gateway `isGrantAuthorized(grantId)` true) and the WS upgrade proxied; the verify response is `{authorized:true, auth_strength:"webauthn"|"password"}`. |
+| **A too-weak result is rejected where a stronger one is required** | with the default `authAssuranceProfile:"phishing-resistant"`, a password result → `verifyAuthentication`→`{authStrength:"password", assurance:{level:"password"}}` → gateway 403 `auth.insufficient`, `isGrantAuthorized(grantId)` **false**, the WS upgrade refused (401); a UV-proven passkey result on the same route → authorized. |
 
 **What GLA-068/070 already provide vs what GLA-072 builds.**
 
@@ -371,10 +376,11 @@ concentrated in the **redirect/callback realization** — the review must prove 
 6. **Auth assurance policy is honored on the second window (reuse).** Confirm auth-reuse stores the *actual*
    strength and a later window still enforces the selected policy (a reused `password` validity must not open
    under `phishing-resistant`).
-7. **`amr` fidelity / never-up-map (carried).** If authentik cannot emit an `amr` that distinguishes passkey
-   from password (a GLA-073/074 config matter), a passkey login could be mis-mapped to `password` (a safe
-   under-grant, just a UX failure) — but a password login must **never** map to `webauthn`. Confirm the
-   `strength.ts` defaults + the "valid-but-unresolvable → `password`" floor hold and are tested.
+7. **`amr`/`gla_uv` fidelity / never-up-map (carried).** If authentik cannot emit an `amr` that distinguishes
+   passkey from password, or cannot emit `gla_uv:true` only for a UV-required passkey stage (a GLA-073/074 config
+   matter), a passkey login could be mis-mapped to `password` (a safe under-grant, just a UX failure) — but a
+   password login or non-UV passkey label must **never** map to `webauthn`. Confirm the `strength.ts` defaults +
+   the "valid-but-unresolvable → `password`" floor hold and are tested.
 
 ---
 
@@ -383,8 +389,8 @@ concentrated in the **redirect/callback realization** — the review must prove 
 1. Both methods are **hosted by authentik**; GLA **always redirects** to authentik's flow (passkey + password
    stages), the human chooses, authentik returns an `id_token` whose `amr` names the method; GLA = redirect →
    read → gate (`§2`).
-2. Passkey (`{hwk,swk,webauthn,fido}`) → `webauthn`; password (`{pwd}`) → `password`; `none<password<webauthn`;
-   never up-map (`§3`).
+2. Passkey labels (`{hwk,swk,webauthn,fido}`) plus `gla_uv:true` → `webauthn`; password (`{pwd}`) → `password`;
+   passkey labels without UV proof → `password`; `none<password<webauthn`; never up-map (`§3`).
 3. The strength gate is the gateway's provider-neutral auth assurance policy — `phishing-resistant` by default
    and `password-permitted` only when explicit. A password-only result (`"password"`) is rejected (403
    `auth.insufficient`, grant unauthorized) under the default and accepted only under `password-permitted`; a

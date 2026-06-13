@@ -52,6 +52,18 @@ const MALICIOUS_CLIENT = {
   bootstrap: { payload: "</script><script>globalThis.pwned=1</script>" },
 };
 
+function verifiedWebAuthnAssurance(): AuthAssuranceEvidence {
+  return {
+    authStrength: "webauthn",
+    level: "phishing-resistant",
+    methodResolvable: true,
+    userPresent: true,
+    userVerified: true,
+    recipientBound: true,
+    replayResistant: true,
+  };
+}
+
 /**
  * A stub handoff-grant seam: a `valid` token verifies (reporting `recipient` + the grant id); anything else fails
  * with the configured reason. The grant id lets a test authorize/revoke it.
@@ -110,7 +122,7 @@ class StubStepUp implements IdentityStepUpPort {
   verifyCalls = 0;
   verifyOk = true;
   reportedStrength: AuthStrength = "webauthn";
-  reportedAssurance: AuthAssuranceEvidence | undefined;
+  reportedAssurance: AuthAssuranceEvidence | undefined = verifiedWebAuthnAssurance();
   isEnrolled(r: RecipientRef): boolean {
     return this.enrolled.has(r);
   }
@@ -686,7 +698,7 @@ describe("Access Gateway — handoff step-up options + verify decision (GLA-035)
     expect(res.status).toBe(403);
   });
 
-  it("POST /handoff/auth/verify with a VERIFIED assertion (sufficient strength) → authorizes the grant", async () => {
+  it("POST /handoff/auth/verify with a VERIFIED assertion and explicit assurance → authorizes the grant", async () => {
     const grants = new StubSessionGrants();
     const stepUp = new StubStepUp();
     stepUp.verifyOk = true;
@@ -702,6 +714,24 @@ describe("Access Gateway — handoff step-up options + verify decision (GLA-035)
     expect(res.status).toBe(200);
     expect(((await res.json()) as { authorized?: boolean }).authorized).toBe(true);
     expect(gateway.isGrantAuthorized(GRANT_ID)).toBe(true);
+  });
+
+  it("POST /handoff/auth/verify with only legacy WebAuthn strength and no assurance proof → 403", async () => {
+    const grants = new StubSessionGrants();
+    const stepUp = new StubStepUp();
+    stepUp.verifyOk = true;
+    stepUp.reportedStrength = "webauthn";
+    stepUp.reportedAssurance = undefined;
+    const { base, gateway, close } = await bootHandoffGateway(grants, stepUp);
+    closers.push(close);
+    await gateway.mount(mountReq("ws://127.0.0.1:1/"));
+    const res = await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(res.status).toBe(403);
+    expect(gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
   });
 
   it("POST /handoff/auth/verify works through the public prefix but verifies the internal route scope", async () => {
@@ -754,6 +784,7 @@ describe("Access Gateway — handoff step-up options + verify decision (GLA-035)
     const stepUp = new StubStepUp();
     stepUp.verifyOk = true;
     stepUp.reportedStrength = "password"; // below the required webauthn
+    stepUp.reportedAssurance = undefined;
     const { base, gateway, close } = await bootHandoffGateway(grants, stepUp);
     closers.push(close);
     await gateway.mount(mountReq("ws://127.0.0.1:1/"));
@@ -788,11 +819,35 @@ describe("Access Gateway — handoff step-up options + verify decision (GLA-035)
     expect(gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
   });
 
+  it("POST /handoff/auth/verify with coarse phishing-resistant evidence but missing UV proof → 403", async () => {
+    const grants = new StubSessionGrants();
+    const stepUp = new StubStepUp();
+    stepUp.verifyOk = true;
+    stepUp.reportedStrength = "webauthn";
+    stepUp.reportedAssurance = {
+      authStrength: "webauthn",
+      level: "phishing-resistant",
+      methodResolvable: true,
+      diagnostics: ["missing-user-verification"],
+    };
+    const { base, gateway, close } = await bootHandoffGateway(grants, stepUp);
+    closers.push(close);
+    await gateway.mount(mountReq("ws://127.0.0.1:1/"));
+    const res = await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(res.status).toBe(403);
+    expect(gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
+  });
+
   it("password-permitted assurance policy authorizes password-grade evidence without provider route logic", async () => {
     const grants = new StubSessionGrants();
     const stepUp = new StubStepUp();
     stepUp.verifyOk = true;
     stepUp.reportedStrength = "password";
+    stepUp.reportedAssurance = undefined;
     const { base, gateway, close } = await bootHandoffGateway(grants, stepUp, {
       authAssurancePolicy: authAssurancePolicyFromProfile("password-permitted"),
     });

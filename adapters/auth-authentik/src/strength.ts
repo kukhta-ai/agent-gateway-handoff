@@ -1,9 +1,9 @@
 // @gla/auth-authentik · method → AuthStrength mapping (authentik-integration.md §4, AC #3/#5).
 //
 // authentik reports HOW a human authenticated in the id_token claims (`amr` — RFC 8176 method
-// references — with `acr` as the coarse fallback). This module maps those claims onto GLA's frozen
-// three-value `AuthStrength = "none" | "password" | "webauthn"` (kernel-contracts.md §7) so a passkey
-// result yields the strongest tier and a password result a lower one.
+// references — with `acr` as the coarse fallback). A WebAuthn/passkey label is only a method signal: it
+// becomes GLA's strongest tier when the token also carries an explicit user-verification/equivalent proof.
+// Without that proof, the valid login degrades to the password floor with diagnostics.
 //
 // The mapping is a PURE function of `{amr?, acr?}` + the (operator-overridable) method maps — no I/O,
 // no clock, no state. It is the single place the §4 table lives, exhaustively unit-tested. The hard
@@ -12,6 +12,7 @@
 // `password`, and `none` is reserved for an INVALID token (decided by the verifier, not here).
 
 import {
+  type AuthAssuranceDiagnostic,
   type AuthAssuranceEvidence,
   type AuthStrength,
   assuranceFromAuthStrength,
@@ -19,14 +20,25 @@ import {
 
 /**
  * The subset of `id_token` claims this mapping keys on. `amr` is the precise per-method signal (an
- * OIDC-standard JSON array, RFC 8176); `acr` is the coarser single-value fallback some flows set.
- * Both are optional — a valid token may carry neither (→ the `password` floor).
+ * OIDC-standard JSON array, RFC 8176); `acr` is the coarser single-value fallback some flows set. A
+ * deployment-owned custom claim supplies the provider-neutral user-verification proof. All are optional —
+ * a valid token may carry no resolvable method (→ the `password` floor).
  */
 export interface MethodClaims {
   /** Authentication Methods References (RFC 8176), e.g. `["swk"]` (passkey) or `["pwd","mfa"]`. */
   amr?: string[];
   /** Authentication Context Class Reference — the coarse fallback when `amr` is absent. */
   acr?: string;
+  /** Provider-confirmed user verification or equivalent proof for passkey/WebAuthn-labelled methods. */
+  userVerified?: boolean;
+}
+
+/** Provider-neutral facts known by the OIDC verifier outside native method labels. */
+export interface MethodAssuranceContext {
+  /** The id_token subject/audience was bound to the intended recipient/client. */
+  recipientBound?: boolean;
+  /** The one-time OIDC state/nonce/PKCE exchange was consumed and validated. */
+  replayResistant?: boolean;
 }
 
 /**
@@ -81,17 +93,64 @@ function amrHasAny(amr: readonly string[] | undefined, set: ReadonlySet<string>)
   return false;
 }
 
+function matchedMethod(
+  claims: MethodClaims,
+  maps: MethodMaps,
+): "webauthn" | "password" | "unresolved" {
+  if (amrHasAny(claims.amr, maps.webauthnAmr)) {
+    return "webauthn";
+  }
+  if (amrHasAny(claims.amr, maps.passwordAmr)) {
+    return "password";
+  }
+  if (claims.acr !== undefined) {
+    const acr = norm(claims.acr);
+    if (maps.webauthnAcr.has(acr)) {
+      return "webauthn";
+    }
+    if (maps.passwordAcr.has(acr)) {
+      return "password";
+    }
+  }
+  return "unresolved";
+}
+
+function diagnosticsFor(
+  claims: MethodClaims,
+  maps: MethodMaps,
+  context: MethodAssuranceContext,
+): AuthAssuranceDiagnostic[] {
+  const method = matchedMethod(claims, maps);
+  const diagnostics: AuthAssuranceDiagnostic[] = [];
+  if (method === "webauthn" && claims.userVerified !== true) {
+    diagnostics.push("missing-user-verification");
+  }
+  if (method === "webauthn" && claims.userVerified === true && context.recipientBound !== true) {
+    diagnostics.push("missing-recipient-binding");
+  }
+  if (method === "webauthn" && claims.userVerified === true && context.replayResistant !== true) {
+    diagnostics.push("missing-replay-resistant-challenge");
+  }
+  if (method === "unresolved") {
+    diagnostics.push("method-unresolved", "ambiguous-provider-evidence");
+  }
+  if (method === "password") {
+    diagnostics.push("password-grade-proof");
+  }
+  return diagnostics;
+}
+
 /**
  * Map an id_token's method claims onto `AuthStrength`, per doc §4 (AC #3/#5). The token is assumed
  * already VALID (signature/issuer/audience/nonce/exp checked by the verifier) — this only classifies
  * the *method*, so it never returns `"none"` (that tier is the verifier's, for an INVALID token).
  *
- * Precedence (highest matching method wins — a login that did BOTH password and passkey is `webauthn`):
- *  1. `amr` ∩ webauthn-set (`{hwk,swk,webauthn,fido}`)         → `"webauthn"`
- *  2. else `amr` ∩ password-set (`{pwd}`, with/without MFA)    → `"password"`
- *  3. else `acr` ∈ webauthn-acr (passkey/phishing-resistant)   → `"webauthn"`
- *  4. else `acr` ∈ password-acr (password context)            → `"password"`
- *  5. else (valid token, unresolvable method)                 → `"password"`  (the floor; NEVER up-map)
+ * Precedence (highest matching method wins only when its assurance proof is present):
+ *  1. `amr` ∩ webauthn-set with `userVerified:true`             → `"webauthn"`
+ *  2. else `amr` ∩ password-set (`{pwd}`, with/without MFA)     → `"password"`
+ *  3. else `acr` ∈ webauthn-acr with `userVerified:true`        → `"webauthn"`
+ *  4. else `acr` ∈ password-acr (password context)              → `"password"`
+ *  5. else (valid token, unverified or unresolvable method)     → `"password"`  (the floor; NEVER up-map)
  *
  * Step 5 is the doc's "valid token but no resolvable method → `password` (never silently `webauthn`,
  * never `none`)" rule — and the caller records it as an operator CONCERN (doc §9).
@@ -104,25 +163,10 @@ export function mapMethodToStrength(
   claims: MethodClaims,
   maps: MethodMaps = DEFAULT_METHOD_MAPS,
 ): AuthStrength {
-  // 1) `amr` says a phishing-resistant key was used → the strongest tier.
-  if (amrHasAny(claims.amr, maps.webauthnAmr)) {
+  const method = matchedMethod(claims, maps);
+  if (method === "webauthn" && claims.userVerified === true) {
     return "webauthn";
   }
-  // 2) `amr` says a password was used (MFA companions don't up-map) → password tier.
-  if (amrHasAny(claims.amr, maps.passwordAmr)) {
-    return "password";
-  }
-  // 3/4) `amr` absent or unresolved → fall back to the coarse `acr` context.
-  if (claims.acr !== undefined) {
-    const acr = norm(claims.acr);
-    if (maps.webauthnAcr.has(acr)) {
-      return "webauthn";
-    }
-    if (maps.passwordAcr.has(acr)) {
-      return "password";
-    }
-  }
-  // 5) Valid token, unresolvable method → the password FLOOR (never up-map to webauthn, never `none`).
   return "password";
 }
 
@@ -135,22 +179,14 @@ export function methodResolvable(
   claims: MethodClaims,
   maps: MethodMaps = DEFAULT_METHOD_MAPS,
 ): boolean {
-  if (amrHasAny(claims.amr, maps.webauthnAmr) || amrHasAny(claims.amr, maps.passwordAmr)) {
-    return true;
-  }
-  if (claims.acr !== undefined) {
-    const acr = norm(claims.acr);
-    if (maps.webauthnAcr.has(acr) || maps.passwordAcr.has(acr)) {
-      return true;
-    }
-  }
-  return false;
+  return matchedMethod(claims, maps) !== "unresolved";
 }
 
 /** Project authentik method claims into GLA's provider-neutral assurance evidence contract. */
 export function mapMethodToAssurance(
   claims: MethodClaims,
   maps: MethodMaps = DEFAULT_METHOD_MAPS,
+  context: MethodAssuranceContext = {},
 ): AuthAssuranceEvidence {
   const providerEvidence: Record<string, unknown> = {};
   if (claims.amr !== undefined) {
@@ -159,8 +195,16 @@ export function mapMethodToAssurance(
   if (claims.acr !== undefined) {
     providerEvidence.acr = claims.acr;
   }
+  if (claims.userVerified !== undefined) {
+    providerEvidence.userVerified = claims.userVerified;
+  }
+  const diagnostics = diagnosticsFor(claims, maps, context);
   return assuranceFromAuthStrength(mapMethodToStrength(claims, maps), {
     methodResolvable: methodResolvable(claims, maps),
+    ...(claims.userVerified !== undefined ? { userVerified: claims.userVerified } : {}),
+    ...(context.recipientBound !== undefined ? { recipientBound: context.recipientBound } : {}),
+    ...(context.replayResistant !== undefined ? { replayResistant: context.replayResistant } : {}),
+    ...(diagnostics.length > 0 ? { diagnostics } : {}),
     providerEvidence,
   });
 }

@@ -161,6 +161,7 @@ export {
   parseAuthAssuranceProfile,
 } from "./auth-assurance.js";
 export type {
+  AuthAssuranceDiagnostic,
   AuthAssuranceEvidence,
   AuthAssuranceLevel,
   AuthAssurancePolicy,

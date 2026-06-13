@@ -22,8 +22,8 @@ export type AuthStrength = "none" | "password" | "webauthn";
 export interface AuthAssuranceFact {
   authStrength: AuthStrength;
   /**
-   * Provider-neutral assurance evidence. Legacy providers may omit this; consumers must then derive the
-   * compatibility projection from `authStrength` rather than assuming stronger evidence.
+   * Provider-neutral assurance evidence. Legacy providers may omit this only for compatibility;
+   * strongest phishing-resistant enforcement requires explicit assurance evidence, not `authStrength`.
    */
   assurance?: AuthAssuranceEvidence;
 }
