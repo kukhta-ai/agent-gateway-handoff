@@ -1,7 +1,7 @@
 // GLA-072 — Dual-method step-up via the DELEGATED authentik provider, proven DETERMINISTICALLY in-process with
 // `FakeAuthentik` (no real browser, no network). The recipient completes a step-up with a PASSKEY (strongest) OR,
 // lacking one, a PASSWORD (password strength), both hosted by authentik; the gateway gates by the route's
-// `requiredAuthStrength`. GLA = redirect → read (amr→strength) → gate (authentik-dual-method-flow.md §2-§4).
+// auth assurance profile. GLA = redirect → read (amr→strength) → gate (authentik-dual-method-flow.md §2-§4).
 //
 // This test lives in `packages/app` because it wires the concrete `AuthAuthentikProvider` (only the composition
 // root may import an adapter — the boundary lint forbids it in `packages/gateway`). It mirrors the harness of
@@ -38,13 +38,15 @@ import {
   type SessionGrantVerifyResult,
 } from "@gla/gateway";
 import { IdentityService } from "@gla/identity";
-import type {
-  CapabilityId,
-  ErrorCode,
-  OpaqueToken,
-  RecipientRef,
-  RouteId,
-  SessionId,
+import {
+  type AuthAssuranceProfile,
+  type CapabilityId,
+  type ErrorCode,
+  type OpaqueToken,
+  type RecipientRef,
+  type RouteId,
+  type SessionId,
+  authAssurancePolicyFromProfile,
 } from "@gla/kernel";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -156,7 +158,7 @@ afterEach(async () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The dual-method harness: a gateway wired with the REAL IdentityService+AuthAuthentikProvider (fake-authentik
-// seams) as `stepUp`, plus the recipient pre-enrolled (a bound subject). `requiredAuthStrength` is configurable.
+// seams) as `stepUp`, plus the recipient pre-enrolled (a bound subject). `authAssuranceProfile` is configurable.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface DualHarness {
@@ -173,6 +175,7 @@ interface DualHarness {
 }
 
 async function dualHarness(opts: {
+  authAssuranceProfile?: AuthAssuranceProfile;
   requiredAuthStrength?: "password" | "webauthn";
   upstream?: string;
   enroll?: boolean;
@@ -205,6 +208,9 @@ async function dualHarness(opts: {
     stepUp: identity,
     host: "127.0.0.1",
     port: 0,
+    ...(opts.authAssuranceProfile !== undefined
+      ? { authAssurancePolicy: authAssurancePolicyFromProfile(opts.authAssuranceProfile) }
+      : {}),
     ...(opts.requiredAuthStrength !== undefined
       ? { requiredAuthStrength: opts.requiredAuthStrength }
       : {}),
@@ -273,14 +279,17 @@ async function stepUpWith(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AC#1/#2/#5 — both methods independently satisfy a route that PERMITS the fallback (requiredAuthStrength "password").
+// AC#1/#2/#5 — both methods independently satisfy a policy that explicitly permits the fallback.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('AC#1/#2/#5 · both methods satisfy a route requiring "password" (passkey→webauthn, password→password)', () => {
+describe("AC#1/#2/#5 · both methods satisfy password-permitted policy (passkey→webauthn, password→password)", () => {
   it("AC#1 · a PASSKEY step-up (amr swk) → auth_strength webauthn → authorized; WS upgrade proxied", async () => {
     const upstream = await startStubUpstream();
     closers.push(upstream.close);
-    const h = await dualHarness({ requiredAuthStrength: "password", upstream: upstream.endpoint });
+    const h = await dualHarness({
+      authAssuranceProfile: "password-permitted",
+      upstream: upstream.endpoint,
+    });
     const res = await stepUpWith(h, { amr: ["swk"] });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { authorized?: boolean; auth_strength?: string };
@@ -296,7 +305,10 @@ describe('AC#1/#2/#5 · both methods satisfy a route requiring "password" (passk
   it("AC#2 · a PASSWORD step-up (amr pwd, no passkey) → auth_strength password → authorized; WS upgrade proxied", async () => {
     const upstream = await startStubUpstream();
     closers.push(upstream.close);
-    const h = await dualHarness({ requiredAuthStrength: "password", upstream: upstream.endpoint });
+    const h = await dualHarness({
+      authAssuranceProfile: "password-permitted",
+      upstream: upstream.endpoint,
+    });
     const res = await stepUpWith(h, { amr: ["pwd"] });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { authorized?: boolean; auth_strength?: string };
@@ -309,7 +321,7 @@ describe('AC#1/#2/#5 · both methods satisfy a route requiring "password" (passk
   });
 
   it("AC#2 · password + MFA companions (amr [pwd,mfa]) is still password (MFA never up-maps)", async () => {
-    const h = await dualHarness({ requiredAuthStrength: "password" });
+    const h = await dualHarness({ authAssuranceProfile: "password-permitted" });
     const res = await stepUpWith(h, { amr: ["pwd", "mfa"] });
     const body = (await res.json()) as { auth_strength?: string };
     expect(body.auth_strength).toBe("password");
@@ -317,14 +329,17 @@ describe('AC#1/#2/#5 · both methods satisfy a route requiring "password" (passk
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AC#3 — a too-weak result is rejected where the stronger method is required (requiredAuthStrength "webauthn").
+// AC#3 — a too-weak result is rejected where phishing-resistant assurance is required.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('AC#3 · a route requiring "webauthn" admits the passkey but rejects the password-only result', () => {
-  it("PASSWORD result on a webauthn route → 403 auth.insufficient, grant NOT authorized, WS upgrade refused (401)", async () => {
+describe("AC#3 · phishing-resistant policy admits the passkey but rejects the password-only result", () => {
+  it("PASSWORD result under phishing-resistant policy → 403 auth.insufficient, grant NOT authorized, WS upgrade refused (401)", async () => {
     const upstream = await startStubUpstream();
     closers.push(upstream.close);
-    const h = await dualHarness({ requiredAuthStrength: "webauthn", upstream: upstream.endpoint });
+    const h = await dualHarness({
+      authAssuranceProfile: "phishing-resistant",
+      upstream: upstream.endpoint,
+    });
     const res = await stepUpWith(h, { amr: ["pwd"] });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe(
@@ -338,10 +353,13 @@ describe('AC#3 · a route requiring "webauthn" admits the passkey but rejects th
     up.socket.destroy();
   });
 
-  it("PASSKEY result on the SAME webauthn route → authorized (the stronger method satisfies it)", async () => {
+  it("PASSKEY result under the SAME phishing-resistant policy → authorized (the stronger method satisfies it)", async () => {
     const upstream = await startStubUpstream();
     closers.push(upstream.close);
-    const h = await dualHarness({ requiredAuthStrength: "webauthn", upstream: upstream.endpoint });
+    const h = await dualHarness({
+      authAssuranceProfile: "phishing-resistant",
+      upstream: upstream.endpoint,
+    });
     const res = await stepUpWith(h, { amr: ["swk"] });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { authorized?: boolean }).authorized).toBe(true);
@@ -358,7 +376,7 @@ describe('AC#3 · a route requiring "webauthn" admits the passkey but rejects th
 
 describe("AC#4 · a failed assertion is refused with a typed reason and authorizes no one", () => {
   it("a NONCE-MISMATCH id_token → {ok:false} → 403 auth.insufficient, grant NOT authorized", async () => {
-    const h = await dualHarness({ requiredAuthStrength: "password" });
+    const h = await dualHarness({ authAssuranceProfile: "password-permitted" });
     const res = await stepUpWith(h, { amr: ["swk"], mint: "bad-nonce" });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe(
@@ -368,7 +386,7 @@ describe("AC#4 · a failed assertion is refused with a typed reason and authoriz
   });
 
   it("a SUBJECT-MISMATCH id_token (a valid login for the WRONG sub) → refused, nothing authorized", async () => {
-    const h = await dualHarness({ requiredAuthStrength: "password" });
+    const h = await dualHarness({ authAssuranceProfile: "password-permitted" });
     const res = await stepUpWith(h, { amr: ["swk"], sub: "sub-IMPOSTOR" });
     expect(res.status).toBe(403);
     expect(h.gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
@@ -405,27 +423,33 @@ describe("AC#4 · a failed assertion is refused with a typed reason and authoriz
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// requiredAuthStrength wiring + the never-up-map floor.
+// Auth assurance policy wiring + the never-up-map floor.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("requiredAuthStrength wiring + the never-up-map floor", () => {
-  it('the DEFAULT gateway requirement is "webauthn" (a password-only step-up is rejected by default)', async () => {
-    // No requiredAuthStrength → defaults to "webauthn".
+describe("authAssuranceProfile wiring + the never-up-map floor", () => {
+  it("the DEFAULT gateway policy is phishing-resistant (a password-only step-up is rejected by default)", async () => {
+    // No authAssuranceProfile → defaults to phishing-resistant.
     const h = await dualHarness({});
     const res = await stepUpWith(h, { amr: ["pwd"] });
     expect(res.status).toBe(403);
     expect(h.gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
   });
 
-  it('a valid token with an UNRESOLVABLE method (no amr) → password floor → admitted under "password", rejected under "webauthn" (never webauthn)', async () => {
-    const permit = await dualHarness({ requiredAuthStrength: "password" });
+  it("a valid token with an UNRESOLVABLE method (no amr) → password floor → admitted under password-permitted, rejected under phishing-resistant", async () => {
+    const permit = await dualHarness({ authAssuranceProfile: "password-permitted" });
     const r1 = await stepUpWith(permit, {}); // no amr → the password floor
     expect(((await r1.json()) as { auth_strength?: string }).auth_strength).toBe("password");
 
-    const demand = await dualHarness({ requiredAuthStrength: "webauthn" });
-    const r2 = await stepUpWith(demand, {}); // no amr → password floor → rejected under webauthn (never up-mapped)
+    const demand = await dualHarness({ authAssuranceProfile: "phishing-resistant" });
+    const r2 = await stepUpWith(demand, {}); // no amr → password floor → rejected under phishing-resistant
     expect(r2.status).toBe(403);
     expect(demand.gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
+  });
+
+  it("deprecated requiredAuthStrength still translates to the equivalent assurance profile", async () => {
+    const h = await dualHarness({ requiredAuthStrength: "password" });
+    const res = await stepUpWith(h, { amr: ["pwd"] });
+    expect(res.status).toBe(200);
   });
 });
 

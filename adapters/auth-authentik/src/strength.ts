@@ -11,7 +11,11 @@
 // `webauthn` (that would weaken the phishing-resistance guarantee); the floor for a VALID token is
 // `password`, and `none` is reserved for an INVALID token (decided by the verifier, not here).
 
-import type { AuthStrength } from "@gla/kernel";
+import {
+  type AuthAssuranceEvidence,
+  type AuthStrength,
+  assuranceFromAuthStrength,
+} from "@gla/kernel";
 
 /**
  * The subset of `id_token` claims this mapping keys on. `amr` is the precise per-method signal (an
@@ -141,6 +145,24 @@ export function methodResolvable(
     }
   }
   return false;
+}
+
+/** Project authentik method claims into GLA's provider-neutral assurance evidence contract. */
+export function mapMethodToAssurance(
+  claims: MethodClaims,
+  maps: MethodMaps = DEFAULT_METHOD_MAPS,
+): AuthAssuranceEvidence {
+  const providerEvidence: Record<string, unknown> = {};
+  if (claims.amr !== undefined) {
+    providerEvidence.amr = claims.amr;
+  }
+  if (claims.acr !== undefined) {
+    providerEvidence.acr = claims.acr;
+  }
+  return assuranceFromAuthStrength(mapMethodToStrength(claims, maps), {
+    methodResolvable: methodResolvable(claims, maps),
+    providerEvidence,
+  });
 }
 
 /**

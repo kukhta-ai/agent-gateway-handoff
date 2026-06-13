@@ -100,13 +100,13 @@ grant + serves the step-up page → **the page's provider-agnostic branch starts
 → `location.assign(authorizeUrl)`, `see authentik-dual-method-flow.md §5.2`) → the harness synthesizes the
 callback with `amr:["swk"]` (passkey) and the enrolled `sub`/attempt `nonce` → the **unchanged**
 `/handoff/auth/verify` exchanges+validates via `FakeAuthentik` → `verifyAssertion` returns
-`{ok:true, authStrength:"webauthn"}` → the gateway's **existing** strength gate passes → the grant is
+`{ok:true, authStrength:"webauthn", assurance:{level:"phishing-resistant"}}` → the gateway's auth assurance policy passes → the grant is
 authorized → the **WS upgrade is proxied to the capsule's noVNC endpoint** (HTTP 101). The human reaches the
 capsule.
 
 **Run B — password.** Identical thread, except the harness synthesizes the callback with `amr:["pwd"]`
-(password) → `verifyAssertion` returns `{ok:true, authStrength:"password"}` → on a route whose
-`requiredAuthStrength` is `"password"` the strength gate passes → the grant is authorized → the **WS upgrade
+(password) → `verifyAssertion` returns `{ok:true, authStrength:"password", assurance:{level:"password"}}` → under the explicit
+`password-permitted` policy the assurance gate passes → the grant is authorized → the **WS upgrade
 reaches the capsule**. The human reaches the capsule via the password fallback.
 
 **Observable (per `authentik-dual-method-flow.md §7`):** for each run, `gateway.isGrantAuthorized(grantId)`
@@ -153,20 +153,20 @@ S-10` require. This is the headline thing GLA-076 proves.
 
 ## §4 · Strength-gating is observable end to end (AC #3)
 
-The gating contract (`see authentik-dual-method-flow.md §4`: the **existing** `requiredAuthStrength` +
-`strengthSufficient`, unchanged) is proven **end to end** through the real thread:
+The gating contract (`see authentik-dual-method-flow.md §4`: provider-neutral `AuthAssurancePolicy` +
+`strengthSufficient`) is proven **end to end** through the real thread:
 
-| Route requirement (`requiredAuthStrength`) | Passkey run (`amr:["swk"]` → `webauthn`) | Password run (`amr:["pwd"]` → `password`) |
+| Auth assurance policy | Passkey run (`amr:["swk"]` → `webauthn`) | Password run (`amr:["pwd"]` → `password`) |
 |---|---|---|
-| **`"webauthn"`** (the default; demand the stronger method) | **admitted** — `strengthSufficient("webauthn")` `2>=2` true → grant authorized → **WS reaches the capsule** | **rejected** — `strengthSufficient("password")` `1>=2` false → **403 `auth.insufficient`**, grant **not** authorized, **WS upgrade refused (401)**, capsule **not** reached |
-| **`"password"`** (permit the fallback) | **admitted** | **admitted** — grant authorized → WS reaches the capsule |
+| **`phishing-resistant`** (the default; demand the stronger method) | **admitted** → grant authorized → **WS reaches the capsule** | **rejected** → **403 `auth.insufficient`**, grant **not** authorized, **WS upgrade refused (401)**, capsule **not** reached |
+| **`password-permitted`** (permit the fallback) | **admitted** | **admitted** — grant authorized → WS reaches the capsule |
 
-**Observable.** On the `"webauthn"`-required route, the password run ends with `gateway.isGrantAuthorized(grantId)`
+**Observable.** Under the default `phishing-resistant` policy, the password run ends with `gateway.isGrantAuthorized(grantId)`
 **false** and the WS upgrade **refused** (the gateway's `handleHandoffAuthVerify` returns 403 `auth.insufficient`
 and never adds the grant — `see packages/gateway/src/index.ts`, `authentik-dual-method-flow.md §4`/`§7`),
-**while** the passkey run on the same route ends authorized + WS-proxied. On the `"password"`-required route,
+**while** the passkey run on the same route ends authorized + WS-proxied. Under `password-permitted`,
 **both** runs end authorized. This is **the same gate, same code**, gating an authentik result — proving the
-strength contract holds end to end with **no gateway change**: a step requiring the stronger method **admits
+strength contract holds end to end: a step requiring the stronger method **admits
 the passkey run and rejects the password-only run**.
 
 > This is the E2E lift of the in-dev gating evidence `authentik-dual-method-flow.md §7` already specified at
@@ -190,7 +190,7 @@ refused and the capsule receives no traffic**:
 | **Forwarded link (wrong recipient) — the S-10 lift** | the harness opens the **grant-bound link in a second context as a different recipient** (as the WebAuthn capstone does, `see test-strategy.md §3 S-10`); even a *valid* authentik login there resolves to a `sub` not bound to the grant's recipient | the recipient caveat on the grant + the `subject_mismatch` check both fail closed → WS refused; the capsule receives **no** traffic from the second context |
 
 **The unifying property:** the gateway authorizes a grant **only** on a provider `{ok:true}` that **also**
-meets the required strength **and** resolves to the grant's bound recipient's subject — so anything authentik
+meets the selected auth assurance policy **and** resolves to the grant's bound recipient's subject — so anything authentik
 does **not** vouch for (un-enrolled, wrong subject, invalid token, forwarded link) yields `{ok:false}` (or a
 recipient-caveat failure) → the grant stays unauthorized → the WS upgrade is refused → **the human does not
 reach the capsule.** Fail-closed is preserved under delegation, end to end.
@@ -256,10 +256,10 @@ in-dev proof**, and a **live real-authentik round-trip is a deploy-time confirma
    in-`packages/gateway`** check as a hard assertion, and (c) make the byte-identical-verify-path claim
    checkable (the diff that added authentik does not touch `/handoff/auth/verify`'s logic). A weak version
    (two unrelated tests that both happen to pass) does **not** prove the invariant.
-3. **The `requiredAuthStrength` route setup for the gating runs (`§4`).** GLA-076 must construct routes/sessions
-   with a **known** required strength (`"webauthn"` vs `"password"`) to make the admit/reject matrix
-   observable; the harness must set/read `requiredAuthStrength` per run (via the gateway composition options,
-   `see packages/gateway/src/index.ts` `GatewayOptions.requiredAuthStrength`) — and the password-run-refused
+3. **The auth assurance policy setup for the gating runs (`§4`).** GLA-076 must construct routes/sessions
+   with a **known** policy (`phishing-resistant` vs `password-permitted`) to make the admit/reject matrix
+   observable; the harness must set/read `authAssuranceProfile` per run (via the gateway composition options,
+   `see packages/gateway/src/index.ts` `GatewayOptions.authAssurancePolicy`) — and the password-run-refused
    assertion must observe the **WS upgrade refusal** (capsule not reached), not merely the 403, to be a true
    end-to-end gate.
 4. **Cold/hermetic + capsule reaping (carried from GLA-066).** The run spawns a **real capsule** (gated on
@@ -309,4 +309,4 @@ extension) · `docs/components/identity-and-auth.md` (the identity/auth model) �
 `packages/app/src/scenario-01-e2e.test.ts` (GLA-066 — the capstone GLA-076 mirrors) ·
 `adapters/auth-authentik/src/fake-authentik.ts` (the controllable OIDC double GLA-076 drives) ·
 `adapters/auth-authentik/src/index.ts` (`challenge`/`verifyAssertion`, the `subject_mismatch` check) ·
-`packages/gateway/src/index.ts` (`requiredAuthStrength`/`strengthSufficient`, the unchanged `/handoff/auth/verify`).
+`packages/gateway/src/index.ts` (`AuthAssurancePolicy`/`strengthSufficient`, the unchanged `/handoff/auth/verify`).

@@ -37,12 +37,15 @@ import { AccessGateway } from "@gla/gateway";
 import { IdentityService } from "@gla/identity";
 // Core / core-adjacent ports (the inward side of the seam):
 import {
+  type AuthAssuranceProfile,
   type AuthProviderPort,
   type CapabilityId,
   HmacCapabilitySigner,
   KERNEL_MODULE,
   type OpaqueToken,
   type RecipientRef,
+  authAssurancePolicyFromProfile,
+  authAssurancePolicyFromRequiredAuthStrength,
 } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
@@ -255,11 +258,13 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
      */
     authReuseTtlMs?: number;
     /**
-     * The minimum auth strength a handoff step-up must reach for the gateway to authorize the grant
-     * (`GatewayOptions.requiredAuthStrength`; defaults to the gateway default `"webauthn"`). Set `"password"` to
-     * PERMIT the password fallback (a delegated provider's password login then satisfies the gate), or `"webauthn"`
-     * to DEMAND the phishing-resistant method. The gateway's gating logic (`strengthSufficient`) is unchanged — this
-     * only threads the requirement from composition (authentik-dual-method-flow.md §4; the value a deployment sets).
+     * Provider-neutral assurance policy profile for handoff step-up. Default `"phishing-resistant"` requires
+     * passkey-grade evidence; `"password-permitted"` explicitly admits password-grade evidence.
+     */
+    authAssuranceProfile?: AuthAssuranceProfile;
+    /**
+     * Deprecated compatibility input. Prefer {@link authAssuranceProfile}. `"password"` maps to
+     * `"password-permitted"`; `"webauthn"` maps to `"phishing-resistant"`.
      */
     requiredAuthStrength?: "password" | "webauthn";
     /** Where the channel writes the recipient-bound handoff link (defaults to stdout). */
@@ -448,6 +453,12 @@ export function createProvisioningBridge(
     authModule = selected.module;
     identity = h.identity ?? new IdentityService({ authProvider: selected.provider });
     const channel = new ChannelCli({ identity, sink: h.deliverySink ?? deliveryToStdout });
+    const authAssurancePolicy =
+      h.authAssuranceProfile !== undefined
+        ? authAssurancePolicyFromProfile(h.authAssuranceProfile)
+        : h.requiredAuthStrength !== undefined
+          ? authAssurancePolicyFromRequiredAuthStrength(h.requiredAuthStrength)
+          : undefined;
     // The gateway is the Route controller's abstract edge AND the public step-up/WS-proxy entry. It verifies the
     // recipient-bound grant statelessly + requires the bound identity (step-up) before forwarding to the capsule.
     gateway = new AccessGateway({
@@ -464,11 +475,9 @@ export function createProvisioningBridge(
       // The auth-reuse TTL (GLA-050/051): a recipient's step-up stays valid for a later window for THIS recipient,
       // so scenario-01 Phase 12's second window opens with no re-prompt. Defaults to the gateway default (~15m).
       ...(h.authReuseTtlMs !== undefined ? { authReuseTtlMs: h.authReuseTtlMs } : {}),
-      // The required step-up strength (default webauthn): set "password" to permit a delegated provider's password
-      // fallback, "webauthn" to demand the passkey. Threads the requirement; the gateway's gating is unchanged.
-      ...(h.requiredAuthStrength !== undefined
-        ? { requiredAuthStrength: h.requiredAuthStrength }
-        : {}),
+      // Provider-neutral assurance profile (default phishing-resistant): app translates deployment policy to the
+      // gateway's common contract; gateway code never names provider method claims.
+      ...(authAssurancePolicy !== undefined ? { authAssurancePolicy } : {}),
     });
     route = new RouteController({ gateway });
     handoffDeps = {

@@ -175,12 +175,13 @@ handoff for *this* recipient. This is the delegated analogue of WebAuthn's "the 
 unchanged** (the honest seam note `AGENTS.md` asked for: `verifyAssertion` returning only `{ok, authStrength}`
 is sufficient because identity arrives *in*, via `userId`, and is *bound* via `sub`).
 
-**The fact returned is identical in kind.** `{ok, authStrength}` is exactly what `auth-webauthn` returns and
-exactly what the gateway's `strengthSufficient` / `requiredAuthStrength` logic already consumes
-(`see packages/gateway/src/index.ts`). The gateway still owns the *decision* (is the strength sufficient?);
-the provider still reports only *facts* (`kernel-contracts.md §6/§7`, identity-and-auth.md invariant: *"the
-verifier reports facts, not decisions"*). Auth-reuse (Phase 12, GLA-050/051) is unaffected: it keys on the
-recipient from the signed grant and the returned strength, both unchanged.
+**The fact returned is identical in kind.** `{ok, authStrength}` is exactly what `auth-webauthn` returns, and
+authentik also projects `amr`/`acr` into the provider-neutral `AuthAssuranceEvidence` contract for diagnostics
+(`see packages/kernel/src/auth-assurance.ts`, `adapters/auth-authentik/src/strength.ts`). The gateway still
+owns the *decision* by evaluating the deployment's `AuthAssurancePolicy`; the provider still reports only
+*facts* (`kernel-contracts.md §6/§7`, identity-and-auth.md invariant: *"the verifier reports facts, not
+decisions"*). Auth-reuse (Phase 12, GLA-050/051) is unaffected: it keys on the recipient from the signed grant
+and the returned strength, both unchanged.
 
 **State / nonce / PKCE storage & one-time use (anti-CSRF / anti-replay).** The adapter holds a transient
 **pending-attempt store** keyed by `state` (mirroring `auth-webauthn`'s injectable challenge store; in-memory
@@ -225,10 +226,11 @@ password *and* passkey is `webauthn`):
   (the flow/stage config) and the adapter's table is **driven from a small, operator-visible map** so a
   deployment whose authentik labels differ does not require a code change — but the **defaults above are the
   contract**.
-- The mapping is **monotonic with the gateway's `strengthSufficient` rank** (`none < password < webauthn`,
-  `see packages/gateway/src/index.ts`): a deployment requiring `requiredAuthStrength: "webauthn"` therefore
-  **rejects** a password-only authentik login (step-up not satisfied) and **accepts** a passkey one — the
-  dual-method point of the whole integration, gated correctly, with **zero gateway change**.
+- The mapping is **monotonic with the gateway's provider-neutral assurance policy** (`none < password <
+  phishing-resistant`, with `webauthn` projected to phishing-resistant): the default
+  `phishing-resistant` profile **rejects** a password-only authentik login and **accepts** a passkey one;
+  `password-permitted` is the explicit profile that accepts password-grade evidence. The gateway reads this
+  common contract, never provider-specific method names.
 - **Never up-map.** A missing/ambiguous method must never yield `webauthn` (that would silently weaken the
   phishing-resistance guarantee); the floor is `password` for a *valid* token, `none` for an invalid one.
 
@@ -282,8 +284,9 @@ and bind it to the recipient's `UserIdentity`."** Two realizations, both behind 
 > **Invariant honored:** *a recipient is verifiable only if previously enrolled; enrollment is one-time,
 > operator-initiated, `operator-discharge`-authorized, never a handoff step* (`kernel-contracts.md §7`,
 > `identity-and-auth.md`). The delegated provider satisfies it by binding the **subject** at enrollment;
-> step-up (`§3`) then checks `sub` against that binding. **`finishEnrollment` still returns
-> `{credentialId, authStrength}`** — the port is unchanged; `credentialId` is the `sub`.
+> step-up (`§3`) then checks `sub` against that binding. **`finishEnrollment` still returns the compatibility
+> facts `{credentialId, authStrength}` and may also include common assurance evidence**; `credentialId` is the
+> `sub`.
 
 ---
 
@@ -351,6 +354,10 @@ today — it is always WebAuthn.** This design fixes the switch and the config i
   `webauthn` → today's `new AuthWebauthnProvider(...)`; `authentik` → `new AuthAuthentikProvider(<oidc config>)`.
   **Both implement `AuthProviderPort`**, so the line that injects into `IdentityService` is identical — the
   swap is one `new …` and nothing downstream changes (`§1`).
+- **`GLA_AUTH_ASSURANCE_POLICY`** (flag `--auth-assurance-policy`) — the provider-neutral deployment policy,
+  default **`phishing-resistant`**. Leave it unset/default to require passkey/phishing-resistant assurance;
+  set **`password-permitted`** only when password-grade evidence is an intentional deployment policy. Unknown
+  values are usage errors, not silent fallback.
 - **The authentik OIDC config the adapter needs** (only read when `GLA_AUTH_PROVIDER=authentik`; sourced from
   the `DependencyBinding.connection` GLA-074 wrote and/or env, the client secret marked `sensitive` and held
   as a secret-ref, never logged — `kernel-contracts.md §4` `sensitive`):
@@ -401,7 +408,7 @@ the **capstone (076) last**):
 | 2 | **GLA-069** — plan recipient enrollment w/ delegated IdP | plan | GLA-067 | plan the enrollment-as-subject-linking (`§5`) before building it. (Independent of 068; may run in parallel with step 1.) |
 | 3 | **GLA-070** — enroll a recipient through authentik | impl: enrollment | GLA-068, GLA-069 | binds the recipient to the authentik `sub` (the precondition for any delegated step-up). Needs the adapter (068) + its plan (069). |
 | 4 | **GLA-071** — plan the passkey-and-password flow | plan | GLA-067 | plan the dual-method UX + the redirect-page resolution (`§2` (i)) before building it. (May run in parallel with steps 1–3.) |
-| 5 | **GLA-072** — support both passkey & password step-up via authentik | impl: dual-method flow | GLA-068, GLA-071 | the dual-method capability — the point of the integration. Needs the adapter (068) + its plan (071); gates by required strength (`§4`) with no gateway change (`§2`). |
+| 5 | **GLA-072** — support both passkey & password step-up via authentik | impl: dual-method flow | GLA-068, GLA-071 | the dual-method capability — the point of the integration. Needs the adapter (068) + its plan (071); gates by provider-neutral auth assurance policy (`§4`). |
 | 6 | **GLA-073** — plan the authentik service standup & config | plan | GLA-067 | plan the wpm standup (server+worker+Postgres+Redis + flow/stages emitting `amr`/`acr`) before building it. (May run in parallel with steps 1–5.) |
 | 7 | **GLA-074** — build the wpm installer for authentik | impl: installer | GLA-073, GLA-068 | extends `wpm/wip/bundles/identity-provider` to stand authentik up + write the `DependencyBinding` (`§6`). Needs its plan (073) + the adapter it verifies against (068). |
 | 8 | **GLA-076** — verify the delegated provider covers both methods E2E | impl: verification (**capstone**) | GLA-070, GLA-072, GLA-074 | proves passkey **and** password both work through a real handoff behind the unchanged seam. Composes 070+072+074; **last**. |
@@ -445,12 +452,12 @@ the adapter build; the table lists one **legal serialization**.
 
 ## §10 · Conformance summary (the contract this doc fixes)
 
-1. authentik is a **new `@gla/auth-authentik` adapter** satisfying the **unchanged** `AuthProviderPort`;
+1. authentik is a **new `@gla/auth-authentik` adapter** satisfying the provider-neutral `AuthProviderPort`;
    selecting it changes **no gateway/core code** — only the adapter + the `packages/app` wiring (**§1**).
 2. Step-up is a **delegation contract** on the real methods: `challenge` → OIDC auth request,
    `verifyAssertion({code,state})` → exchange/validate the `id_token`, **`sub` checked against the binding**,
-   returning the **same `{ok, authStrength}` fact**; the port shape suffices unchanged because `userId` flows
-   in (**§3**).
+   returning the **same `{ok, authStrength}` compatibility fact plus optional assurance evidence**; `userId`
+   still flows in (**§3**).
 3. **`amr`** (fallback **`acr`**) maps to `AuthStrength`: `{hwk,swk,webauthn,fido}` → **`webauthn`**, `{pwd}`
    (+MFA companions) → **`password`**; never up-map (**§4**).
 4. The credential authority shifts to **authentik**; the recipient is bound to a **stable `sub`**, carried by
@@ -460,7 +467,8 @@ the adapter build; the table lists one **legal serialization**.
    Postgres+Redis + flow/stages) is **GLA-074**, extending `wpm/wip/bundles/identity-provider` (**§6**).
 6. In-tree WebAuthn **stays the default**; authentik is **opt-in** via **`GLA_AUTH_PROVIDER`** at the
    `packages/app` composition root, with the authentik OIDC config (issuer / client id / client secret /
-   redirect URI) (**§7**).
+   redirect URI), and deployment strength is selected through **`GLA_AUTH_ASSURANCE_POLICY`**
+   (`phishing-resistant` default, `password-permitted` explicit fallback) (**§7**).
 7. A valid **build order** — 068 → 070 → 072 → 074 → 076, each preceded by 069/071/073/075 — consistent with
    the dependency graph (**§8**).
 

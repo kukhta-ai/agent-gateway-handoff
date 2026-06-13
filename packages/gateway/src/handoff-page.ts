@@ -10,7 +10,7 @@
 //       2. navigator.credentials.get(options) → the OS passkey UI → an assertion
 //       3. POST /handoff/auth/verify (grant + path + assertion) → the gateway verifies + AUTHORIZES the grant
 //   In BOTH cases: 4. open a WebSocket to the route path (carrying the grant) → the gateway proxies it to noVNC.
-// All TRUST decisions are server-side at the gateway (grant verify, assertion verify, required strength). The page
+// All TRUST decisions are server-side at the gateway (grant verify, assertion verify, assurance policy). The page
 // only starts the ceremony and POSTs results. base64url<->ArrayBuffer conversion is inline (no deps).
 //
 // REDIRECT-FLOW NOTES (the security-relevant choices; see docs/architecture, the dual-method-flow design §5):
