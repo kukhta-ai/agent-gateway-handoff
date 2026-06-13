@@ -30,9 +30,10 @@ export interface HandoffEntrypointClient {
   readonly bootstrap?: Record<string, unknown>;
 }
 
-const DEFAULT_HANDOFF_CLIENT: HandoffEntrypointClient = { kind: "gateway-page", ref: "handoff" };
+const DEFAULT_HANDOFF_CLIENT: HandoffEntrypointClient = { kind: "unconfigured" };
+const DEFAULT_CLIENT_ASSETS_PATH = "/handoff/client-assets";
 
-function jsonScriptData(value: unknown): string {
+export function jsonScriptData(value: unknown): string {
   return JSON.stringify(value)
     .replace(/&/g, "\\u0026")
     .replace(/</g, "\\u003c")
@@ -49,6 +50,8 @@ export interface HandoffPagePaths {
   readonly authVerify: string;
   /** Same-origin path for the WebSocket upgrade route as seen by the recipient's browser. */
   readonly stream: string;
+  /** Same-origin path prefix serving provider-owned browser-client assets. */
+  readonly clientAssets?: string;
   /** Provider-declared browser-client binding for this entrypoint. */
   readonly entrypointClient?: HandoffEntrypointClient;
 }
@@ -57,7 +60,104 @@ const ROOT_HANDOFF_PATHS = (routePath: string): HandoffPagePaths => ({
   authOptions: "/handoff/auth/options",
   authVerify: "/handoff/auth/verify",
   stream: routePath,
+  clientAssets: DEFAULT_CLIENT_ASSETS_PATH,
 });
+
+export function handoffClientStyles(): string {
+  return `
+  .shell { max-width: min(96vw, 82rem); margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  body { font-family: system-ui, sans-serif; margin: 0; color: #1f2328; background: #f7f4ed; }
+  button { font-size: 1rem; padding: 0.6rem 1.2rem; border-radius: 0.4rem; border: 1px solid #888; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { margin-top: 1rem; min-height: 1.5rem; }
+  .ok { color: #137333; } .err { color: #b3261e; }
+  #viewer {
+    margin-top: 1rem;
+    width: 100%;
+    height: min(70vh, 760px);
+    min-height: 360px;
+    border: 1px solid #b8b1a4;
+    border-radius: 0.65rem;
+    overflow: hidden;
+    background: #111;
+  }
+  #viewer:focus { outline: 3px solid #2f6fed; outline-offset: 2px; }
+  #viewer canvas { width: 100%; height: auto; display: block; }
+  #viewer[hidden] { display: none; }
+  `;
+}
+
+export function handoffClientScript(): string {
+  return `
+  const cleanSegment = (value) => String(value || "").replace(/[^a-zA-Z0-9._-]/g, "");
+  const cleanAssetPath = (value) => String(value || "")
+    .split("/")
+    .filter((segment) => segment && segment !== "." && segment !== "..")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const browserStreamUrl = (ctx) => {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const streamPath = ctx.streamPath || ctx.path;
+    return proto + "//" + location.host + streamPath + "?grant=" + encodeURIComponent(ctx.grant);
+  };
+  const assetModuleUrl = (ctx, modulePath) => {
+    const client = ctx.client || {};
+    const ref = cleanSegment(client.ref || "novnc");
+    if (!ref) return undefined;
+    const base = String(ctx.clientAssets || cfg.paths.clientAssets || "${DEFAULT_CLIENT_ASSETS_PATH}").replace(/\\/+$/, "");
+    const mod = cleanAssetPath(modulePath || "core/rfb.js");
+    if (!mod) return undefined;
+    return base + "/" + encodeURIComponent(ref) + "/" + mod;
+  };
+  const openEntrypointClient = async (ctx) => {
+    const client = (ctx && ctx.client) || {};
+    if (client.kind !== "rfb-web-client") {
+      say("Verified, but no browser viewer is configured for this handoff.", "err");
+      return false;
+    }
+    const bootstrap = client.bootstrap || {};
+    const moduleUrl = assetModuleUrl(ctx, bootstrap.module || "core/rfb.js");
+    if (!moduleUrl) {
+      say("The live browser viewer is unavailable: client assets are not configured.", "err");
+      return false;
+    }
+    const viewer = document.getElementById("viewer");
+    viewer.hidden = false;
+    viewer.textContent = "";
+    viewer.tabIndex = 0;
+    say("✓ Verified. Opening the live browser viewer…", "ok");
+    try {
+      const mod = await import(moduleUrl);
+      const RFB = mod.default || mod.RFB;
+      if (typeof RFB !== "function") {
+        say("The live browser viewer is unavailable: client module is invalid.", "err");
+        return false;
+      }
+      const rfb = new RFB(viewer, browserStreamUrl(ctx), { credentials: bootstrap.credentials || {} });
+      rfb.scaleViewport = bootstrap.scaleViewport !== false;
+      rfb.resizeSession = bootstrap.resizeSession === true;
+      rfb.viewOnly = bootstrap.viewOnly === true;
+      if ("focusOnClick" in rfb) rfb.focusOnClick = true;
+      rfb.addEventListener("connect", () => {
+        try { viewer.focus(); } catch (e) {}
+        try { if (typeof rfb.focus === "function") rfb.focus(); } catch (e) {}
+        say("✓ Connected to the live browser.", "ok");
+      });
+      rfb.addEventListener("disconnect", (event) => {
+        const clean = Boolean(event && event.detail && event.detail.clean);
+        say(clean ? "The session was closed." : "The live browser viewer is unavailable.", clean ? "" : "err");
+      });
+      rfb.addEventListener("securityfailure", () => {
+        say("The live browser viewer refused the connection.", "err");
+      });
+      return true;
+    } catch (e) {
+      say("The live browser viewer is unavailable.", "err");
+      return false;
+    }
+  };
+`;
+}
 
 /**
  * Render the handoff step-up page HTML. The grant token + the INTERNAL route path are embedded so auth POST bodies
@@ -87,20 +187,17 @@ export function handoffPageHtml(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Verify to continue — GLA</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
-  button { font-size: 1rem; padding: 0.6rem 1.2rem; border-radius: 0.4rem; border: 1px solid #888; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  #status { margin-top: 1rem; min-height: 1.5rem; }
-  .ok { color: #137333; } .err { color: #b3261e; }
-  #screen { margin-top: 1rem; width: 100%; }
+${handoffClientStyles()}
 </style>
 </head>
 <body>
+<main class="shell">
 <h1>Verify to continue</h1>
 <p>Confirm it's you with your passkey to open the secure session that was shared with you.</p>
 <button id="go">Verify with passkey</button>
 <div id="status" role="status" aria-live="polite"></div>
-<canvas id="screen" width="1024" height="768" hidden></canvas>
+<div id="viewer" aria-label="Live secure browser viewport" hidden></div>
+</main>
 <script id="handoff-data" type="application/json">${data}</script>
 <script>
 (() => {
@@ -108,6 +205,7 @@ export function handoffPageHtml(
   const btn = document.getElementById("go");
   const status = document.getElementById("status");
   const say = (msg, cls) => { status.textContent = msg; status.className = cls || ""; };
+${handoffClientScript()}
 
   // ── base64url <-> ArrayBuffer (no dependency) ──
   const b64urlToBuf = (s) => {
@@ -151,23 +249,6 @@ export function handoffPageHtml(
     },
   });
 
-  // Open the entrypoint stream over the gateway's authorized WS upgrade (the gateway proxies it to the capsule). ctx
-  // supplies the route path + grant (cfg for the in-page arm; the restored values on the redirect-return arm).
-  const openStreamFor = (ctx) => {
-    const c = ctx || cfg;
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const streamPath = c.streamPath || c.path;
-    const url = proto + "//" + location.host + streamPath + "?grant=" + encodeURIComponent(c.grant);
-    try {
-      const ws = new WebSocket(url);
-      ws.binaryType = "arraybuffer";
-      ws.onopen = () => say("✓ Connected. The secure session is now open.", "ok");
-      ws.onclose = () => say("The session was closed.", "err");
-    } catch (e) {
-      say("Could not open the session.", "err");
-    }
-  };
-
   // POST an opaque assertion to the UNCHANGED /handoff/auth/verify and, on success, open the stream. Shared by the
   // in-page ceremony (a WebAuthn assertion) and the redirect-return arm (the provider's {code,state} return params).
   // ctx supplies the grant+path: cfg for the in-page ceremony, or the sessionStorage-restored values on return.
@@ -181,9 +262,9 @@ export function handoffPageHtml(
     });
     const ver = await verRes.json().catch(() => ({}));
     if (verRes.ok && ver.authorized) {
-      say("✓ Verified. Opening the secure session…", "ok");
-      // The stream opens against the restored route/grant (same-origin), regardless of which arm completed.
-      openStreamFor(c);
+      // The provider-declared browser client opens against the restored route/grant (same-origin), regardless of
+      // which arm completed. The page never treats a raw WebSocket open as a visible live browser.
+      await openEntrypointClient(c);
       return true;
     }
     say("Verification was not completed — try again.", "err");
@@ -232,7 +313,7 @@ export function handoffPageHtml(
       // have no kind and fall through to the UNCHANGED in-page ceremony below.
       if (options && options.kind === "redirect") {
         // Preserve the grant/path SAME-ORIGIN across the top-level redirect (NOT in the redirect_uri the provider sees).
-        try { sessionStorage.setItem("gla.handoff", JSON.stringify({ grant: cfg.grant, path: cfg.path, streamPath: cfg.streamPath, client: cfg.client })); } catch (e) {}
+        try { sessionStorage.setItem("gla.handoff", JSON.stringify({ grant: cfg.grant, path: cfg.path, streamPath: cfg.streamPath, client: cfg.client, clientAssets: cfg.paths.clientAssets })); } catch (e) {}
         say("Redirecting you to sign in…");
         // Navigate ONLY to the server-built authorizeUrl (operator config + fixed redirect_uri) — no request input.
         location.assign(options.authorizeUrl);
@@ -268,6 +349,7 @@ export function handoffReusedPageHtml(
   recipientLabel: string,
   streamPath: string = routePath,
   entrypointClient: HandoffEntrypointClient = DEFAULT_HANDOFF_CLIENT,
+  clientAssets: string = DEFAULT_CLIENT_ASSETS_PATH,
 ): string {
   const data = jsonScriptData({
     grant,
@@ -275,6 +357,7 @@ export function handoffReusedPageHtml(
     streamPath,
     recipient: recipientLabel,
     client: entrypointClient,
+    clientAssets,
   });
   return `<!doctype html>
 <html lang="en">
@@ -284,33 +367,25 @@ export function handoffReusedPageHtml(
 <title>Opening your secure session — GLA</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
-  #status { margin-top: 1rem; min-height: 1.5rem; }
-  .ok { color: #137333; } .err { color: #b3261e; }
-  #screen { margin-top: 1rem; width: 100%; }
+${handoffClientStyles()}
 </style>
 </head>
 <body>
+<main class="shell">
 <h1>Opening your secure session</h1>
 <p>You're already verified — opening the session that was shared with you. No need to confirm again.</p>
 <div id="status" role="status" aria-live="polite">Connecting…</div>
-<canvas id="screen" width="1024" height="768" hidden></canvas>
+<div id="viewer" aria-label="Live secure browser viewport" hidden></div>
+</main>
 <script id="handoff-data" type="application/json">${data}</script>
 <script>
 (() => {
   const cfg = JSON.parse(document.getElementById("handoff-data").textContent);
   const status = document.getElementById("status");
   const say = (msg, cls) => { status.textContent = msg; status.className = cls || ""; };
-  // No ceremony — auth was reused. Open the entrypoint stream over the gateway's already-authorized WS upgrade.
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = proto + "//" + location.host + cfg.streamPath + "?grant=" + encodeURIComponent(cfg.grant);
-  try {
-    const ws = new WebSocket(url);
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => say("✓ Connected. The secure session is now open.", "ok");
-    ws.onclose = () => say("The session was closed.", "err");
-  } catch (e) {
-    say("Could not open the session.", "err");
-  }
+${handoffClientScript()}
+  // No ceremony — auth was reused. Open the provider-declared browser client over the already-authorized route.
+  void openEntrypointClient(cfg);
 })();
 </script>
 </body>
