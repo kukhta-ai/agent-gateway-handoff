@@ -370,7 +370,8 @@ describe("REAL two-handoff end-to-end (scenario-01 Phases 9–14; Slice 6 deltas
         if (invite === undefined) {
           throw new Error("enrollInvite not wired");
         }
-        const enrollLink = invite.link.replace("127.0.0.1", "localhost");
+        const deliveredInvite = JSON.parse(deliveredLinks.at(-1) ?? "{}") as { link?: string };
+        const enrollLink = (deliveredInvite.link ?? "").replace("127.0.0.1", "localhost");
         expect(await runEnrollment(hpageGw, enrollLink)).toMatch(/Enrolled/i);
         expect(stack.identity?.isEnrolled(recipient)).toBe(true);
 

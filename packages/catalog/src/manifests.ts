@@ -72,8 +72,8 @@ export interface DependencyRequirement {
 /** A reference to a connection fact. Sensitive facts must be secret refs, never literal values. */
 export interface DependencyConnectionRef {
   /** The reference kind; `secret-ref` is mandatory for secret-bearing connection facts. */
-  kind: "secret-ref" | "path-ref" | "uri-ref" | "service-ref" | "socket-ref";
-  /** The opaque reference value, not the secret itself. */
+  kind: "literal" | "secret-ref" | "path-ref" | "uri-ref" | "service-ref" | "socket-ref";
+  /** The opaque reference value, or a non-sensitive literal only when `kind` is `literal`. */
   ref: string;
 }
 

@@ -14,7 +14,13 @@
 
 import { readFileSync } from "node:fs";
 import { AgentBridge } from "@gla/bridge";
-import { type OpaqueToken, exitCodeFor, glaError, isGlaError } from "@gla/kernel";
+import {
+  type OpaqueToken,
+  exitCodeFor,
+  glaError,
+  isGlaError,
+  redactOperatorEgress,
+} from "@gla/kernel";
 import { ExitCode } from "./exit-codes.js";
 import type { Output, OutputMode } from "./output.js";
 import type { BridgeLike } from "./transport.js";
@@ -118,6 +124,10 @@ interface ParsedArgs {
 
 /** Flags that may be repeated (collected into {@link ParsedArgs.repeated}, not overwritten). */
 const REPEATABLE_FLAGS = new Set(["mount", "detector", "entrypoint"]);
+
+function redactHandoffReadModel<T>(value: T): T {
+  return redactOperatorEgress(value) as T;
+}
 
 /** Global flags consume a following value; command flags are parsed loosely and validated per-command. */
 function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -438,7 +448,7 @@ export async function run(
           if (typeof recipient === "string") args.recipient = recipient;
           const ttl = parsed.flags.get("ttl");
           if (typeof ttl === "string") args.ttl = ttl;
-          out.emit(await services.bridge.handoffOpen(args));
+          out.emit(redactHandoffReadModel(await services.bridge.handoffOpen(args)));
           return ExitCode.OK;
         }
         if (verb === "wait") {
@@ -451,7 +461,7 @@ export async function run(
           // TIMEOUT (exit 6, not the default auth exit 4) — the one documented re-label (errors.ts §5.2 note,
           // docs/05 §5). Handle it here so the exit code is the timeout branch.
           try {
-            out.emit(await services.bridge.handoffWait(id, timeoutMs));
+            out.emit(redactHandoffReadModel(await services.bridge.handoffWait(id, timeoutMs)));
             return ExitCode.OK;
           } catch (e) {
             if (isGlaError(e) && e.code === "auth.expired") {
@@ -464,14 +474,16 @@ export async function run(
         if (verb === "get") {
           const id = parsed.positionals[2];
           if (id === undefined) return usageError(out, "usage: gla handoff get <id>");
-          out.emit(await services.bridge.handoffGet(id));
+          out.emit(redactHandoffReadModel(await services.bridge.handoffGet(id)));
           return ExitCode.OK;
         }
         if (verb === "list") {
           const session = parsed.flags.get("session");
           out.emit(
-            await services.bridge.handoffList(
-              typeof session === "string" ? { session } : undefined,
+            redactHandoffReadModel(
+              await services.bridge.handoffList(
+                typeof session === "string" ? { session } : undefined,
+              ),
             ),
           );
           return ExitCode.OK;
@@ -479,7 +491,7 @@ export async function run(
         if (verb === "cancel") {
           const id = parsed.positionals[2];
           if (id === undefined) return usageError(out, "usage: gla handoff cancel <id>");
-          out.emit(await services.bridge.handoffCancel(id));
+          out.emit(redactHandoffReadModel(await services.bridge.handoffCancel(id)));
           return ExitCode.OK;
         }
         return usageError(

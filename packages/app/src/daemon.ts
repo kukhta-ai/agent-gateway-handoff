@@ -32,8 +32,10 @@ import {
   DEFAULT_AUTH_ASSURANCE_PROFILE,
   type OpaqueToken,
   type RecipientRef,
+  isRedactionOrTemplatePlaceholder,
   parseAuthAssuranceProfile,
 } from "@gla/kernel";
+import { redactDaemonState } from "./daemon-state.js";
 import { type AuthentikConfig, createProvisioningBridge } from "./index.js";
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
@@ -186,6 +188,7 @@ export function authAssuranceProviderDiagnostic(opts: {
  * because both listeners hold the event loop open; the caller wires SIGINT/SIGTERM → `handle.close()`.
  */
 export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
+  validateServeOptions(opts);
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const host = opts.host ?? "0.0.0.0";
   const port = opts.port ?? 3000;
@@ -531,10 +534,10 @@ export function parseServeArgs(
   const str = (flag: string, envVar: string): string | undefined => {
     const v = flags.get(flag);
     if (typeof v === "string") {
-      return v;
+      return usableConfigValue(`--${flag}`, v);
     }
     const e = env[envVar];
-    return e !== undefined && e.length > 0 ? e : undefined;
+    return e !== undefined && e.length > 0 ? usableConfigValue(envVar, e) : undefined;
   };
   const bool = (flag: string, envVar: string): boolean | undefined => {
     const v = flags.get(flag);
@@ -644,6 +647,45 @@ export function parseServeArgs(
   return { help: false, options };
 }
 
+function usableConfigValue(name: string, value: string): string {
+  if (isRedactionOrTemplatePlaceholder(value)) {
+    throw new Error(
+      `${name} contains a redaction/template placeholder; provide a real value or unset it`,
+    );
+  }
+  return value;
+}
+
+function assertUsableServeOption(name: string, value: unknown): void {
+  if (typeof value === "string") {
+    usableConfigValue(name, value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      assertUsableServeOption(`${name}[${index}]`, item);
+    }
+  }
+}
+
+function validateServeOptions(opts: ServeOptions): void {
+  assertUsableServeOption("host", opts.host);
+  assertUsableServeOption("bridgeEndpoint", opts.bridgeEndpoint);
+  assertUsableServeOption("publicBaseUrl", opts.publicBaseUrl);
+  assertUsableServeOption("authProvider", opts.authProvider);
+  assertUsableServeOption("authentikIssuerUrl", opts.authentikIssuerUrl);
+  assertUsableServeOption("authentikClientId", opts.authentikClientId);
+  assertUsableServeOption("authentikClientSecret", opts.authentikClientSecret);
+  assertUsableServeOption("authentikRedirectUri", opts.authentikRedirectUri);
+  assertUsableServeOption("authentikScopes", opts.authentikScopes);
+  assertUsableServeOption("rpID", opts.rpID);
+  assertUsableServeOption("rpName", opts.rpName);
+  assertUsableServeOption("expectedOrigin", opts.expectedOrigin);
+  assertUsableServeOption("launcherMode", opts.launcherMode);
+  assertUsableServeOption("workspaceRoot", opts.workspaceRoot);
+  assertUsableServeOption("stateRoot", opts.stateRoot);
+}
+
 /**
  * Run the `gla serve` command end to end: parse argv, {@link serve} the daemon, and wire SIGINT/SIGTERM to a
  * graceful `handle.close()` then process exit. Resolves when the daemon has shut down (after a signal) — so a
@@ -661,7 +703,7 @@ export async function runServe(
   try {
     parsed = parseServeArgs(argv, env);
   } catch (e) {
-    log(`error: ${e instanceof Error ? e.message : String(e)}`);
+    log(`error: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`);
     log(SERVE_USAGE);
     return 1;
   }
@@ -674,7 +716,9 @@ export async function runServe(
   try {
     handle = await serve({ ...parsed.options, log });
   } catch (e) {
-    log(`error: failed to start gla serve: ${e instanceof Error ? e.message : String(e)}`);
+    log(
+      `error: failed to start gla serve: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`,
+    );
     return 1;
   }
 
@@ -694,7 +738,7 @@ export async function runServe(
           resolve(0);
         })
         .catch((e) => {
-          log(`shutdown error: ${e instanceof Error ? e.message : String(e)}`);
+          log(`shutdown error: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`);
           resolve(1);
         });
     };
