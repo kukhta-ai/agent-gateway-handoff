@@ -72,6 +72,37 @@ export interface EnrollmentChoiceGroup {
   required?: boolean;
 }
 
+/** Observable deployment proof status for an authentik/provider-hosted login choice. */
+export type AuthLoginMethodProofStatus = "verified" | "degraded" | "unavailable" | "deferred";
+
+/** Sanitized proof that a deployed provider exposes a login choice and emits mappable evidence. */
+export interface AuthLoginMethodProof {
+  /** Method/source id this proof describes, e.g. `password`, `webauthn-passkey`, or `oauth:github`. */
+  method: string;
+  /** Open provider-local kind, e.g. `password`, `webauthn-passkey`, `external-source`, or future kinds. */
+  kind?: string;
+  /** Human label shown in diagnostics. */
+  label?: string;
+  /** Provider flow/stage/object observed for this method. */
+  stage?: string;
+  /** Provider source id/name for external/social/enterprise choices. */
+  source?: string;
+  /** Whether this proof was observed live, degraded, unavailable, or intentionally deferred. */
+  status: AuthLoginMethodProofStatus;
+  /** Compatibility strength observed from the provider evidence, when available. */
+  authStrength?: AuthStrength;
+  /** Provider-neutral assurance level observed through the GLA mapping, when available. */
+  assuranceLevel?: AuthAssuranceLevel;
+  /** Redacted timestamp or run id showing proof freshness. */
+  observedAt?: string;
+  /** Whether enroll-then-verify proved a stable subject for source-backed login. */
+  subjectStable?: boolean;
+  /** Sanitized provider-local evidence names/booleans; never raw tokens, codes, secrets, or grants. */
+  evidence?: Record<string, unknown>;
+  /** Redacted operator-facing diagnostics from the verification/probe. */
+  diagnostics?: string[];
+}
+
 /** Provider-extensible deployment-role evidence for operator diagnostics. */
 export interface AuthDeploymentRole {
   /** Open role string, e.g. `authentik-forward-auth`, `gla-oidc-provider`, or future provider roles. */
@@ -121,6 +152,8 @@ export interface AuthEnrollmentMethodPolicy {
   requiredMethods: string[];
   /** Optional recipient choices, limited to the operator-configured choices in this policy. */
   optionalRecipientChoices: EnrollmentChoiceGroup[];
+  /** Observed deployed login choices and emitted evidence from WPM/doctor verification. */
+  loginMethodProofs?: AuthLoginMethodProof[];
   /** Deployment-role evidence from installer/operator receipts. */
   deploymentRoles?: AuthDeploymentRole[];
   /** Operator notes from installer verification. */
@@ -299,6 +332,12 @@ export function parseAuthEnrollmentPolicyJson(
   if (deploymentRoles.length > 0) {
     policy.deploymentRoles = deploymentRoles;
   }
+  const loginMethodProofs = arrayValue(obj, "loginMethodProofs").map((item, i) =>
+    loginMethodProofValue(item, `loginMethodProofs[${i}]`),
+  );
+  if (loginMethodProofs.length > 0) {
+    policy.loginMethodProofs = loginMethodProofs;
+  }
   return policy;
 }
 
@@ -378,6 +417,12 @@ export function authEnrollmentDiagnostics(opts: {
     ) {
       concerns.push("no authentik credential setup stage or external source is declared");
     }
+    const methodProofDiagnostics = deployedLoginMethodProofDiagnostics(
+      enrollmentPolicy,
+      authAssuranceProfile,
+    );
+    concerns.push(...methodProofDiagnostics.concerns);
+    actions.push(...methodProofDiagnostics.actions);
   }
 
   for (const choice of unsupportedConfiguredChoices(enrollmentPolicy)) {
@@ -538,6 +583,7 @@ function summarizePolicy(
   const sources = policy.externalSources.map((s) => `${s.kind}:${s.name}`);
   const choices = policy.optionalRecipientChoices.map((g) => `${g.id}=[${g.choices.join("|")}]`);
   const roles = deploymentRoles.map((r) => r.role);
+  const proofs = policy.loginMethodProofs?.map((p) => `${p.method}:${p.status}`) ?? [];
   return [
     `${policy.provider} enrollment policy ${policy.declared ? "declared" : "undeclared"}`,
     `assurance=${profile}`,
@@ -545,6 +591,7 @@ function summarizePolicy(
     `credentials=${credentials.length > 0 ? credentials.join(",") : "none"}`,
     `sources=${sources.length > 0 ? sources.join(",") : "none"}`,
     `choices=${choices.length > 0 ? choices.join(",") : "none"}`,
+    `loginMethodProofs=${proofs.length > 0 ? proofs.join(",") : "none"}`,
     `deploymentRoles=${roles.length > 0 ? roles.join(",") : "none"}`,
   ].join("; ");
 }
@@ -560,6 +607,213 @@ function policyCanSatisfyAssurance(
   const required: AuthAssuranceLevel =
     profile === "phishing-resistant" ? "phishing-resistant" : "password";
   return levels.some((level) => LEVEL_RANK[level] >= LEVEL_RANK[required]);
+}
+
+function deployedLoginMethodProofDiagnostics(
+  policy: AuthEnrollmentMethodPolicy,
+  profile: AuthAssuranceProfile,
+): { concerns: string[]; actions: string[] } {
+  const concerns: string[] = [];
+  const actions: string[] = [];
+  const proofs = policy.loginMethodProofs ?? [];
+  if (proofs.length === 0) {
+    concerns.push(
+      "authentik deployed login-method proof is not declared; visible password/passkey/source choices and emitted evidence are unverified",
+    );
+    actions.push(
+      "Run the identity-provider verification/doctor against the deployed authentik application and record loginMethodProofs for password, passkey/WebAuthn, and configured sources.",
+    );
+    return { concerns, actions };
+  }
+
+  for (const proof of proofs) {
+    if (proof.status !== "verified") {
+      concerns.push(
+        `deployed authentik login method "${proof.method}" proof is ${proof.status}, not verified`,
+      );
+      actions.push(
+        `Re-run or complete deployed authentik verification for "${proof.method}" before treating that login choice as available.`,
+      );
+    }
+    if (proof.status === "verified" && !proofHasAssuranceMapping(proof)) {
+      concerns.push(
+        `deployed authentik login method "${proof.method}" proof lacks GLA assurance mapping`,
+      );
+      actions.push(
+        `Record authStrength and assuranceLevel for "${proof.method}" from the provider evidence before treating that proof as available.`,
+      );
+    }
+    if (proof.status === "verified" && proofOverstatesAssurance(proof)) {
+      concerns.push(
+        `deployed authentik login method "${proof.method}" proof overstates ${proof.assuranceLevel} assurance for reported ${proof.authStrength} strength`,
+      );
+      actions.push(
+        `Fix provider evidence for "${proof.method}" or lower its proof assurance to match ${proof.authStrength} strength.`,
+      );
+    }
+    if (
+      proof.status === "verified" &&
+      proof.assuranceLevel === "phishing-resistant" &&
+      !proofHasPhishingEvidence(proof)
+    ) {
+      concerns.push(
+        `deployed authentik login method "${proof.method}" proof claims phishing-resistant assurance without UV, recipient-binding, and replay-resistant evidence`,
+      );
+      actions.push(
+        `Record UV/binding/replay proof for "${proof.method}" or lower it to password-grade assurance.`,
+      );
+    }
+    if (proof.status === "verified" && !proofHasEmittedEvidence(proof)) {
+      concerns.push(
+        `deployed authentik login method "${proof.method}" proof lacks emitted provider evidence`,
+      );
+      actions.push(
+        `Record redacted emitted evidence for "${proof.method}" such as safe claim labels, UV proof, or source identifiers; never infer availability from status alone.`,
+      );
+    }
+    for (const diagnostic of proof.diagnostics ?? []) {
+      concerns.push(`deployed authentik login method "${proof.method}" reports ${diagnostic}`);
+    }
+  }
+
+  const passwordStages = policy.credentialSetupStages.filter(isPasswordCredentialStage);
+  if (
+    passwordStages.length > 0 &&
+    !hasVerifiedPasswordProofForAny(proofs, passwordStages.flatMap(credentialStageIds))
+  ) {
+    concerns.push(
+      "authentik password fallback is declared but no verified deployed password login proof was recorded",
+    );
+    actions.push(
+      "Verify the authentik password path is visible and emits password-grade evidence before relying on password-permitted handoff.",
+    );
+  }
+
+  const passkeyStages = policy.credentialSetupStages.filter(isPasskeyCredentialStage);
+  const verifiedPasskey = proofs.find(
+    (proof) =>
+      proof.status === "verified" &&
+      passkeyStages.some((stage) => proofMatchesIds(proof, credentialStageIds(stage))) &&
+      proof.authStrength === "webauthn" &&
+      proof.assuranceLevel === "phishing-resistant" &&
+      proofHasPhishingEvidence(proof),
+  );
+  if (passkeyStages.length > 0 && verifiedPasskey === undefined) {
+    concerns.push(
+      "authentik passkey/WebAuthn path is declared but no verified deployed proof shows UV-backed phishing-resistant evidence",
+    );
+    actions.push(
+      "Verify a deployed passkey/WebAuthn login for an enrolled compatible authenticator and record amr/acr plus gla_uv/userVerified, recipient binding, and replay-resistant evidence.",
+    );
+  }
+  if (
+    profile === "phishing-resistant" &&
+    passkeyStages.length > 0 &&
+    verifiedPasskey === undefined
+  ) {
+    concerns.push(
+      "selected phishing-resistant policy cannot be proven from deployed authentik login-method proof; recipients may see only password-grade choices",
+    );
+    actions.push(
+      "Fix the authentik Identification/WebAuthn flow or switch intentionally to password-permitted until passkey UV proof is verified.",
+    );
+  }
+
+  for (const source of policy.externalSources) {
+    const sourceProofs = proofs.filter((proof) =>
+      proofMatchesIds(proof, externalSourceIds(source)),
+    );
+    const verifiedSource = sourceProofs.find(
+      (proof) =>
+        proof.status === "verified" &&
+        proofHasAssuranceMapping(proof) &&
+        proofHasEmittedEvidence(proof),
+    );
+    if (verifiedSource === undefined) {
+      concerns.push(
+        `external source "${source.kind}:${source.name}" is declared but no verified deployed source login proof was recorded`,
+      );
+      actions.push(
+        `Verify "${source.kind}:${source.name}" appears as an authentik login choice and returns stable subject evidence before advertising it as available.`,
+      );
+      continue;
+    }
+    if (verifiedSource.subjectStable !== true) {
+      concerns.push(
+        `external source "${source.kind}:${source.name}" proof does not show stable subject evidence for enroll-then-verify`,
+      );
+      actions.push(
+        `Record stable subject proof for "${source.kind}:${source.name}" or treat the source as unavailable for GLA enrollment/handoff.`,
+      );
+    }
+  }
+
+  return { concerns, actions };
+}
+
+function isPasswordCredentialStage(stage: EnrollmentCredentialSetup): boolean {
+  return stage.authStrength === "password" || /password|pwd/i.test(stage.method);
+}
+
+function isPasskeyCredentialStage(stage: EnrollmentCredentialSetup): boolean {
+  return (
+    stage.authStrength === "webauthn" ||
+    stage.assuranceLevel === "phishing-resistant" ||
+    /webauthn|passkey|fido/i.test([stage.method, stage.stage, stage.label].join(" "))
+  );
+}
+
+function credentialStageIds(stage: EnrollmentCredentialSetup): string[] {
+  return [stage.method, stage.stage, stage.label].filter((v): v is string => v !== undefined);
+}
+
+function externalSourceIds(source: EnrollmentExternalSource): string[] {
+  return [`${source.kind}:${source.name}`, source.name, source.source].filter(
+    (v): v is string => v !== undefined,
+  );
+}
+
+function hasVerifiedPasswordProofForAny(proofs: AuthLoginMethodProof[], ids: string[]): boolean {
+  return proofs.some(
+    (proof) =>
+      proof.status === "verified" &&
+      proof.authStrength === "password" &&
+      proof.assuranceLevel === "password" &&
+      proofHasEmittedEvidence(proof) &&
+      ids.some((id) => proofMatchesIds(proof, [id])),
+  );
+}
+
+function proofMatchesIds(proof: AuthLoginMethodProof, ids: string[]): boolean {
+  const proofIds = [proof.method, proof.kind, proof.stage, proof.source, proof.label]
+    .filter((v): v is string => v !== undefined)
+    .map((v) => v.toLowerCase());
+  return ids.some((id) => proofIds.includes(id.toLowerCase()));
+}
+
+function proofHasPhishingEvidence(proof: AuthLoginMethodProof): boolean {
+  const evidence = proof.evidence;
+  return (
+    (evidence?.gla_uv === true || evidence?.userVerified === true) &&
+    evidence.recipientBound === true &&
+    evidence.replayResistant === true
+  );
+}
+
+function proofHasAssuranceMapping(proof: AuthLoginMethodProof): boolean {
+  return proof.authStrength !== undefined && proof.assuranceLevel !== undefined;
+}
+
+function proofOverstatesAssurance(proof: AuthLoginMethodProof): boolean {
+  const { authStrength, assuranceLevel } = proof;
+  if (authStrength === undefined || assuranceLevel === undefined) {
+    return false;
+  }
+  return LEVEL_RANK[assuranceLevel] > LEVEL_RANK[levelFromStrength(authStrength)];
+}
+
+function proofHasEmittedEvidence(proof: AuthLoginMethodProof): boolean {
+  return proof.evidence !== undefined && Object.keys(proof.evidence).length > 0;
 }
 
 function overstatedCredentialStages(
@@ -751,6 +1005,38 @@ function deploymentRoleValue(item: unknown, path: string): AuthDeploymentRole {
   return role;
 }
 
+function loginMethodProofValue(item: unknown, path: string): AuthLoginMethodProof {
+  const obj = objectValue(item, path);
+  const proof: AuthLoginMethodProof = {
+    method: requiredString(obj, "method", path),
+    status: loginMethodProofStatusValue(obj.status, `${path}.status`),
+  };
+  assignOptional(proof, "kind", stringValue(obj, "kind"));
+  assignOptional(proof, "label", stringValue(obj, "label"));
+  assignOptional(proof, "stage", stringValue(obj, "stage"));
+  assignOptional(proof, "source", stringValue(obj, "source"));
+  assignOptional(
+    proof,
+    "authStrength",
+    obj.authStrength === undefined
+      ? undefined
+      : authStrengthValue(obj.authStrength, `${path}.authStrength`),
+  );
+  assignOptional(
+    proof,
+    "assuranceLevel",
+    authAssuranceLevelValue(obj.assuranceLevel, `${path}.assuranceLevel`),
+  );
+  assignOptional(proof, "observedAt", stringValue(obj, "observedAt"));
+  assignOptional(proof, "subjectStable", booleanValue(obj, "subjectStable"));
+  assignOptional(proof, "evidence", recordValue(obj.evidence, `${path}.evidence`));
+  const diagnostics = stringArrayValue(obj, "diagnostics");
+  if (diagnostics.length > 0) {
+    proof.diagnostics = diagnostics;
+  }
+  return proof;
+}
+
 function objectValue(value: unknown, path: string): PlainObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${path} must be an object`);
@@ -825,6 +1111,18 @@ function authAssuranceLevelValue(value: unknown, path: string): AuthAssuranceLev
   throw new Error(`${path} must be none|password|phishing-resistant`);
 }
 
+function loginMethodProofStatusValue(value: unknown, path: string): AuthLoginMethodProofStatus {
+  if (
+    value === "verified" ||
+    value === "degraded" ||
+    value === "unavailable" ||
+    value === "deferred"
+  ) {
+    return value;
+  }
+  throw new Error(`${path} must be verified|degraded|unavailable|deferred`);
+}
+
 function levelFromStrength(strength: AuthStrength): AuthAssuranceLevel {
   switch (strength) {
     case "webauthn":
@@ -865,6 +1163,10 @@ function redactEnrollmentPolicy(policy: AuthEnrollmentMethodPolicy): AuthEnrollm
   const deploymentRoles = policy.deploymentRoles?.map(redactDeploymentRole);
   if (deploymentRoles !== undefined && deploymentRoles.length > 0) {
     redacted.deploymentRoles = deploymentRoles;
+  }
+  const loginMethodProofs = policy.loginMethodProofs?.map(redactLoginMethodProof);
+  if (loginMethodProofs !== undefined && loginMethodProofs.length > 0) {
+    redacted.loginMethodProofs = loginMethodProofs;
   }
   return redacted;
 }
@@ -928,6 +1230,27 @@ function redactDeploymentRole(role: AuthDeploymentRole): AuthDeploymentRole {
   assignOptional(redacted, "publicSurface", optionalSafeText(role.publicSurface));
   assignOptional(redacted, "optional", role.optional);
   assignOptional(redacted, "providerEvidence", redactEvidence(role.providerEvidence));
+  return redacted;
+}
+
+function redactLoginMethodProof(proof: AuthLoginMethodProof): AuthLoginMethodProof {
+  const redacted: AuthLoginMethodProof = {
+    method: safeText(proof.method),
+    status: proof.status,
+  };
+  assignOptional(redacted, "kind", optionalSafeText(proof.kind));
+  assignOptional(redacted, "label", optionalSafeText(proof.label));
+  assignOptional(redacted, "stage", optionalSafeText(proof.stage));
+  assignOptional(redacted, "source", optionalSafeText(proof.source));
+  assignOptional(redacted, "authStrength", proof.authStrength);
+  assignOptional(redacted, "assuranceLevel", proof.assuranceLevel);
+  assignOptional(redacted, "observedAt", optionalSafeText(proof.observedAt));
+  assignOptional(redacted, "subjectStable", proof.subjectStable);
+  assignOptional(redacted, "evidence", redactEvidence(proof.evidence));
+  const diagnostics = proof.diagnostics?.map(safeText);
+  if (diagnostics !== undefined && diagnostics.length > 0) {
+    redacted.diagnostics = diagnostics;
+  }
   return redacted;
 }
 

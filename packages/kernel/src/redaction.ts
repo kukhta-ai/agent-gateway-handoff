@@ -21,7 +21,7 @@ const JSON_SECRET_FIELD_RE =
   /"?(grant|code|state|nonce|code_verifier|codeVerifier|id_token|access_token|refresh_token|client_secret|clientSecret|secret|token|password|credential|private[_-]?key)"?\s*:\s*"[^"]*"/gi;
 
 const CANARY_SECRET_VALUE_RE =
-  /\b[A-Za-z0-9._~+/-]*(?:secret|token|grant)[A-Za-z0-9._~+/-]*canary[A-Za-z0-9._~+/-]*\b/gi;
+  /\b[A-Za-z0-9._~+/_-]*(?:secret|token|grant|password|credential|private[_-]?key)[A-Za-z0-9._~+/_-]*canary[A-Za-z0-9._~+/_-]*\b/gi;
 
 const HTML_BREAKOUT_VALUE_RE = /<\/?script\b[^>]*>|javascript:/gi;
 

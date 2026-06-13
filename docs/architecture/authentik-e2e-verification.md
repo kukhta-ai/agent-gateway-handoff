@@ -231,6 +231,12 @@ in-dev proof**, and a **live real-authentik round-trip is a deploy-time confirma
   `amr` it is told). It is **recorded-as-deferred** (the GLA-074 installer verify step + its task-6 AC#8 own
   the live proof), not a GLA-076 in-dev gate, because it needs the real heavyweight stack that cannot run in
   CI/dev.
+- The deploy-time proof is recorded as redacted `loginMethodProofs[]`: password, WebAuthn/passkey with UV, and
+  configured external/social/enterprise sources each carry only descriptor-safe fields (`method`, `kind`, `label`,
+  `stage`, `source`, `status`, `authStrength`, `assuranceLevel`, `observedAt`, `subjectStable`, `evidence`,
+  `diagnostics`). The evidence object may include safe claim labels such as `amr:["pwd"]` or
+  `amr:["swk"],gla_uv:true,recipientBound:true,replayResistant:true`, but never raw id_tokens, access tokens,
+  OIDC codes, code verifiers, grants, passwords, source tokens, or passkey material.
 
 > **The honest split:** GLA-076 proves **the GLA side is correct and the seam holds** (both methods, gating,
 > negatives, swap) deterministically in dev with `FakeAuthentik`; the **deploy** confirms **authentik is
