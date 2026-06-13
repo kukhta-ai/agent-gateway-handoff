@@ -5,7 +5,7 @@
 //  - end-to-end orientation: connect → whoami → template show → catalog list (GLA-016 AC#4).
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { CatalogService, defaultStoreContent } from "@gla/catalog";
+import { CatalogService, defaultStoreContent, referenceWpmDependencyBindings } from "@gla/catalog";
 import { describe, expect, it } from "vitest";
 import { AgentBridge, type StateStores } from "./index.js";
 
@@ -19,6 +19,14 @@ function spyState(): StateStores & { snapshots: number } {
       return { tasks: [...stores.tasks], sessions: [...stores.sessions] };
     },
   };
+}
+
+function readyBridge(opts: ConstructorParameters<typeof AgentBridge>[0] = {}): AgentBridge {
+  return new AgentBridge({
+    ...opts,
+    catalog:
+      opts.catalog ?? new CatalogService({ dependencyBindings: referenceWpmDependencyBindings() }),
+  });
 }
 
 describe("AgentBridge.connect — agent-authority anchor (GLA-015 AC#2)", () => {
@@ -67,8 +75,8 @@ describe("orientation reads change no task/session state (GLA-015 AC#3, GLA-017 
 });
 
 describe("end-to-end orientation (GLA-016 AC#4)", () => {
-  it("connect → whoami → template show → catalog list, against the seeded install", async () => {
-    const bridge = new AgentBridge();
+  it("connect → whoami → template show → catalog list, against explicit WPM receipt evidence", async () => {
+    const bridge = readyBridge();
     const { token } = await bridge.connect();
 
     // whoami
@@ -98,6 +106,7 @@ describe("end-to-end orientation (GLA-016 AC#4)", () => {
   it("a system-derived unavailable part removes the template from the available view", () => {
     const catalog = new CatalogService({
       content: defaultStoreContent(),
+      dependencyBindings: referenceWpmDependencyBindings(),
       probes: { "launcher-process": () => "unavailable" },
     });
     const bridge = new AgentBridge({ catalog });
