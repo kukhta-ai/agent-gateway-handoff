@@ -63,7 +63,7 @@ export interface StoredCredential {
 }
 
 /** The transient pending challenge for an in-flight ceremony, keyed by userId. */
-interface PendingChallenge {
+export interface PendingChallenge {
   /** The base64url challenge the options carried (re-checked on verify). */
   challenge: string;
   /** Whether it is a registration or authentication challenge (defensive: don't cross-use). */

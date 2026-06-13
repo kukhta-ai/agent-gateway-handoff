@@ -46,6 +46,7 @@ export type {
   Capability,
   CapabilityClass,
   CapabilityPort,
+  MutableRevocations,
   RevocationSnapshot,
   VerifyContext,
   VerifyResult,
