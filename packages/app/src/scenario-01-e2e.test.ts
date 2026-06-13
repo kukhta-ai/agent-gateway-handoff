@@ -561,7 +561,8 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         if (invite === undefined) {
           throw new Error("enrollInvite not wired");
         }
-        const enrollLink = invite.link.replace("127.0.0.1", "localhost");
+        const deliveredInvite = JSON.parse(deliveredLinks.at(-1) ?? "{}") as { link?: string };
+        const enrollLink = (deliveredInvite.link ?? "").replace("127.0.0.1", "localhost");
         expect(await runEnrollment(hpageGw, enrollLink)).toMatch(/Enrolled/i);
         expect(stack.identity?.isEnrolled(recipient)).toBe(true);
         expect(countingIdentity.verifyStrength(recipient)).toBe("webauthn");
@@ -793,7 +794,11 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         // able to use grant-1 (which is bound to `recipient`, not `wrongRecipient`).
         const atkInvite = await stack.enrollInvite?.(wrongRecipient);
         if (atkInvite !== undefined) {
-          await runEnrollment(apageAtk, atkInvite.link.replace("127.0.0.1", "localhost"));
+          const deliveredInvite = JSON.parse(deliveredLinks.at(-1) ?? "{}") as { link?: string };
+          await runEnrollment(
+            apageAtk,
+            (deliveredInvite.link ?? "").replace("127.0.0.1", "localhost"),
+          );
         }
         // The forwarded grant-1 link opened by the wrong recipient: a raw WS upgrade with grant-1 must NOT
         // reach the capsule (the grant is recipient-bound; the edge verify fails closed — S-1/S-10).

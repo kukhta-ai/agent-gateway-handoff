@@ -263,14 +263,17 @@ describe("DaemonStateRoot", () => {
 
   it("redacts critical values in diagnostic output", () => {
     const redacted = redactDaemonState(
-      'grant=abc123&code=oidc-code&state=oidc-state {"client_secret":"s3","codeVerifier":"v","token":"t"}',
+      'https://gla.example/handoff/sess_secret?grant=grant-canary grant=abc123&code=oidc-code&state=oidc-state {"client_secret":"s3","codeVerifier":"v","token":"t"}',
     );
 
+    expect(redacted).not.toContain("sess_secret");
+    expect(redacted).not.toContain("grant-canary");
     expect(redacted).not.toContain("abc123");
     expect(redacted).not.toContain("oidc-code");
     expect(redacted).not.toContain("oidc-state");
     expect(redacted).not.toContain("s3");
     expect(redacted).not.toContain('"v"');
+    expect(redacted).toContain("<redacted-url>");
     expect(redacted).toContain("<redacted>");
   });
 

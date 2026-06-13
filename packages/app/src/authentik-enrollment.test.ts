@@ -277,6 +277,7 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     fake: FakeAuthentik;
     subjects: InMemoryKv<BoundSubject>;
     attempts: InMemoryKv<PendingAttempt>;
+    deliveredLinks: string[];
   }> {
     const fake = await FakeAuthentik.create();
     const subjects = new InMemoryKv<BoundSubject>();
@@ -293,6 +294,7 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
       attempts,
     });
     const origin = "http://127.0.0.1:0";
+    const deliveredLinks: string[] = [];
     const stack = createEnrollmentStack({
       authProvider: "authentik",
       authProviderOverride: provider,
@@ -301,11 +303,30 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
       publicBaseUrl: origin,
       host: "127.0.0.1",
       port: 0,
-      deliverySink: { write: () => {} },
+      deliverySink: { write: (line) => void deliveredLinks.push(line) },
     });
     stacks.push(stack);
     const bound = await stack.gateway.listen();
-    return { stack, origin: `http://127.0.0.1:${bound.port}`, fake, subjects, attempts };
+    return {
+      stack,
+      origin: `http://127.0.0.1:${bound.port}`,
+      fake,
+      subjects,
+      attempts,
+      deliveredLinks,
+    };
+  }
+
+  function lastDeliveredInviteLink(deliveredLinks: string[]): string {
+    const raw = deliveredLinks.at(-1);
+    if (raw === undefined) {
+      throw new Error("expected recipient invite delivery");
+    }
+    return (JSON.parse(raw) as { link: string }).link;
+  }
+
+  function lastDeliveredGrant(deliveredLinks: string[]): string {
+    return new URL(lastDeliveredInviteLink(deliveredLinks)).searchParams.get("grant") ?? "";
   }
 
   it("the authentik stack still wires the provider behind the AuthProviderPort (authModule = authentik)", async () => {
@@ -348,16 +369,18 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
   });
 
   it("REUSED grant → refused after a successful enrollment consumes it (single-use), no second enroll", async () => {
-    const { origin, stack, fake } = await authentikStack();
+    const { origin, stack, fake, deliveredLinks } = await authentikStack();
     // 1) Operator invites; the grant is valid and unspent.
     const invite = await stack.enrollInvite(recipient);
+    expect(invite).toEqual({ link: "<redacted-url>", grant: "<redacted>", nonce: "<redacted>" });
+    const grant = lastDeliveredGrant(deliveredLinks);
 
     // 2) Drive a SUCCESSFUL OIDC enroll through the real gateway: begin via /enroll/options (verifies the grant,
     //    returns the authorize URL), simulate the authentik login, then finish via /enroll/verify (consumes the grant).
     const optRes = await fetch(`${origin}/enroll/options`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant: invite.grant }),
+      body: JSON.stringify({ grant }),
     });
     expect(optRes.status).toBe(200);
     const { state, nonce } = stateNonceFrom(await optRes.json());
@@ -366,7 +389,7 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     const verifyRes = await fetch(`${origin}/enroll/verify`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant: invite.grant, attestation: { code, state } }),
+      body: JSON.stringify({ grant, attestation: { code, state } }),
     });
     expect(verifyRes.status).toBe(200);
     expect(stack.identity.isEnrolled(recipient)).toBe(true);
@@ -375,19 +398,20 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     const reuse = await fetch(`${origin}/enroll/options`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant: invite.grant }),
+      body: JSON.stringify({ grant }),
     });
     expect(reuse.status).toBe(403);
     expect(JSON.parse(await reuse.text()).error.code).toBe("auth.revoked");
   });
 
   it("a configured /auth/callback enrollment return runs the real verify route and records enrollment", async () => {
-    const { origin, stack, fake } = await authentikStack();
-    const invite = await stack.enrollInvite(recipient);
+    const { origin, stack, fake, deliveredLinks } = await authentikStack();
+    await stack.enrollInvite(recipient);
+    const grant = lastDeliveredGrant(deliveredLinks);
     const optRes = await fetch(`${origin}/enroll/options`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant: invite.grant }),
+      body: JSON.stringify({ grant }),
     });
     expect(optRes.status).toBe(200);
     const challenge = (await optRes.json()) as { kind?: string; authorizeUrl?: string };
@@ -397,7 +421,7 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     expect(redirectUri.origin).toBe("https://gla.example");
     expect(redirectUri.pathname).toBe("/auth/callback");
     expect(redirectUri.search).toBe("");
-    expect(authorizeUrl.toString()).not.toContain(invite.grant);
+    expect(authorizeUrl.toString()).not.toContain(grant);
     const state = authorizeUrl.searchParams.get("state") ?? "";
     const nonce = authorizeUrl.searchParams.get("nonce") ?? "";
     const code = `callback-${state}`;
@@ -409,7 +433,7 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     expect(callback.status).toBe(200);
     const { fetchCalls, status } = executeEnrollmentCallback(await callback.text(), {
       origin,
-      grant: invite.grant,
+      grant,
       search: `?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
     });
 
@@ -417,27 +441,28 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     expect(status.textContent).toMatch(/Enrolled/);
     expect(fetchCalls[0]?.input).toBe("/enroll/verify");
     expect(JSON.parse(String(fetchCalls[0]?.init.body))).toEqual({
-      grant: invite.grant,
+      grant,
       attestation: { code, state },
     });
     expect(stack.identity.getCredential(recipient)?.credentialId).toBe("sub-callback-enrolled");
     const reuse = await fetch(`${origin}/enroll/options`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant: invite.grant }),
+      body: JSON.stringify({ grant }),
     });
     expect(reuse.status).toBe(403);
     expect(JSON.parse(await reuse.text()).error.code).toBe("auth.revoked");
   });
 
   it("an unknown-state enrollment callback is a catchable refusal and leaves the recipient unenrolled", async () => {
-    const { origin, stack } = await authentikStack();
-    const invite = await stack.enrollInvite(recipient);
+    const { origin, stack, deliveredLinks } = await authentikStack();
+    await stack.enrollInvite(recipient);
+    const grant = lastDeliveredGrant(deliveredLinks);
     const callback = await fetch(`${origin}/auth/callback?code=bad-code&state=missing-state`);
     expect(callback.status).toBe(200);
     const { status } = executeEnrollmentCallback(await callback.text(), {
       origin,
-      grant: invite.grant,
+      grant,
       search: "?code=bad-code&state=missing-state",
     });
 
@@ -448,7 +473,7 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     const retry = await fetch(`${origin}/enroll/options`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grant: invite.grant }),
+      body: JSON.stringify({ grant }),
     });
     expect(retry.status).toBe(200);
   });

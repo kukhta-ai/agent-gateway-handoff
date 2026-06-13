@@ -3,10 +3,10 @@ id: GLA-084
 title: >-
   Harden operator and installer redaction for bearer URLs and secret
   placeholders
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-12 20:03'
-updated_date: '2026-06-12 23:01'
+updated_date: '2026-06-13 17:01'
 labels:
   - hardening
   - security
@@ -43,28 +43,26 @@ Boundaries: recipient-facing delivery may still carry the grant where the protoc
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Operator-facing stdout and stderr, install-backlog notes, receipts, daemon diagnostics, and audit egress contain no raw secret values, grant tokens, or full grant-bearing handoff or enrollment URLs.
-- [ ] #2 Recipient delivery and browser consumption still receive usable handoff or enrollment links where a grant is required; only non-recipient and operator-facing surfaces are redacted.
-- [ ] #3 Secret, config, env, and receipt inputs reject redaction or template placeholders, including literal ***, <redacted>, and unresolved angle-bracket placeholders, with a clear recoverable failure and no valid receipt or service start.
-- [ ] #4 Sensitive connection records distinguish secret references from literals; authentik client secrets and comparable sensitive fields are recorded only as secret references or secret-store pointers.
-- [ ] #5 A canary install or run with known secret, token, and grant values leaves zero raw canary occurrences in generated env, receipts, operator logs, daemon output, and audit egress.
-- [ ] #6 Non-sensitive public configuration such as public base URL, RP ID, ownership mode, checksums, and inverse-op metadata remains visible enough for operator repair and verification.
+- [x] #1 Operator-facing stdout and stderr, install-backlog notes, receipts, daemon diagnostics, and audit egress contain no raw secret values, grant tokens, or full grant-bearing handoff or enrollment URLs.
+- [x] #2 Recipient delivery and browser consumption still receive usable handoff or enrollment links where a grant is required; only non-recipient and operator-facing surfaces are redacted.
+- [x] #3 Secret, config, env, and receipt inputs reject redaction or template placeholders, including literal ***, <redacted>, and unresolved angle-bracket placeholders, with a clear recoverable failure and no valid receipt or service start.
+- [x] #4 Sensitive connection records distinguish secret references from literals; authentik client secrets and comparable sensitive fields are recorded only as secret references or secret-store pointers.
+- [x] #5 A canary install or run with known secret, token, and grant values leaves zero raw canary occurrences in generated env, receipts, operator logs, daemon output, and audit egress.
+- [x] #6 Non-sensitive public configuration such as public base URL, RP ID, ownership mode, checksums, and inverse-op metadata remains visible enough for operator repair and verification.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Prepared from the transcript comparison and independent subagent draft: Arendt/redaction.
-
-Review mapping update: secret-ref and redaction findings are covered here, while public-browser bearer transport is split to GLA-089. Evidence: WPM identity-provider templates describe secret references, but packages/app/src/daemon.ts can receive authentik client secret material through env/argv/plain config. This task should ensure placeholders are rejected and sensitive connection records persist only secret references or secret-store pointers.
+BMAD workflows/evidence: bmad-create-story artifact _bmad-output/implementation-artifacts/gla-084-redaction-hardening-story.md; bmad-dev-story implementation completed on feature/authentik-task-084. Persistent specialists used: Dirac(worker) for story context, Wegener(reviewer) approved after follow-up blockers, Helmholtz(TEA/security) identified handoff-wait blocker which was fixed. Verification: final pnpm gate passed (59 files, 628 passed, 12 skipped); known warning only broken symlink wpm/CLAUDE.md. Key decisions: kernel owns shared redaction/placeholder primitives; app/CLI/audit/catalog consume them; recipient DeliverySink/browser links keep real grants while operator read models are redacted; catalog validates and operator-safe-clones WPM evidence, preserving typed secret-ref pointers.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Typecheck passes with no errors.
-- [ ] #2 Linter passes clean.
-- [ ] #3 Tests are added for the change and the full suite is green.
-- [ ] #4 Public functions and exported types are documented.
-- [ ] #5 No dead code or unused exports are introduced.
-- [ ] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
+- [x] #1 Typecheck passes with no errors.
+- [x] #2 Linter passes clean.
+- [x] #3 Tests are added for the change and the full suite is green.
+- [x] #4 Public functions and exported types are documented.
+- [x] #5 No dead code or unused exports are introduced.
+- [x] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
 <!-- DOD:END -->
