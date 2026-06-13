@@ -25,6 +25,7 @@ import { type IncomingMessage, type Server, type ServerResponse, createServer } 
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { type SessionId, decodeRuntimeHandle } from "@gla/kernel";
 import { chromium } from "playwright-core";
@@ -153,6 +154,7 @@ describe("REAL completion + close-window + agent-blind end-to-end (scenario-01 P
       // saga needs the channel + grant mint), but the close is driven by COMPLETION, not by a real WS step-up — so
       // we point the detector's URL reader at the REAL capsule CDP (the default) and let the human drive the page.
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,

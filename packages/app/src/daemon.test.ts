@@ -22,6 +22,7 @@ import { request as httpRequest } from "node:http";
 import { type Socket, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { DaemonBridgeClient, Output, type OutputStreams, run } from "@gla/cli";
 import type { RecipientRef } from "@gla/kernel";
 import { chromium } from "playwright-core";
@@ -95,6 +96,7 @@ async function startDaemon(opts: {
     port: 0, // ephemeral gateway port (a real deploy binds 0.0.0.0:3000).
     bridgeEndpoint: sock,
     publicBaseUrl: opts.publicBaseUrl,
+    dependencyBindings: referenceWpmDependencyBindings(),
     rpID: "localhost",
     expectedOrigin: opts.publicBaseUrl,
     launcherMode: "headless",

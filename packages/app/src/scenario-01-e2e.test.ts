@@ -33,6 +33,7 @@ import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthWebauthnProvider } from "@gla/auth-webauthn";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import {
   ChannelCli,
   type DeliverySink,
@@ -493,6 +494,7 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
       // completion-close pipeline. NO warm state: this stack is built right here, fresh, per test.
       const wsRoot = workspaceRoot();
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: wsRoot,
         startTimeoutMs: 40_000,
