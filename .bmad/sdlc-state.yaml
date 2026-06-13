@@ -4,15 +4,15 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — GLA-079 configured public gateway base paths"
-branch: feature/authentik-task-079
+phase_name: "Autonomous build — ready for next authentik hardening story"
+branch: feature/authentik
 epic: authentik-hardening-077-094
-active_story: GLA-079
-review_cycle: 3
+active_story: null
+review_cycle: 0
 follow_on_scope:
   tasks: "GLA-077..GLA-094"
   branch_base: "feature/authentik"
-  next_ready_sequence: "GLA-081, GLA-082, GLA-083, GLA-084, GLA-088, GLA-090, GLA-091, GLA-092, GLA-094"
+  next_ready_sequence: "GLA-080, GLA-081, GLA-082, GLA-083, GLA-084, GLA-088, GLA-090, GLA-091, GLA-092, GLA-094"
   note: "2026-06-12 user goal: implement backlog 077-094 according to project SDLC, architecture, and vision; first initialize persistent Codex-native specialists."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
