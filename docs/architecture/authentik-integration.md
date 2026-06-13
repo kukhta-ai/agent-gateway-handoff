@@ -79,7 +79,8 @@ edit"*).
 
 1. **`@gla/auth-authentik`** — the delegated adapter: an in-tree OIDC relying-party client implementing
    `AuthProviderPort` over an OIDC authorization-code + PKCE round-trip to authentik (`§2`, `§3`), plus its
-   own small callback listener (`§2`) and its state/nonce/PKCE store.
+   state/nonce/PKCE store. The callback landing is the gateway-served provider-neutral page described below,
+   not a provider-specific listener.
 2. **The composition wiring in `packages/app`** — the one place that *chooses* the adapter
    (`createProvisioningBridge` / `createEnrollmentStack` / `daemon.ts`), extended with a provider switch +
    the authentik OIDC config (`§7`). This is the "`app` wire change," and `packages/app/**` is the *only*
@@ -100,13 +101,13 @@ human through **its own hosted flows** (passkey / password / MFA) and speaks **O
 delegation that fits (a) onto (b) is an **OIDC Authorization-Code flow with PKCE**:
 
 - **`challenge(userId)` → an OIDC authorization request.** The adapter builds the redirect to authentik's
-  `/application/o/authorize/` carrying `response_type=code`, `client_id`, `redirect_uri` (the **adapter's own
-  callback**, see below), `scope=openid profile` (+ any operator-added scopes), a per-attempt **PKCE**
+  `/application/o/authorize/` carrying `response_type=code`, `client_id`, `redirect_uri` (the **GLA-served
+  callback page**, see below), `scope=openid profile` (+ any operator-added scopes), a per-attempt **PKCE**
   `code_challenge` (`S256`), a one-time **`state`**, and a one-time **`nonce`**. The returned "challenge" is
   this authorization URL (opaque to the kernel — `AuthChallenge = unknown`).
 - **The human authenticates AT authentik.** authentik runs the passkey-or-password-or-MFA flow itself; GLA
-  never sees the credential (`§5`). On success authentik **redirects the browser back** to the adapter
-  callback with `?code=…&state=…`.
+  never sees the credential (`§5`). On success authentik **redirects the browser back** to GLA's callback page
+  with `?code=…&state=…`.
 - **`verifyAssertion(userId, {code, state})` → exchange + validate → `{ok, authStrength}`.** The adapter
   looks up the pending attempt by `state` (one-time), exchanges `code` + the stored PKCE `code_verifier` at
   authentik's `/application/o/token/` for an **`id_token`**, and **validates** it: issuer == the configured
@@ -123,26 +124,23 @@ assertion/attestation. The gateway still verifies the recipient-bound grant, cal
 `stepUp.authenticationOptions` / `verifyAuthentication`, and proxies the authorized WS — it does not branch on
 authentik-specific method names.
 
-**The one real seam tension (GLA-072 must own it).** The gateway today **serves a fixed step-up page**
+**The one real seam tension (resolved by the generic served-page mechanism).** The gateway originally **served a
+fixed step-up page**
 (`packages/gateway/src/handoff-page.ts` → `handoffPageHtml`) that runs `navigator.credentials.get(options)`
 **in the page** and POSTs the assertion to `/handoff/auth/verify`. An OIDC flow is **not** a same-page
 ceremony — it is a **top-level redirect** to authentik and back. Because that page is compiled into the
-gateway, making the *browser-side shape* provider-specific would touch gateway code. The honest resolution,
-fixed here so GLA-068/072 don't re-decide:
+gateway, making the *browser-side shape* provider-specific would violate the provider-neutral gateway model. The
+resolution, fixed here so future provider work does not re-decide it:
 
 > The provider's **`challenge()` return is opaque** (`AuthChallenge = unknown`). For authentik it carries a
 > discriminated shape `{ kind: "redirect", authorizeUrl }` (vs WebAuthn's options JSON). The step-up page's
 > *contract* — "ask the gateway for options, complete them, tell the gateway the result" — is unchanged; only
-> the *completion mechanism* differs (a `location.assign(authorizeUrl)` instead of `credentials.get`). GLA-072
-> realizes this **without changing the gateway** by one of two equivalent moves, the choice being GLA-071's to
-> finalize: **(i)** the adapter's callback completes the round-trip server-side and **re-POSTs** the
-> normalized `{code,state}` to the gateway's *existing* `/handoff/auth/verify` as the opaque `assertion`
-> (so the gateway's verify path is literally unchanged and the page only needs to *start* the redirect); or
-> **(ii)** a tiny, **provider-agnostic** page-completion seam is introduced once (a branch on the opaque
-> options' `kind`) — but if (ii) is taken it must be a *generic* "complete these options" hook, never
-> authentik-specific gateway logic. **Decision: prefer (i)** — it keeps `packages/gateway` byte-for-byte
-> unchanged and confines every authentik specific to the adapter + composition. GLA-068 builds the adapter +
-> callback to support (i); GLA-072 wires the dual-method UX on top.
+> the *completion mechanism* differs (a `location.assign(authorizeUrl)` instead of `credentials.get`). The
+> implemented mechanism is provider-neutral: the gateway-served pages branch on the opaque `kind:"redirect"`,
+> preserve GLA grants only in same-origin sessionStorage, navigate to the server-built `authorizeUrl`, and the
+> gateway-served `/auth/callback` page re-POSTs normalized `{code,state}` to the existing
+> `/handoff/auth/verify` or `/enroll/verify` route as the opaque assertion/attestation. The adapter owns OIDC
+> state, token exchange, validation, and subject binding; it does not expose a public HTTP endpoint.
 
 This is the only place the WebAuthn-shaped ceremony and the OIDC redirect genuinely differ; everything else
 (`§3`) maps cleanly onto the unchanged port.
@@ -159,7 +157,7 @@ against the recipient's binding. Concretely, against the **real** methods
 
 | Port method (kernel) | In-tree WebAuthn (today) | **authentik delegated (this design)** |
 |---|---|---|
-| `challenge(userId)` → `AuthChallenge` | `generateAuthenticationOptions` (WebAuthn options) | **build the OIDC authorization request** → `{ kind:"redirect", authorizeUrl }` carrying PKCE `code_challenge`, one-time `state`, one-time `nonce`, scopes, `redirect_uri`=the adapter callback. Stores the pending attempt `{userId, state, nonce, codeVerifier}` keyed by `state` (`§2`). |
+| `challenge(userId)` → `AuthChallenge` | `generateAuthenticationOptions` (WebAuthn options) | **build the OIDC authorization request** → `{ kind:"redirect", authorizeUrl }` carrying PKCE `code_challenge`, one-time `state`, one-time `nonce`, scopes, `redirect_uri`=the GLA-served callback page. Stores the pending attempt `{userId, state, nonce, codeVerifier}` keyed by `state` (`§2`). |
 | `verifyAssertion(userId, assertion)` → `{ok, authStrength}` | `verifyAuthenticationResponse` → bump counter | **assertion = `{code, state}`** (the callback's params). Look up the attempt by `state` (one-time-consume), **exchange** `code`+`codeVerifier` at the token endpoint, **validate** the `id_token` (issuer, audience=`client_id`, signature via **JWKS**, `nonce`, `exp`/`iat`/`nbf`±skew), **check `sub` == the recipient's bound subject** (`§5`), derive strength from `amr`/`acr` (`§4`) → return `{ok, authStrength}`. Any failure → `{ok:false, authStrength:"none"}`. |
 
 **Resolved-identity check (the recipient-binding enforcement — the crux of AC #2).** The gateway already
@@ -308,7 +306,7 @@ bundle.*
 
 - **Standing authentik up** — `server` + `worker` + **Postgres** + **Redis** — and **configuring its
   flow/stages** (an OIDC provider + application for GLA, the passkey + password stages, the `amr`/`acr`
-  emission the `§4` map keys on), and routing the adapter's callback path through the **same host Caddy**.
+  emission the `§4` map keys on), and routing the GLA callback path through the **same host Caddy**.
   This is host-touching, environment-specific, and **unknowable in advance** — precisely the `wpm` half.
 
 **The named task that stands the provider service up: `GLA-074` — "Build the wpm installer for the authentik
@@ -403,7 +401,7 @@ the **capstone (076) last**):
 | # | Task | Kind | Gated by (all Done first) | Why here |
 |---|---|---|---|---|
 | 0 | **GLA-067** | plan (this doc) | GLA-002 | fixes the integration shape all five conform to |
-| 1 | **GLA-068** — integrate authentik as a delegated auth provider | **impl: adapter** | GLA-067 | the adapter is the foundation **everything** else uses; build it first (`§1`–`§4`). Builds the OIDC client, callback, `sub`-binding check, `amr`/`acr`→strength map behind the unchanged port. |
+| 1 | **GLA-068** — integrate authentik as a delegated auth provider | **impl: adapter** | GLA-067 | the adapter is the foundation **everything** else uses; build it first (`§1`–`§4`). Builds the OIDC client, pending-attempt store, `sub`-binding check, and `amr`/`acr`→strength map behind the unchanged port. |
 | 2 | **GLA-069** — plan recipient enrollment w/ delegated IdP | plan | GLA-067 | plan the enrollment-as-subject-linking (`§5`) before building it. (Independent of 068; may run in parallel with step 1.) |
 | 3 | **GLA-070** — enroll a recipient through authentik | impl: enrollment | GLA-068, GLA-069 | binds the recipient to the authentik `sub` (the precondition for any delegated step-up). Needs the adapter (068) + its plan (069). |
 | 4 | **GLA-071** — plan the passkey-and-password flow | plan | GLA-067 | plan the dual-method UX + the redirect-page resolution (`§2` (i)) before building it. (May run in parallel with steps 1–3.) |
@@ -422,11 +420,11 @@ the adapter build; the table lists one **legal serialization**.
 
 ## §9 · Open risks / seam tensions the implementation tasks must watch
 
-1. **The redirect-vs-same-page tension (`§2`)** is the single real seam stress. GLA-068 must build the
-   adapter + callback so the gateway's *served* step-up page changes **only** in how it *starts* completion
-   (a redirect), and GLA-072 must keep any page-completion branch **provider-agnostic** — never authentik
-   logic in `packages/gateway`. If a clean realization of `§2` (i) proves impossible, that is a **scope
-   surface** (it would touch the fixed gateway): stop and surface it, do not quietly edit the gateway.
+1. **The redirect-vs-same-page tension (`§2`)** is the single real seam stress. The implementation must keep the
+   gateway's served page completion **provider-agnostic** — a branch on opaque `kind:"redirect"` and a shared
+   `/auth/callback` landing page, never authentik-specific gateway logic. If a future provider cannot use that
+   generic shape, that is a scope surface: stop and surface it, do not quietly add provider-specific gateway
+   routes.
 2. **`amr`/`acr` fidelity (`§4`).** authentik must actually **emit** an `amr`/`acr` that distinguishes passkey
    from password for the GLA flow; this is a **flow/stage configuration** owned by GLA-073/074. If a given
    authentik build cannot distinguish them, the `webauthn` tier is unachievable and the integration degrades

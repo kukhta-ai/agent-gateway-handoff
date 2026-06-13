@@ -20,6 +20,7 @@
 //   AC#4 the binding is established WITHOUT GLA storing the credential (only the `sub`; no key/secret/password).
 //   AC#5 switching back to the in-tree provider leaves its enrollment path unchanged (wiring + the WebAuthn E2E).
 
+import { runInNewContext } from "node:vm";
 import {
   AUTH_AUTHENTIK_MODULE,
   AuthAuthentikProvider,
@@ -31,7 +32,7 @@ import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
 import { IdentityService } from "@gla/identity";
 import type { RecipientRef } from "@gla/kernel";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type EnrollmentStack, createEnrollmentStack, createProvisioningBridge } from "./index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
@@ -91,6 +92,77 @@ function stateNonceFrom(challenge: unknown): { state: string; nonce: string } {
     throw new Error("authorize URL missing state/nonce");
   }
   return { state, nonce };
+}
+
+function callbackScript(html: string): string {
+  const match = html.match(/<script>\n(?<script>\(\(\) => \{[\s\S]*?)\n<\/script>/);
+  if (match?.groups?.script === undefined) {
+    throw new Error("callback browser script not found");
+  }
+  return match.groups.script;
+}
+
+async function waitForAssertion(assertion: () => void): Promise<void> {
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  assertion();
+}
+
+function executeEnrollmentCallback(
+  html: string,
+  args: {
+    origin: string;
+    grant: string;
+    search: string;
+  },
+): { fetchCalls: Array<{ input: string; init: RequestInit }>; status: { textContent: string } } {
+  const status = { textContent: "", className: "" };
+  const fetchCalls: Array<{ input: string; init: RequestInit }> = [];
+  const origin = new URL(args.origin);
+  const context = {
+    URLSearchParams,
+    WebSocket: vi.fn(),
+    document: {
+      title: "Completing sign-in",
+      getElementById(id: string): { textContent: string; className?: string } {
+        if (id === "callback-data") {
+          const match = html.match(
+            /<script id="callback-data" type="application\/json">(?<data>.*?)<\/script>/,
+          );
+          return { textContent: match?.groups?.data ?? "{}" };
+        }
+        if (id === "status") {
+          return status;
+        }
+        throw new Error(`unexpected element ${id}`);
+      },
+    },
+    fetch: vi.fn(async (input: string, init: RequestInit) => {
+      fetchCalls.push({ input, init });
+      return fetch(new URL(input, args.origin).toString(), init);
+    }),
+    history: { replaceState: vi.fn() },
+    location: {
+      host: origin.host,
+      pathname: "/auth/callback",
+      protocol: `${origin.protocol}`,
+      search: args.search,
+    },
+    sessionStorage: {
+      getItem: vi.fn((key: string) => (key === "gla.enroll" ? args.grant : null)),
+      removeItem: vi.fn(),
+    },
+  };
+
+  runInNewContext(callbackScript(html), context);
+  return { fetchCalls, status };
 }
 
 /**
@@ -306,6 +378,78 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     });
     expect(reuse.status).toBe(403);
     expect(JSON.parse(await reuse.text()).error.code).toBe("auth.revoked");
+  });
+
+  it("a configured /auth/callback enrollment return runs the real verify route and records enrollment", async () => {
+    const { origin, stack, fake } = await authentikStack();
+    const invite = await stack.enrollInvite(recipient);
+    const optRes = await fetch(`${origin}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: invite.grant }),
+    });
+    expect(optRes.status).toBe(200);
+    const challenge = (await optRes.json()) as { kind?: string; authorizeUrl?: string };
+    expect(challenge.kind).toBe("redirect");
+    const authorizeUrl = new URL(challenge.authorizeUrl ?? "");
+    const redirectUri = new URL(authorizeUrl.searchParams.get("redirect_uri") ?? "");
+    expect(redirectUri.origin).toBe("https://gla.example");
+    expect(redirectUri.pathname).toBe("/auth/callback");
+    expect(redirectUri.search).toBe("");
+    expect(authorizeUrl.toString()).not.toContain(invite.grant);
+    const state = authorizeUrl.searchParams.get("state") ?? "";
+    const nonce = authorizeUrl.searchParams.get("nonce") ?? "";
+    const code = `callback-${state}`;
+    await fake.stageValidLogin(code, { sub: "sub-callback-enrolled", nonce, amr: ["swk"] });
+
+    const callback = await fetch(
+      `${origin}${redirectUri.pathname}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    );
+    expect(callback.status).toBe(200);
+    const { fetchCalls, status } = executeEnrollmentCallback(await callback.text(), {
+      origin,
+      grant: invite.grant,
+      search: `?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    });
+
+    await waitForAssertion(() => expect(stack.identity.isEnrolled(recipient)).toBe(true));
+    expect(status.textContent).toMatch(/Enrolled/);
+    expect(fetchCalls[0]?.input).toBe("/enroll/verify");
+    expect(JSON.parse(String(fetchCalls[0]?.init.body))).toEqual({
+      grant: invite.grant,
+      attestation: { code, state },
+    });
+    expect(stack.identity.getCredential(recipient)?.credentialId).toBe("sub-callback-enrolled");
+    const reuse = await fetch(`${origin}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: invite.grant }),
+    });
+    expect(reuse.status).toBe(403);
+    expect(JSON.parse(await reuse.text()).error.code).toBe("auth.revoked");
+  });
+
+  it("an unknown-state enrollment callback is a catchable refusal and leaves the recipient unenrolled", async () => {
+    const { origin, stack } = await authentikStack();
+    const invite = await stack.enrollInvite(recipient);
+    const callback = await fetch(`${origin}/auth/callback?code=bad-code&state=missing-state`);
+    expect(callback.status).toBe(200);
+    const { status } = executeEnrollmentCallback(await callback.text(), {
+      origin,
+      grant: invite.grant,
+      search: "?code=bad-code&state=missing-state",
+    });
+
+    await waitForAssertion(() =>
+      expect(status.textContent).toMatch(/Registration was not completed/),
+    );
+    expect(stack.identity.isEnrolled(recipient)).toBe(false);
+    const retry = await fetch(`${origin}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: invite.grant }),
+    });
+    expect(retry.status).toBe(200);
   });
 });
 

@@ -21,6 +21,7 @@ import { createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import {
   AuthAuthentikProvider,
   type BoundSubject,
@@ -48,7 +49,7 @@ import {
   type SessionId,
   authAssurancePolicyFromProfile,
 } from "@gla/kernel";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const recipient = "tg:user:123" as RecipientRef;
 const GRANT_ID = "cap_grant1" as CapabilityId;
@@ -136,6 +137,86 @@ function openUpgrade(
       if (!resolved) reject(e);
     });
   });
+}
+
+function callbackScript(html: string): string {
+  const match = html.match(/<script>\n(?<script>\(\(\) => \{[\s\S]*?)\n<\/script>/);
+  if (match?.groups?.script === undefined) {
+    throw new Error("callback browser script not found");
+  }
+  return match.groups.script;
+}
+
+async function waitForAssertion(assertion: () => void): Promise<void> {
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  assertion();
+}
+
+function executeHandoffCallback(
+  html: string,
+  args: {
+    base: string;
+    grant: string;
+    search: string;
+    streamPath: string;
+  },
+): { fetchCalls: Array<{ input: string; init: RequestInit }>; status: { textContent: string } } {
+  const status = { textContent: "", className: "" };
+  const fetchCalls: Array<{ input: string; init: RequestInit }> = [];
+  const handoffState = {
+    grant: args.grant,
+    path: ROUTE_PATH,
+    streamPath: args.streamPath,
+  };
+  const base = new URL(args.base);
+  const context = {
+    URLSearchParams,
+    WebSocket: vi.fn(() => ({ binaryType: "", onclose: undefined, onopen: undefined })),
+    document: {
+      title: "Completing sign-in",
+      getElementById(id: string): { textContent: string; className?: string } {
+        if (id === "callback-data") {
+          const match = html.match(
+            /<script id="callback-data" type="application\/json">(?<data>.*?)<\/script>/,
+          );
+          return { textContent: match?.groups?.data ?? "{}" };
+        }
+        if (id === "status") {
+          return status;
+        }
+        throw new Error(`unexpected element ${id}`);
+      },
+    },
+    encodeURIComponent,
+    fetch: vi.fn(async (input: string, init: RequestInit) => {
+      fetchCalls.push({ input, init });
+      return fetch(new URL(input, args.base).toString(), init);
+    }),
+    history: { replaceState: vi.fn() },
+    location: {
+      host: base.host,
+      pathname: "/auth/callback",
+      protocol: `${base.protocol}`,
+      search: args.search,
+    },
+    sessionStorage: {
+      getItem: vi.fn((key: string) =>
+        key === "gla.handoff" ? JSON.stringify(handoffState) : null,
+      ),
+      removeItem: vi.fn(),
+    },
+  };
+
+  runInNewContext(callbackScript(html), context);
+  return { fetchCalls, status };
 }
 
 function mountReq(endpoint: string): RouteMountRequest {
@@ -278,11 +359,100 @@ async function stepUpWith(
   });
 }
 
+async function beginCallbackStepUp(
+  h: DualHarness,
+  grant: string,
+): Promise<{ authorizeUrl: URL; code: string; state: string }> {
+  const optRes = await fetch(`${h.base}/handoff/auth/options`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ grant, path: ROUTE_PATH }),
+  });
+  expect(optRes.status).toBe(200);
+  const challenge = (await optRes.json()) as { kind?: string; authorizeUrl?: string };
+  expect(challenge.kind).toBe("redirect");
+  const authorizeUrl = new URL(challenge.authorizeUrl ?? "");
+  const state = authorizeUrl.searchParams.get("state") ?? "";
+  const nonce = authorizeUrl.searchParams.get("nonce") ?? "";
+  const code = `callback-${state}`;
+  await h.fake.stageValidLogin(code, { sub: h.boundSub, nonce, amr: ["swk"] });
+  return { authorizeUrl, code, state };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AC#1/#2/#5 — both methods independently satisfy a policy that explicitly permits the fallback.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("AC#1/#2/#5 · both methods satisfy password-permitted policy (passkey→webauthn, password→password)", () => {
+  it("a configured /auth/callback handoff return runs the real verify route, authorizes the grant, and permits the WS upgrade", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const h = await dualHarness({
+      authAssuranceProfile: "password-permitted",
+      upstream: upstream.endpoint,
+    });
+    const grant = "session-grant-sentinel";
+    h.grants.validToken = grant;
+    const { authorizeUrl, code, state } = await beginCallbackStepUp(h, grant);
+    const redirectUri = new URL(authorizeUrl.searchParams.get("redirect_uri") ?? "");
+    expect(redirectUri.origin).toBe("https://gla.example");
+    expect(redirectUri.pathname).toBe("/auth/callback");
+    expect(redirectUri.search).toBe("");
+    expect(authorizeUrl.toString()).not.toContain(grant);
+
+    const callback = await fetch(
+      `${h.base}/auth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    );
+    expect(callback.status).toBe(200);
+    const html = await callback.text();
+    expect(html).toContain("Completing sign-in");
+    const { fetchCalls } = executeHandoffCallback(html, {
+      base: h.base,
+      grant,
+      search: `?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+      streamPath: ROUTE_PATH,
+    });
+
+    await waitForAssertion(() => expect(h.gateway.isGrantAuthorized(GRANT_ID)).toBe(true));
+    expect(fetchCalls[0]?.input).toBe("/handoff/auth/verify");
+    expect(JSON.parse(String(fetchCalls[0]?.init.body))).toEqual({
+      grant,
+      path: ROUTE_PATH,
+      assertion: { code, state },
+    });
+    const up = await openUpgrade(h.host, h.port, ROUTE_PATH, grant);
+    expect(up.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+    up.socket.destroy();
+  });
+
+  it("a callback landing with an unknown state is a catchable refusal and leaves the grant unauthorized", async () => {
+    const upstream = await startStubUpstream();
+    closers.push(upstream.close);
+    const h = await dualHarness({
+      authAssuranceProfile: "password-permitted",
+      upstream: upstream.endpoint,
+    });
+    const grant = "session-grant-replay-sentinel";
+    h.grants.validToken = grant;
+    const callback = await fetch(`${h.base}/auth/callback?code=bad-code&state=missing-state`);
+    expect(callback.status).toBe(200);
+    const { status } = executeHandoffCallback(await callback.text(), {
+      base: h.base,
+      grant,
+      search: "?code=bad-code&state=missing-state",
+      streamPath: ROUTE_PATH,
+    });
+
+    await waitForAssertion(() =>
+      expect(status.textContent).toMatch(/Verification was not completed/),
+    );
+    expect(h.gateway.isGrantAuthorized(GRANT_ID)).toBe(false);
+    const up = await openUpgrade(h.host, h.port, ROUTE_PATH, grant);
+    expect(up.firstChunk).toMatch(/401/);
+    expect(up.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+    up.socket.destroy();
+  });
+
   it("AC#1 · a PASSKEY step-up (amr swk) → auth_strength webauthn → authorized; WS upgrade proxied", async () => {
     const upstream = await startStubUpstream();
     closers.push(upstream.close);

@@ -27,8 +27,8 @@
 // The actual secret (passkey/password) lives REMOTELY in authentik — this adapter "holds nothing locally"
 // but the `sub` binding (exactly the split the auth-webauthn header anticipated for "an authentik adapter").
 //
-// NOTE — deferred to later GLA tasks (built behind THIS adapter, not here):
-//   • The browser callback LISTENER + step-up-page redirect (location.assign(authorizeUrl)) + the dual-method
+// NOTE — built around THIS adapter, but not inside it:
+//   • The GLA-served browser callback page + step-up-page redirect (location.assign(authorizeUrl)) + the dual-method
 //     UX are GLA-072 (§2: the adapter's challenge() return is the opaque {kind:"redirect", authorizeUrl}; the
 //     gateway page only needs to START the redirect; the callback re-POSTs {code,state} to the gateway's
 //     existing /handoff/auth/verify as the opaque assertion — the gateway stays byte-for-byte unchanged).
@@ -109,7 +109,7 @@ export interface AuthAuthentikOptions {
   clientId: string;
   /** The confidential-client secret for the token exchange (`sensitive` — never logged, doc §9.5). */
   clientSecret: string;
-  /** The adapter's own callback URL (the `redirect_uri`, doc §2) — fronted by the same host Caddy. */
+  /** The GLA-served callback URL (the `redirect_uri`, doc §2) — fronted by the same host Caddy. */
   redirectUri: string;
   /** The OIDC scopes (space-separated). Default `"openid profile"`. */
   scopes?: string;
@@ -196,7 +196,7 @@ export class AuthAuthentikProvider implements AuthProviderPort {
    * record the pending attempt keyed by `state`. **Throws if the user has no bound subject** — an un-enrolled
    * recipient cannot be stepped up (mirrors WebAuthn's `challenge` precondition; doc §3). Returns the opaque
    * {@link RedirectChallenge} (`{kind:"redirect", authorizeUrl}`); the human authenticates at authentik and is
-   * redirected back to the adapter callback with `?code&state`.
+   * redirected back to GLA's callback page with `?code&state`.
    */
   async challenge(userId: UserIdentity["id"]): Promise<AuthChallenge> {
     if (this.subjects.get(userId) === undefined) {
