@@ -16,7 +16,12 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { StringSetStore } from "@gla/capability";
-import type { CapabilityId, MutableRevocations, RevocationSnapshot } from "@gla/kernel";
+import {
+  type CapabilityId,
+  type MutableRevocations,
+  type RevocationSnapshot,
+  redactOperatorText,
+} from "@gla/kernel";
 
 const STATE_SCHEMA_VERSION = 1;
 const STATE_KEY_BYTES = 32;
@@ -177,18 +182,7 @@ export class DaemonStateError extends Error {
 
 /** Redact bearer/credential-shaped values before diagnostics, repair output, logs, or public errors. */
 export function redactDaemonState(value: unknown): string {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
-  return text
-    .replace(
-      /\b(grant|code|state|nonce|code_verifier|codeVerifier|id_token|access_token|refresh_token|client_secret|clientSecret|secret_ref|secretRef|token)=([^&\s"']+)/gi,
-      "$1=<redacted>",
-    )
-    .replace(
-      /"?(grant|code|state|nonce|code_verifier|codeVerifier|id_token|access_token|refresh_token|client_secret|clientSecret|secret_ref|secretRef|token)"?\s*:\s*"[^"]*"/gi,
-      '"$1":"<redacted>"',
-    )
-    .replace(/gla_[A-Za-z0-9._~+/=-]{16,}/g, "gla_<redacted>")
-    .replace(/cap_[A-Za-z0-9._~+/=-]{8,}/g, "cap_<redacted>");
+  return redactOperatorText(value);
 }
 
 /** Secure daemon state root. Concrete filesystem mechanics live in the app composition root. */

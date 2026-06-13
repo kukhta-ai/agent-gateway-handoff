@@ -4,10 +4,10 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — ready for GLA-084 operator and installer redaction hardening"
-branch: feature/authentik
+phase_name: "Autonomous build — GLA-084 operator and installer redaction hardening"
+branch: feature/authentik-task-084
 epic: authentik-hardening-077-094
-active_story: null
+active_story: GLA-084
 review_cycle: 0
 follow_on_scope:
   tasks: "GLA-077..GLA-094"
