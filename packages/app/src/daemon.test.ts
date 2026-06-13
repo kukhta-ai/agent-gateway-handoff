@@ -821,6 +821,9 @@ describe("deployment templates — public base path guidance", () => {
     expect(combined).toMatch(/not (a )?GLA grant/i);
     expect(combined).toMatch(/GLA_AUTH_PROVIDER=authentik/i);
     expect(combined).toMatch(/Agent Bridge[\s\S]*Never expose|bridge remains local-only/i);
+    expect(edge).toMatch(/Access logs are intentionally not enabled/i);
+    expect(edge).toMatch(/query strings[\s\S]*Sec-WebSocket-Protocol[\s\S]*(omitted|redacted)/i);
+    expect(edge).not.toMatch(/^\s*log\s*$/m);
   });
 });
 

@@ -136,6 +136,16 @@ afterEach(async () => {
   }
 });
 
+function headerText(headers: Headers): string {
+  const lines: string[] = [];
+  headers.forEach((value, key) => lines.push(`${key}: ${value}`));
+  return lines.join("\n");
+}
+
+function cookiePair(setCookie: string, name: string): string {
+  return setCookie.match(new RegExp(`${name}=[^;,]+`))?.[0] ?? "";
+}
+
 describe("Access Gateway — GET /enroll grant enforcement (GLA-012 AC#2)", () => {
   it("serves the enrollment page on a VALID grant (HTML + the WebAuthn ceremony)", async () => {
     const { base, close } = await bootGateway(new StubGrants(), new StubIdentity());
@@ -150,7 +160,44 @@ describe("Access Gateway — GET /enroll grant enforcement (GLA-012 AC#2)", () =
     expect(html).toMatch(/Complete enrollment/);
     expect(html).toMatch(/Start enrollment/);
     expect(html).toMatch(/navigator\.credentials\.create/);
-    expect(html).toMatch(/params\.has\("grant"\).*history\.replaceState/);
+    expect(html).toContain('new URLSearchParams(location.search).has("grant")');
+    expect(html).toContain('history.replaceState(null, "", location.pathname)');
+  });
+
+  it("keeps the raw enrollment grant out of public HTML and response headers after bootstrap", async () => {
+    const canary = "enroll-grant-canary-089";
+    const grants = new StubGrants();
+    grants.validTokens.set(canary, "nonce-canary-089");
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const page = await fetch(`${base}/enroll?grant=${encodeURIComponent(canary)}`);
+    expect(page.status).toBe(200);
+    const pageHeaders = headerText(page.headers);
+    const html = await page.text();
+    expect(pageHeaders).not.toContain(canary);
+    expect(html).not.toContain(canary);
+    const bootstrapCookie = cookiePair(page.headers.get("set-cookie") ?? "", "gla_enroll_boot");
+    expect(bootstrapCookie).toMatch(/^gla_enroll_boot=/);
+
+    const options = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: bootstrapCookie },
+      body: JSON.stringify({}),
+    });
+    expect(options.status).toBe(200);
+    expect(headerText(options.headers)).not.toContain(canary);
+    expect(await options.text()).not.toContain(canary);
+
+    const verify = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: bootstrapCookie },
+      body: JSON.stringify({ attestation: { fake: true } }),
+    });
+    expect(verify.status).toBe(200);
+    expect(headerText(verify.headers)).not.toContain(canary);
+    expect(await verify.text()).not.toContain(canary);
   });
 
   it("ABSENT grant → 400, the refusal page, no enrollment work", async () => {

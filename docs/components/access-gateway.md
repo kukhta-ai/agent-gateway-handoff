@@ -41,6 +41,17 @@ the route transport. Adding a different entrypoint client must not add a new aut
 
 Grant capabilities (verified), `RevocationEntry` cache, `Route` authorization state (path, grant, session/entrypoint resource), a reverse-proxy transport binding (protocol + upstream), and provider browser-client asset mounts keyed by opaque client `ref`.
 
+## Bearer-bearing public surfaces
+
+Recipient-facing invite and handoff links may carry a raw GLA grant only at the delivery/bootstrap seam. On the first `GET`, the Access Gateway verifies the raw grant, immediately serves a no-store/no-referrer page, and moves browser continuity to short-lived same-origin HttpOnly tickets:
+
+- enrollment and handoff POSTs resolve the grant from a server-side bootstrap ticket; legacy body grants remain a compatibility path, not the browser path;
+- delegated provider redirects preserve only non-secret route/client context or a marker in same-origin `sessionStorage`; authentik and other external providers see only their own `code/state` parameters;
+- browser stream opens use the public route path plus a one-use HttpOnly stream ticket, not `?grant=` in the WebSocket URL;
+- rendered HTML, JSON data islands, `sessionStorage`, public response bodies, response headers, referrers, and gateway-served client assets must never contain raw grants after bootstrap.
+
+All gateway-served enrollment, handoff, callback, refusal, unavailable, and security-bearing JSON responses use `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and `X-Content-Type-Options: nosniff`. Edge exposure templates must not log grant-bearing request targets or sensitive headers by default. If an operator enables access logs outside the template, query strings plus `Cookie`, `Authorization`, and `Sec-WebSocket-Protocol` header values must be omitted or redacted before storage.
+
 ## In scenario 01
 
 Phase E (one-time) — fronts recipient enrollment: verifies the single-use `operator-discharge` enrollment grant the invite carries, then forwards the registration flow to Identity + Auth. Phase 6 — verify `grant-1`, find auth assurance insufficient for the deployment policy → trigger step-up, then authorize the upgrade and proxy through the mounted transport binding. Phase 12 — verify `grant-2`, reuse auth only if the retained assurance still satisfies the same policy, proxy to the same capsule entrypoint resource. Phases 8 / 13 — on revoke, force-close the live transport sockets.

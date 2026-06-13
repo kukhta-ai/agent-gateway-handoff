@@ -23,6 +23,8 @@ const JSON_SECRET_FIELD_RE =
 const CANARY_SECRET_VALUE_RE =
   /\b[A-Za-z0-9._~+/-]*(?:secret|token|grant)[A-Za-z0-9._~+/-]*canary[A-Za-z0-9._~+/-]*\b/gi;
 
+const HTML_BREAKOUT_VALUE_RE = /<\/?script\b[^>]*>|javascript:/gi;
+
 function isRawSecretKey(key: string): boolean {
   const normalized = key.replace(/[-_]/g, "").toLowerCase();
   if (normalized === "secretref" || normalized.endsWith("secretref")) {
@@ -68,7 +70,8 @@ export function redactOperatorText(value: unknown): string {
     )
     .replace(QUERY_SECRET_KEY_RE, "$1=<redacted>")
     .replace(JSON_SECRET_FIELD_RE, '"$1":"<redacted>"')
-    .replace(CANARY_SECRET_VALUE_RE, "<redacted-canary>");
+    .replace(CANARY_SECRET_VALUE_RE, "<redacted-canary>")
+    .replace(HTML_BREAKOUT_VALUE_RE, "<redacted-html>");
 }
 
 /** Recursively redact operator-facing JSON-like values without mutating the original object. */

@@ -184,10 +184,12 @@ is a **one-time, provider-agnostic generalization**, not authentik logic.
    builds it once, GLA-070's service slice consumes it).
 3. **The gateway-served callback landing page** — a small provider-neutral page on GLA's public origin (for
    example `/auth/callback`, and under the configured public base path for subpath deployments). It receives
-   `?code&state`, restores the original GLA grant from same-origin sessionStorage, and **re-POSTs `{code,state}`
-   to the gateway's existing `/handoff/auth/verify`** (for step-up) or `/enroll/verify` (for enrollment) **as
-   the opaque `assertion`/`attestation`** — i.e. **option (i)**. After the gateway authorizes the grant, the page
-   opens the existing handoff stream path so the WS-open path resumes.
+   `?code&state`, restores only non-secret same-origin context, and **re-POSTs `{code,state}` to the gateway's
+   existing `/handoff/auth/verify`** (for step-up) or `/enroll/verify` (for enrollment) **as the opaque
+   `assertion`/`attestation`** — i.e. **option (i)**. The gateway resolves the GLA grant from its short-lived
+   HttpOnly bootstrap ticket, authorizes the grant if the provider result satisfies policy, then issues a
+   short-lived HttpOnly stream ticket so the page can open the existing handoff stream path without putting the
+   grant in a WebSocket URL.
 
 **The gateway's verify path stays UNCHANGED.** `POST /handoff/auth/verify` already takes `body.assertion` as
 **opaque `unknown`** and passes it straight to `stepUp.verifyAuthentication(recipient, body.assertion)`
@@ -216,13 +218,13 @@ payload** — **none of the security-critical paths** (`docs/components/access-g
   first-class review target.
 - **Grant-verify-every-request — preserved.** The page change cannot bypass anything: `/handoff/auth/options`,
   `/handoff/auth/verify`, and **every WS upgrade** still verify the recipient-bound grant statelessly
-  (signature, recipient caveat, TTL, scope, revocation) **before** anything else, exactly as today. The
-  callback's same-origin re-POST to the public-base-aware `/handoff/auth/verify` path **carries the grant** and
-  is verified like any other request — it is not a privileged path. Under a non-root `GLA_PUBLIC_BASE_URL`, the
-  browser path is prefixed (for example `/team-a/handoff/auth/verify`) while the gateway normalizes to the same
-  internal verify route before enforcing the grant. Strip-prefix proxying is supported only when the deployment
-  explicitly trusts `X-Forwarded-Prefix` behind a sanitizing edge; prefix-preserving proxying needs no trusted
-  forwarded header.
+  (signature, recipient caveat, TTL, scope, revocation) **before** anything else. The callback's same-origin
+  re-POST to the public-base-aware `/handoff/auth/verify` path is backed by the gateway's HttpOnly bootstrap
+  ticket and is verified like any other request — it is not a privileged path and the grant is not exposed to
+  authentik, sessionStorage, or the WS URL. Under a non-root `GLA_PUBLIC_BASE_URL`, the browser path is prefixed
+  (for example `/team-a/handoff/auth/verify`) while the gateway normalizes to the same internal verify route
+  before enforcing the grant. Strip-prefix proxying is supported only when the deployment explicitly trusts
+  `X-Forwarded-Prefix` behind a sanitizing edge; prefix-preserving proxying needs no trusted forwarded header.
 - **SSRF-closed WS proxy — preserved.** The proxy still opens only to a **mounted route's** `internalEndpoint`,
   replays only handshake-relevant headers (dropping `Cookie`/`Authorization`/`X-Forwarded-*`), with connect +
   idle timeouts. The page generalization touches none of this.
@@ -361,11 +363,11 @@ concentrated in the **redirect/callback realization** — the review must prove 
    burns `state` **on claim** (before the network round-trip) — confirm a concurrent/replayed callback can't
    double-spend (`see adapters/auth-authentik/src/index.ts` `runVerify` "FIX 2").
 5. **The callback as a NEW public surface.** It is the one genuinely new internet-reachable endpoint. The
-   review must confirm: it does **only** the re-POST (no other capability), it carries and the gateway
-   **re-verifies** the grant (the callback is not a privileged bypass), it is fronted by the same Caddy at a
-   non-colliding path, it is **not** the local bridge (S-6), it leaks no token/secret/`AuthFailReason` to the
-   browser (generic refusal only), and a forged callback (bad `code`/`state`) yields a clean refusal that
-   authorizes nothing.
+   review must confirm: it does **only** the re-POST (no other capability), the gateway **re-verifies** the grant
+   resolved from its HttpOnly bootstrap ticket (the callback is not a privileged bypass), it is fronted by the
+   same Caddy at a non-colliding path, it is **not** the local bridge (S-6), it leaks no raw GLA grant,
+   token/secret/`AuthFailReason`, or upstream endpoint to the browser (generic refusal only), and a forged callback
+   (bad `code`/`state`) yields a clean refusal that authorizes nothing.
 6. **Auth assurance policy is honored on the second window (reuse).** Confirm auth-reuse stores the *actual*
    strength and a later window still enforces the selected policy (a reused `password` validity must not open
    under `phishing-resistant`).

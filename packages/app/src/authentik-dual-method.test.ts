@@ -110,12 +110,20 @@ function openUpgrade(
   port: number,
   path: string,
   grant: string,
+  headers: Readonly<Record<string, string>> = {},
+  opts: { grantPlacement?: "query" | "none" } = {},
 ): Promise<{ firstChunk: string; socket: Socket }> {
   return new Promise((resolve, reject) => {
     const socket = netConnect({ host, port }, () => {
-      const target = `${path}?grant=${encodeURIComponent(grant)}`;
+      const target =
+        (opts.grantPlacement ?? "query") === "query"
+          ? `${path}?grant=${encodeURIComponent(grant)}`
+          : path;
+      const extraHeaders = Object.entries(headers)
+        .map(([k, v]) => `${k}: ${v}\r\n`)
+        .join("");
       socket.write(
-        `GET ${target} HTTP/1.1\r\nHost: ${host}:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+        `GET ${target} HTTP/1.1\r\nHost: ${host}:${port}\r\n${extraHeaders}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
       );
     });
     let firstChunk = "";
@@ -164,15 +172,17 @@ function executeHandoffCallback(
   html: string,
   args: {
     base: string;
-    grant: string;
     search: string;
     streamPath: string;
+    cookie?: string;
   },
-): { fetchCalls: Array<{ input: string; init: RequestInit }>; status: { textContent: string } } {
+): {
+  fetchCalls: Array<{ input: string; init: RequestInit; response: Response }>;
+  status: { textContent: string };
+} {
   const status = { textContent: "", className: "" };
-  const fetchCalls: Array<{ input: string; init: RequestInit }> = [];
+  const fetchCalls: Array<{ input: string; init: RequestInit; response: Response }> = [];
   const handoffState = {
-    grant: args.grant,
     path: ROUTE_PATH,
     streamPath: args.streamPath,
   };
@@ -197,8 +207,14 @@ function executeHandoffCallback(
     },
     encodeURIComponent,
     fetch: vi.fn(async (input: string, init: RequestInit) => {
-      fetchCalls.push({ input, init });
-      return fetch(new URL(input, args.base).toString(), init);
+      const headers = new Headers(init.headers);
+      if (args.cookie !== undefined) {
+        headers.set("cookie", args.cookie);
+      }
+      const nextInit = { ...init, headers };
+      const response = await fetch(new URL(input, args.base).toString(), nextInit);
+      fetchCalls.push({ input, init: nextInit, response });
+      return response;
     }),
     history: { replaceState: vi.fn() },
     location: {
@@ -366,11 +382,15 @@ async function stepUpWith(
 async function beginCallbackStepUp(
   h: DualHarness,
   grant: string,
-): Promise<{ authorizeUrl: URL; code: string; state: string }> {
+): Promise<{ authorizeUrl: URL; code: string; state: string; bootstrapCookie: string }> {
+  const page = await fetch(`${h.base}${ROUTE_PATH}?grant=${encodeURIComponent(grant)}`);
+  expect(page.status).toBe(200);
+  const bootstrapCookie = cookiePair(page.headers.get("set-cookie") ?? "", "gla_handoff_boot");
+  expect(bootstrapCookie).toMatch(/^gla_handoff_boot=/);
   const optRes = await fetch(`${h.base}/handoff/auth/options`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grant, path: ROUTE_PATH }),
+    headers: { "content-type": "application/json", cookie: bootstrapCookie },
+    body: JSON.stringify({ path: ROUTE_PATH }),
   });
   expect(optRes.status).toBe(200);
   const challenge = (await optRes.json()) as { kind?: string; authorizeUrl?: string };
@@ -380,7 +400,11 @@ async function beginCallbackStepUp(
   const nonce = authorizeUrl.searchParams.get("nonce") ?? "";
   const code = `callback-${state}`;
   await h.fake.stageValidLogin(code, { sub: h.boundSub, nonce, amr: ["swk"] });
-  return { authorizeUrl, code, state };
+  return { authorizeUrl, code, state, bootstrapCookie };
+}
+
+function cookiePair(setCookie: string, name: string): string {
+  return setCookie.match(new RegExp(`${name}=[^;,]+`))?.[0] ?? "";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -397,7 +421,7 @@ describe("AC#1/#2/#5 · both methods satisfy password-permitted policy (passkey�
     });
     const grant = "session-grant-sentinel";
     h.grants.validToken = grant;
-    const { authorizeUrl, code, state } = await beginCallbackStepUp(h, grant);
+    const { authorizeUrl, code, state, bootstrapCookie } = await beginCallbackStepUp(h, grant);
     const redirectUri = new URL(authorizeUrl.searchParams.get("redirect_uri") ?? "");
     expect(redirectUri.origin).toBe("https://gla.example");
     expect(redirectUri.pathname).toBe("/auth/callback");
@@ -412,7 +436,7 @@ describe("AC#1/#2/#5 · both methods satisfy password-permitted policy (passkey�
     expect(html).toContain("Completing sign-in");
     const { fetchCalls } = executeHandoffCallback(html, {
       base: h.base,
-      grant,
+      cookie: bootstrapCookie,
       search: `?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
       streamPath: ROUTE_PATH,
     });
@@ -420,11 +444,23 @@ describe("AC#1/#2/#5 · both methods satisfy password-permitted policy (passkey�
     await waitForAssertion(() => expect(h.gateway.isGrantAuthorized(GRANT_ID)).toBe(true));
     expect(fetchCalls[0]?.input).toBe("/handoff/auth/verify");
     expect(JSON.parse(String(fetchCalls[0]?.init.body))).toEqual({
-      grant,
       path: ROUTE_PATH,
       assertion: { code, state },
     });
-    const up = await openUpgrade(h.host, h.port, ROUTE_PATH, grant);
+    const streamCookie = cookiePair(
+      fetchCalls[0]?.response.headers.get("set-cookie") ?? "",
+      "gla_handoff",
+    );
+    expect(streamCookie).toMatch(/^gla_handoff=/);
+    expect(streamCookie).not.toContain(grant);
+    const up = await openUpgrade(
+      h.host,
+      h.port,
+      ROUTE_PATH,
+      grant,
+      { Cookie: streamCookie },
+      { grantPlacement: "none" },
+    );
     expect(up.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
     up.socket.destroy();
   });
@@ -442,7 +478,6 @@ describe("AC#1/#2/#5 · both methods satisfy password-permitted policy (passkey�
     expect(callback.status).toBe(200);
     const { status } = executeHandoffCallback(await callback.text(), {
       base: h.base,
-      grant,
       search: "?code=bad-code&state=missing-state",
       streamPath: ROUTE_PATH,
     });

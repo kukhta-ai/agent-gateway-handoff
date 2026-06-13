@@ -81,7 +81,6 @@ describe("delegated-auth callback page", () => {
     expect(fetchCalls[0]?.input).toBe("/gla/enroll/verify");
     expect(fetchCalls[0]?.init.method).toBe("POST");
     expect(JSON.parse(String(fetchCalls[0]?.init.body))).toEqual({
-      grant: "gla-grant-token",
       attestation: { code: "oidc-code", state: "oidc-state" },
     });
     expect(removedKeys).toContain(ENROLL_REDIRECT_STORAGE_KEY);
@@ -96,7 +95,6 @@ describe("delegated-auth callback page", () => {
     const fetchCalls: Array<{ input: string; init: RequestInit }> = [];
     const removedKeys: string[] = [];
     const handoffState = {
-      grant: "session-grant-token",
       path: "/handoff/sess_1",
       streamPath: "/gla/handoff/sess_1",
       client: { kind: "provider-asset", ref: "fake-viewer" },
@@ -145,7 +143,6 @@ describe("delegated-auth callback page", () => {
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]?.input).toBe("/gla/handoff/auth/verify");
     expect(JSON.parse(String(fetchCalls[0]?.init.body))).toEqual({
-      grant: "session-grant-token",
       path: "/handoff/sess_1",
       assertion: { code: "oidc-code", state: "oidc-state" },
     });
