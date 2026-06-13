@@ -116,12 +116,13 @@ verifies it before any identity code is reached — the delegated provider chang
 against the real gateway (`see packages/gateway/src/index.ts`):
 
 - The gateway's existing `/enroll` routes are **provider-agnostic** — they verify the grant and then call the
-  injected identity seam; they name no provider. `GET /enroll?grant=…` and `POST /enroll/options` do a
-  read-only `verifyEnrollmentGrantToken` (signature, recipient caveat, TTL, single-use-not-spent, class +
-  `purpose=enroll`); `POST /enroll/verify` does the **atomic** `tryConsumeEnrollmentGrantToken` (verify **and**
-  mark the single-use nonce spent in one un-interleavable step), runs the identity step, and `unspend`s on
-  failure so a genuine retry stays possible. **No public path bypasses the grant** (`access-gateway.md`
-  invariant: *"No public path bypasses it"*).
+  injected identity seam; they name no provider. `GET /enroll?grant=…` is read-only. `POST /enroll/options`
+  is read-only for in-page WebAuthn options, but if the injected identity seam returns redirect-shaped
+  delegated options (`{kind:"redirect", authorizeUrl}`), the gateway atomically consumes the single-use grant
+  before returning the provider URL and records that nonce as a pending delegated ceremony. `POST
+  /enroll/verify` consumes at verify time only for in-page ceremonies; delegated callbacks must match exactly
+  one pending consumed nonce. **No public path bypasses the grant** (`access-gateway.md` invariant: *"No
+  public path bypasses it"*).
 - This is **unchanged** for authentik: the operator-discharge grant gates *whether enrollment may start*; the
   OIDC round-trip is *how the credential is established* once it has started. The two are orthogonal — the
   grant authorizes the *operation*, authentik authenticates the *human*.
@@ -137,6 +138,15 @@ it for the **browser** path but not for the
 **service** path (`§7`, `§8`): the operator-discharge gate, the `/enroll` routes, and the single-public-entry
 invariant are all already satisfied and unchanged.
 
+Before leaving GLA's origin, the enrollment page keeps the GLA grant in same-origin browser state only long
+enough to post to GLA and then scrubs `?grant=…` from the visible URL. Gateway HTML responses use
+`Referrer-Policy: no-referrer` and `Cache-Control: no-store`, so the GLA grant is not sent to authentik as a
+referer and is not cached as a bearer URL.
+
+The pending delegated nonce is gateway-local ceremony state, not a durable enrollment fact. A process restart
+between redirect start and callback therefore fails safe: the consumed invite cannot be reused, the callback
+cannot complete without the pending nonce, and recovery is a fresh operator invite.
+
 ---
 
 ## §5 · First-run experience — un-provisioned → verifiable (AC #4)
@@ -148,10 +158,12 @@ operator action is provider-agnostic (`see packages/app/src/index.ts`/`daemon.ts
    recipient and **delivers the enrollment invite link over the channel** (recipient-bound; the CLI/Telegram
    channel). This is operator-side, **never** on the agent surface (`docs/05 §3`).
 2. **Recipient completes the one-time authentik enrollment.** The recipient opens the link; the gateway
-   verifies the grant and serves the enrollment page; the page (under the delegated provider) **redirects the
-   recipient to authentik** (`authorizeUrl` from `beginEnrollment`); the recipient authenticates once at
-   authentik; authentik redirects back to GLA's callback page; `enrollComplete(recipient, {code,state})`
-   validates and **binds the subject** (`§2`).
+   verifies the grant and serves the enrollment page; the page asks GLA for provider options. If those options
+   are delegated-redirect options, GLA consumes the enrollment grant before returning the `authorizeUrl`; the
+   page scrubs the grant-bearing URL and **redirects the recipient to authentik**. The recipient authenticates
+   once at authentik; authentik redirects back to GLA's callback page; `enrollComplete(recipient,
+   {code,state})` validates the provider callback against the pending consumed grant and **binds the subject**
+   (`§2`).
 3. **Bound.** `IdentityService.isEnrolled(recipient)` is now `true`; the recipient is verifiable for later
    handoffs. The grant is spent (single-use) — re-running needs a fresh invite (recovery = re-enrollment,
    which **replaces** the prior record; `see packages/identity/src/index.ts` `enrollComplete`).
@@ -183,7 +195,7 @@ all hold under delegation; each is shown satisfied by the **real** flow above:
 | Invariant (frozen) | How the delegated flow upholds it |
 |---|---|
 | **A recipient is verifiable only if previously enrolled.** | Step-up requires a `BoundSubject`; `challenge` throws and `verifyAssertion` fails (`subject_mismatch`) without one (`§5`). Enrollment is the *only* writer of `subjects` (`finishEnrollment`, atomic-on-verified). |
-| **Enrollment is one-time and operator-initiated, `operator-discharge`-authorized.** | Gated by the single-use grant the gateway verifies+consumes (`§4`); initiated by the operator's `enrollInvite`, never the recipient or agent unprompted. Re-enrollment needs a fresh grant. |
+| **Enrollment is one-time and operator-initiated, `operator-discharge`-authorized.** | Gated by the single-use grant the gateway verifies+consumes (`§4`); delegated redirects consume before leaving GLA's origin and callback completion is one-shot. Initiated by the operator's `enrollInvite`, never the recipient or agent unprompted. Re-enrollment needs a fresh grant. |
 | **Enrollment is never a per-task / per-handoff step.** | The OIDC round-trip happens **only** in the enrollment flow (`register`-kind attempts). A handoff step-up is a **separate** ceremony (`authenticate`-kind) against the **already-bound** subject — it never enrolls. The two attempt kinds are distinct and not cross-usable (`wrong_attempt_kind`; `see adapters/auth-authentik/src/stores.ts`). |
 | **The agent never enrolls recipients and never sees credentials.** | Enrollment is operator-side (`enrollInvite`, not the agent CLI; `docs/05 §3`); the credential lives in authentik (GLA never sees it); the adapter holds only a `sub`. |
 | **Recipient-binding originates from the channel and is only ever narrowed.** | `RecipientBinding` is still derived from the channel (`bind`/`bindFromInbound`); delegation adds a `sub` binding **under** the `userId` but never widens the channel binding. |
@@ -308,6 +320,53 @@ existing enrollment/handoff E2E shape carries over with the provider swapped.
    tested via `fake-authentik`); enrolled-vs-not is observable via `IdentityService.isEnrolled` (true after
    bind; a step-up for an un-enrolled recipient denied), coordinating the browser-callback path with GLA-072
    (`§7`, `§8`).
+
+## §10 · GLA-085 addendum — recipient-owned invitation enrollment and method-policy observability
+
+GLA-085 sharpens the deployed authentik enrollment expectation: the recipient must not receive an
+operator-generated authentik password or depend on an operator-created account. The GLA invite starts the
+GLA-controlled enrollment gate, then authentik's own invitation/enrollment flow lets the recipient create or link
+their authentik identity. GLA records only the resulting stable `sub` binding after the invite-backed OIDC
+round-trip verifies.
+
+This produces two distinct operator facts that must not be conflated:
+
+| Fact | Owner | Meaning |
+|---|---|---|
+| Authentik account exists | authentik | A provider-local user exists or can authenticate. This alone is **not** a GLA enrollment. |
+| GLA recipient enrolled/bound | GLA identity + authentik adapter | A fresh GLA enrollment invite led to a verified provider round-trip and recorded `EnrollmentRecord{credentialId=sub}` plus `BoundSubject{sub}`. This is the handoff precondition. |
+
+Operators inspect the first distinction with `gla auth diagnostics --recipient <recipient-ref>`: the command
+reports the selected provider/enrollment policy plus the **GLA-side** recipient binding state (`glaEnrolled`,
+recorded strength/assurance, and whether the handoff precondition is satisfied). It does **not** treat an
+authentik account lookup or login as enrollment.
+
+Authentik's available methods are operator-selected through authentik flows, stages, sources, and policies. The
+recipient can choose only among the stages/sources configured for that flow. GLA therefore exposes an
+`AuthEnrollmentMethodPolicy` descriptor at the app/daemon boundary, read by `gla auth diagnostics`, rather than
+hard-coding "password vs WebAuthn" as the permanent provider model. The descriptor records:
+
+- selected enrollment/authentication flow names;
+- invitation, User Write, and User Login stages;
+- credential setup stages such as recipient-owned password and WebAuthn/passkey;
+- OAuth/SAML browser sources used for external linking;
+- optional recipient choice groups, limited to choices backed by configured credential stages, sources, or
+  MFA/recovery methods;
+- MFA/recovery factors such as TOTP, email OTP, SMS OTP, static backup codes, and Duo as provider evidence, not
+  automatic stronger GLA assurance.
+
+The descriptor is diagnostic/deployment evidence. Enforcement still happens from runtime provider facts:
+`finishEnrollment` binds only after validated `{code,state}`, later `verifyAssertion` checks `sub`, and the
+gateway evaluates the provider-neutral assurance policy. If the descriptor cannot satisfy
+`GLA_AUTH_ASSURANCE_POLICY` (for example password-only methods under `phishing-resistant`), the daemon reports an
+actionable concern before the operator relies on an invite for handoff.
+
+Grant behavior stays layered: malformed requests that never present an attestation do not burn an invite, the
+in-tree WebAuthn ceremony remains retryable while the grant is still valid, and delegated redirect enrollment
+spends the GLA grant before the browser leaves GLA's origin. A delegated callback that returns `{code,state}` but
+fails authentik/OIDC verification leaves no binding and keeps that GLA enrollment grant spent; an abandoned
+delegated redirect is likewise unreusable. Recovery is therefore a fresh invite-backed authentik round trip, not
+reuse of a failed or abandoned delegated ceremony.
 
 ## Related
 

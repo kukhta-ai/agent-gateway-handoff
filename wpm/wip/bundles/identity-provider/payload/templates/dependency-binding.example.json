@@ -1,5 +1,5 @@
 {
-  "//": "EXAMPLE DependencyBinding records for the identity-provider dependency, authentik branch (GLA-074/084).",
+  "//": "EXAMPLE DependencyBinding records for the identity-provider dependency, authentik branch (GLA-074/084/085).",
   "//1": "wpm writes one rendered binding into the verify task receipt; GLA reads it and re-probes it. Dynamic",
   "//2": "receipt evidence is separate from deterministic bundle metadata. Secrets are never literals here.",
   "//3": "The client secret is represented only by a secret-ref pointer resolved by the secret seam.",
@@ -34,13 +34,17 @@
         "clientId": { "kind": "literal", "ref": "gla" },
         "redirectUri": { "kind": "uri-ref", "ref": "https://57.131.31.126/auth/callback" },
         "scopes": { "kind": "literal", "ref": "openid profile" },
+        "enrollmentPolicy": {
+          "kind": "literal",
+          "ref": "authentik:gla-invitation-enrollment; credentials=password,webauthn-passkey; sources=oauth:github; choices=primary-credential[password|webauthn-passkey|oauth:github]"
+        },
         "clientSecret": { "kind": "secret-ref", "ref": "secret://gla/authentik/client-secret" }
       }
     },
     "lastProbe": {
       "at": "2026-06-13T00:00:00.000Z",
       "result": "available",
-      "detail": "discovery 200; jwks 2 keys; authorize accepts gla redirect; amr distinguishes swk to webauthn and pwd to password; enroll and re-auth keep same subject"
+      "detail": "discovery 200; jwks 2 keys; authorize accepts gla redirect; amr distinguishes swk to webauthn and pwd to password; enrollment policy descriptor visible in gla auth diagnostics; enroll and re-auth keep same subject"
     },
     "decisionNotes": [
       {
@@ -81,13 +85,17 @@
         "clientId": { "kind": "literal", "ref": "gla" },
         "redirectUri": { "kind": "uri-ref", "ref": "https://57.131.31.126/auth/callback" },
         "scopes": { "kind": "literal", "ref": "openid profile" },
+        "enrollmentPolicy": {
+          "kind": "literal",
+          "ref": "authentik:gla-invitation-enrollment; credentials=password,webauthn-passkey; sources=oauth:github; choices=primary-credential[password|webauthn-passkey|oauth:github]"
+        },
         "clientSecret": { "kind": "secret-ref", "ref": "secret://gla/authentik/client-secret" }
       }
     },
     "lastProbe": {
       "at": "2026-06-13T00:00:00.000Z",
       "result": "available",
-      "detail": "managed authentik stack is reachable; discovery, jwks, authorize, password amr, and subject stability probes passed"
+      "detail": "managed authentik stack is reachable; discovery, jwks, authorize, password amr, enrollment policy diagnostics, and subject stability probes passed"
     },
     "inverseOp": {
       "description": "Remove only the authentik stack and client registration installed by this bundle.",
@@ -127,6 +135,10 @@
         "issuer": { "kind": "uri-ref", "ref": "https://idp.example/application/o/gla/" },
         "clientId": { "kind": "literal", "ref": "gla" },
         "redirectUri": { "kind": "uri-ref", "ref": "https://57.131.31.126/auth/callback" },
+        "enrollmentPolicy": {
+          "kind": "literal",
+          "ref": "authentik:gla-invitation-enrollment; diagnostics unavailable until provider answers"
+        },
         "clientSecret": { "kind": "secret-ref", "ref": "secret://gla/authentik/client-secret" }
       }
     },

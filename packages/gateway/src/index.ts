@@ -7,9 +7,11 @@
 // Routes (Phase E):
 //   GET  /enroll?grant=<token>  → verify the grant (sig, recipient caveat, TTL, single-use NOT-spent, class +
 //                                 purpose) → serve the enrollment web page (HTML+JS running navigator.credentials.create)
-//   POST /enroll/options        → re-verify the grant → registration options (a challenge) from Identity+Auth
-//   POST /enroll/verify         → re-verify the grant → verify the attestation + ATOMICALLY store the credential
-//                                 bound to the recipient + set auth_strength=webauthn + MARK THE GRANT SPENT
+//   POST /enroll/options        → re-verify the grant → registration options from Identity+Auth. Redirect-shaped
+//                                 delegated ceremonies consume the GLA grant before the browser leaves this origin.
+//   POST /enroll/verify         → verify the attestation + ATOMICALLY store the credential bound to the recipient;
+//                                 in-page ceremonies consume here, delegated callbacks must match a pending consumed
+//                                 grant from /enroll/options.
 // On an absent/invalid/expired/wrong-recipient/REUSED grant → refuse (400/401/403) with a stable reason; NO
 // credential is stored. The grant is re-checked on EVERY enrollment request (a stale page cannot complete).
 //
@@ -90,6 +92,11 @@ export interface EnrollmentGrantPort {
    * calls {@link unspend} to roll the nonce back (so a genuine failure stays retryable).
    */
   tryConsumeEnrollmentGrantToken(token: OpaqueToken, now?: string): EnrollmentGrantVerifyResult;
+  /**
+   * Verify a signed grant whose nonce is already consumed. Used only for delegated callback completion after
+   * `/enroll/options` consumed the grant and the gateway recorded the nonce as pending.
+   */
+  verifyConsumedEnrollmentGrantToken(token: OpaqueToken, now?: string): EnrollmentGrantVerifyResult;
   /** Roll back an optimistic consume (un-spend a nonce) when the ceremony that followed it failed. */
   unspend(nonce: string): void;
 }
@@ -360,6 +367,11 @@ export class AccessGateway {
   private readonly proxyConnectTimeoutMs: number;
   /** The WS-proxy idle timeout (ms) applied to both proxied sockets — a stalled stream cannot pin fds. 0 disables. */
   private readonly proxyIdleTimeoutMs: number;
+  /**
+   * Delegated enrollment redirects consume the GLA grant before leaving this origin. The callback may finish only
+   * once for a nonce recorded here; abandonment leaves the grant spent and the pending attempt harmlessly unusable.
+   */
+  private readonly pendingDelegatedEnrollmentNonces = new Set<string>();
 
   constructor(opts: GatewayOptions) {
     this.grants = opts.grants;
@@ -601,7 +613,8 @@ export class AccessGateway {
 
   /**
    * `POST /enroll/options` — re-verify the grant (every request), then return registration options for the bound
-   * recipient. No bypass: a request without a valid grant is refused before any options are produced.
+   * recipient. Redirect-shaped delegated options spend the GLA grant before the browser leaves this origin; abandoning
+   * the provider flow then requires a fresh invite. In-page WebAuthn options stay retryable until verify consumes.
    */
   private async handleEnrollOptions(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const grants = this.grants;
@@ -626,18 +639,29 @@ export class AccessGateway {
       return;
     }
     const options = await identity.enrollmentOptions(verified.recipient, grant as OpaqueToken);
+    if (isDelegatedEnrollmentOptions(options)) {
+      const consumed = grants.tryConsumeEnrollmentGrantToken(grant as OpaqueToken);
+      if (!consumed.ok) {
+        this.sendJson(
+          res,
+          statusForReason(consumed.reason),
+          this.errBody(consumed.reason, "enrollment grant rejected"),
+        );
+        return;
+      }
+      this.pendingDelegatedEnrollmentNonces.add(consumed.nonce);
+    }
     this.sendJson(res, 200, options as Record<string, unknown>);
   }
 
   /**
-   * `POST /enroll/verify` — **atomically verify-and-consume** the grant, then verify the attestation + store the
-   * credential. No bypass: a direct POST with no/invalid grant is refused and stores nothing (GLA-012 AC#2).
+   * `POST /enroll/verify` — verify the attestation + store the credential. No bypass: a direct POST with no/invalid
+   * grant is refused and stores nothing (GLA-012 AC#2).
    *
-   * The grant is consumed (its single-use nonce marked spent) **before** the WebAuthn ceremony, atomically, so two
-   * concurrent verifies of the same grant cannot both proceed — exactly one consumes it; the loser is refused
-   * `auth.revoked` (closes the single-use TOCTOU window, GLA-013 AC#2's "one grant = one ceremony"). If the
-   * ceremony then fails (no half-bound — GLA-013 AC#4), the consume is **rolled back** (`unspend`) so the same
-   * still-valid grant stays retryable.
+   * In-page WebAuthn consumes here, before the ceremony, atomically: two concurrent verifies cannot both proceed. If
+   * the local ceremony fails, the consume is rolled back so the same still-valid grant stays retryable. Delegated
+   * callbacks are different: the grant was already consumed by redirect-shaped `/enroll/options`; callback completion
+   * must match that pending nonce once, and failure/abandonment leaves the grant spent so recovery uses a fresh invite.
    */
   private async handleEnrollVerify(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const grants = this.grants;
@@ -668,6 +692,32 @@ export class AccessGateway {
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing attestation"));
       return;
     }
+    if (isDelegatedRedirectAttestation(body.attestation)) {
+      const verified = grants.verifyConsumedEnrollmentGrantToken(grant as OpaqueToken);
+      if (!verified.ok) {
+        this.sendJson(
+          res,
+          statusForReason(verified.reason),
+          this.errBody(verified.reason, "enrollment grant rejected"),
+        );
+        return;
+      }
+      if (!this.pendingDelegatedEnrollmentNonces.delete(verified.nonce)) {
+        this.sendJson(res, 403, this.errBody("auth.revoked", "enrollment grant rejected"));
+        return;
+      }
+      try {
+        const record = await identity.enrollComplete(verified.recipient, body.attestation);
+        this.sendJson(res, 200, {
+          enrolled: true,
+          auth_strength: this.readEnrolledStrength(record),
+        });
+      } catch (e) {
+        const code = isCoded(e) ? e.code : "auth.insufficient";
+        this.sendJson(res, 403, this.errBody(code, "enrollment attestation did not verify"));
+      }
+      return;
+    }
     // ATOMIC verify-and-consume: marks the single-use nonce spent in the same synchronous step as the verify, so
     // a concurrent second verify of the same grant observes it already spent and is refused.
     const verified = grants.tryConsumeEnrollmentGrantToken(grant as OpaqueToken);
@@ -683,9 +733,12 @@ export class AccessGateway {
     try {
       record = await identity.enrollComplete(verified.recipient, body.attestation);
     } catch (e) {
-      // A failed/abandoned ceremony: refuse, store NOTHING, and ROLL BACK the consume so the still-valid grant is
-      // retryable (no half-bound — GLA-013 AC#4). The error code is the typed one identity threw when present.
-      grants.unspend(verified.nonce);
+      // A failed ceremony stores NOTHING. WebAuthn's in-page attestation stays retryable with the same live grant;
+      // delegated redirect callbacks stay spent once they return, so a failed delegated enrollment cannot reuse
+      // the same GLA invite. In both cases, recovery is a fresh operator invite.
+      if (!isDelegatedRedirectAttestation(body.attestation)) {
+        grants.unspend(verified.nonce);
+      }
       const code = isCoded(e) ? e.code : "auth.insufficient";
       this.sendJson(res, 403, this.errBody(code, "enrollment attestation did not verify"));
       return;
@@ -1011,6 +1064,9 @@ export class AccessGateway {
     res.writeHead(status, {
       "content-type": "text/html; charset=utf-8",
       "content-length": Buffer.byteLength(html),
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
     });
     res.end(html);
   }
@@ -1416,6 +1472,22 @@ function isCoded(e: unknown): e is { code: ErrorCode } {
     "code" in e &&
     typeof (e as { code: unknown }).code === "string"
   );
+}
+
+function isDelegatedRedirectAttestation(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.code === "string" && typeof record.state === "string";
+}
+
+function isDelegatedEnrollmentOptions(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return record.kind === "redirect" && typeof record.authorizeUrl === "string";
 }
 
 function firstHeader(value: string | string[] | undefined): string | undefined {

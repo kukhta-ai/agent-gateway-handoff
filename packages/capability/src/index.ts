@@ -603,6 +603,25 @@ export class CapabilityService {
   }
 
   /**
+   * Verify a signed enrollment grant whose single-use nonce is already spent. Delegated browser redirects use this
+   * after `/enroll/options` has consumed the GLA grant before leaving the GLA origin; the gateway still separately
+   * tracks which consumed nonce is pending a provider callback, so an old successful grant is not accepted here.
+   */
+  verifyConsumedEnrollmentGrantToken(
+    token: OpaqueToken,
+    now: string = new Date().toISOString(),
+  ): EnrollmentGrantVerifyResult {
+    const verified = this.verifyEnrollmentGrantInner(token, undefined, now, "ignore-spent");
+    if (!verified.ok) {
+      return verified;
+    }
+    if (!this.spentNonces.has(verified.nonce)) {
+      return { ok: false, reason: "auth.revoked" };
+    }
+    return verified;
+  }
+
+  /**
    * Roll back an optimistic consume (un-spend a nonce) when the WebAuthn ceremony that followed
    * {@link tryConsumeEnrollmentGrantToken} failed — so a genuine ceremony failure leaves the grant retryable.
    * Idempotent; a no-op if the nonce was never spent.
@@ -636,6 +655,7 @@ export class CapabilityService {
     token: OpaqueToken,
     presenter: RecipientRef | undefined,
     now: string,
+    spentMode: "reject-spent" | "ignore-spent" = "reject-spent",
   ): EnrollmentGrantVerifyResult {
     const ctx: VerifyContext = {
       now: now as Iso8601,
@@ -669,7 +689,7 @@ export class CapabilityService {
       // A well-formed enrollment grant always carries a single-use nonce; its absence is a malformed grant.
       return { ok: false, reason: "auth.malformed" };
     }
-    if (this.spentNonces.has(nonce)) {
+    if (spentMode === "reject-spent" && this.spentNonces.has(nonce)) {
       // SINGLE-USE: this grant was already consumed by a prior successful enrollment — refuse the reuse.
       return { ok: false, reason: "auth.revoked" };
     }

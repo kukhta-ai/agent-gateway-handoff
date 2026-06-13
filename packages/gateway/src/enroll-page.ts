@@ -53,7 +53,7 @@ export function enrollPageHtml(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Register your passkey — GLA</title>
+<title>Complete enrollment — GLA</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.5; }
   button { font-size: 1rem; padding: 0.6rem 1.2rem; border-radius: 0.4rem; border: 1px solid #888; cursor: pointer; }
@@ -63,9 +63,9 @@ export function enrollPageHtml(
 </style>
 </head>
 <body>
-<h1>Register your passkey</h1>
-<p>Set up a passkey so you can securely open handoff links sent to you. This is a one-time setup.</p>
-<button id="go">Register passkey</button>
+<h1>Complete enrollment</h1>
+<p>Set up the sign-in method configured for this GLA deployment so you can securely open handoff links sent to you. This is a one-time setup.</p>
+<button id="go">Start enrollment</button>
 <div id="status" role="status" aria-live="polite"></div>
 <script id="enroll-data" type="application/json">${data}</script>
 <script>
@@ -137,6 +137,7 @@ export function enrollPageHtml(
   //    sessionStorage (never sent to the provider) and re-POST {code,state} to the UNCHANGED /enroll/verify as the
   //    opaque attestation. The server re-verifies+consumes the grant exactly as for an in-page attestation.
   const params = new URLSearchParams(location.search);
+  try { if (params.has("grant")) history.replaceState(null, "", location.pathname); } catch (e) {}
   const retCode = params.get("code");
   const retState = params.get("state");
   if (retCode && retState) {
