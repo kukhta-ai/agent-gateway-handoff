@@ -47,14 +47,36 @@ class StubSessionGrants implements SessionGrantPort {
   grantId: CapabilityId = GRANT_ID;
   boundRecipient: RecipientRef = recipient;
   invalidReason: ErrorCode = "auth.malformed";
+  invalidReasons = new Map<string, ErrorCode>();
+  routeProofScopes = new Map<string, string>([["valid", ROUTE_PATH]]);
   cls: "session" | "task" = "session";
 
   verifySessionGrantToken(
     token: OpaqueToken,
-    _args: { scopePath: string; now?: string },
+    args: { scopePath: string; now?: string },
   ): SessionGrantVerifyResult {
     if (token !== this.validToken) {
-      return { ok: false, reason: this.invalidReason };
+      return { ok: false, reason: this.invalidReasons.get(token) ?? this.invalidReason };
+    }
+    if (this.routeProofScopes.get(token) !== args.scopePath) {
+      return { ok: false, reason: "auth.insufficient" };
+    }
+    if (this.cls !== "session") {
+      return { ok: false, reason: "auth.insufficient" };
+    }
+    return {
+      ok: true,
+      capability: { id: this.grantId, cls: "session", caveats: [] },
+      recipient: this.boundRecipient,
+    };
+  }
+
+  proveStaleSessionGrantRoute(
+    token: OpaqueToken,
+    args: { scopePath: string; now?: string },
+  ): SessionGrantVerifyResult {
+    if (this.routeProofScopes.get(token) !== args.scopePath) {
+      return { ok: false, reason: "auth.insufficient" };
     }
     if (this.cls !== "session") {
       return { ok: false, reason: "auth.insufficient" };
@@ -351,9 +373,12 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     // No route mounted: the path is not publicly reachable.
     const res = await fetch(`${base}${ROUTE_PATH}?grant=valid`);
     expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "catalog.unknown",
+    );
   });
 
-  it("EXPIRED grant → 403 refusal page", async () => {
+  it("EXPIRED grant → typed JSON refusal, never catalog.unknown", async () => {
     const grants = new StubSessionGrants();
     grants.invalidReason = "auth.expired";
     const { base, gateway, close } = await bootHandoffGateway(grants, new StubStepUp());
@@ -361,9 +386,11 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     await gateway.mount(mountReq("ws://127.0.0.1:1/"));
     const res = await fetch(`${base}${ROUTE_PATH}?grant=expired-token`);
     expect(res.status).toBe(403);
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe("auth.expired");
   });
 
-  it("REVOKED grant → 403 refusal page", async () => {
+  it("REVOKED grant → typed JSON refusal, never catalog.unknown", async () => {
     const grants = new StubSessionGrants();
     grants.invalidReason = "auth.revoked";
     const { base, gateway, close } = await bootHandoffGateway(grants, new StubStepUp());
@@ -371,6 +398,7 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     await gateway.mount(mountReq("ws://127.0.0.1:1/"));
     const res = await fetch(`${base}${ROUTE_PATH}?grant=revoked-token`);
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe("auth.revoked");
   });
 
   it("WRONG-RECIPIENT grant → 403 refusal page (recipient mismatch)", async () => {
@@ -789,7 +817,75 @@ describe("Access Gateway — WS upgrade proxy to the capsule (GLA-038/039)", () 
     await up.closed;
     expect(up.socket.destroyed).toBe(true);
     const res = await fetch(`${base}${ROUTE_PATH}?grant=valid`);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe("auth.revoked");
+
+    const noGrant = await fetch(`${base}${ROUTE_PATH}`);
+    expect(noGrant.status).toBe(404);
+    expect(((await noGrant.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "catalog.unknown",
+    );
+
+    const garbageGrant = await fetch(`${base}${ROUTE_PATH}?grant=garbage-token`);
+    expect(garbageGrant.status).toBe(404);
+    expect(((await garbageGrant.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "catalog.unknown",
+    );
+
+    grants.invalidReasons.set("cross-route-expired", "auth.expired");
+    grants.routeProofScopes.set("cross-route-expired", "/handoff/other-session");
+    const crossRouteExpired = await fetch(`${base}${ROUTE_PATH}?grant=cross-route-expired`);
+    expect(crossRouteExpired.status).toBe(404);
+    expect(((await crossRouteExpired.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "catalog.unknown",
+    );
+
+    grants.invalidReasons.set("cross-route-revoked", "auth.revoked");
+    grants.routeProofScopes.set("cross-route-revoked", "/handoff/other-session");
+    const crossRouteRevoked = await fetch(`${base}${ROUTE_PATH}?grant=cross-route-revoked`);
+    expect(crossRouteRevoked.status).toBe(404);
+    expect(((await crossRouteRevoked.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "catalog.unknown",
+    );
+
+    const options = await fetch(`${base}/handoff/auth/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH }),
+    });
+    expect(options.status).toBe(403);
+    expect(((await options.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "auth.revoked",
+    );
+
+    const garbageOptions = await fetch(`${base}/handoff/auth/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "garbage-token", path: ROUTE_PATH }),
+    });
+    expect(garbageOptions.status).toBe(400);
+    expect(((await garbageOptions.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "usage.bad_argument",
+    );
+
+    const verify = await fetch(`${base}/handoff/auth/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", path: ROUTE_PATH, assertion: { fake: true } }),
+    });
+    expect(verify.status).toBe(403);
+    expect(((await verify.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "auth.revoked",
+    );
+
+    const staleUpgrade = await openUpgrade(host, port, ROUTE_PATH, "valid");
+    expect(staleUpgrade.firstChunk).toMatch(/403/);
+    expect(staleUpgrade.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+    expect(gateway.liveSocketCount(GRANT_ID)).toBe(0);
+
+    const garbageUpgrade = await openUpgrade(host, port, ROUTE_PATH, "garbage-token");
+    expect(garbageUpgrade.firstChunk).toMatch(/404/);
+    expect(garbageUpgrade.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
   });
 
   it("the gateway proxies to the capsule endpoint and NOTHING else (a different mounted endpoint is not reachable)", async () => {
@@ -809,6 +905,9 @@ describe("Access Gateway — WS upgrade proxy to the capsule (GLA-038/039)", () 
     // A path that is not a mounted route is 404 (no arbitrary proxy target reachable).
     const res = await fetch(`${base}/handoff/elsewhere?grant=valid`);
     expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe(
+      "catalog.unknown",
+    );
     // The mounted route reaches exactly the capsule endpoint.
     const up = await openUpgrade(host, port, ROUTE_PATH, "valid");
     expect(up.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
