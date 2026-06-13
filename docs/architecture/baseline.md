@@ -140,8 +140,10 @@ HUMAN  ──(taps link)─────▶  Access Gateway (SOLE public entry) �
   transits it and passes capability+policy verification on every request and WS upgrade. In `hermes-1`, host
   **Caddy** is the TLS edge in *front* of this — Caddy terminates TLS at `https://57.131.31.126/` and proxies
   to GLA's own Access Gateway logic on `:3000`; the Access Gateway remains the authorization PEP (Caddy is
-  transport, GLA is the membrane). Nothing else is bound publicly (a Doctor probe asserts the Bridge is never
-  on `0.0.0.0` — `identity-and-auth.md`).
+  transport, GLA is the membrane). An optional authentik proxy/forward-auth layer may pre-screen the browser at
+  the exposure layer, but it remains an outer application guard; it cannot replace the GLA grant/recipient check
+  and cannot expose the Bridge or capsule internals. Nothing else is bound publicly (a Doctor probe asserts the
+  Bridge is never on `0.0.0.0` — `identity-and-auth.md`).
 - **They meet at one capsule** (`worker` + adapters): a capsule is *not* a container — a container is one way
   to isolate one. AgentConnector attached continuously; HumanEntrypoint opened only inside recipient-bound
   handoff windows. One capsule per session; a session may re-open its window many times (scenario-01's two

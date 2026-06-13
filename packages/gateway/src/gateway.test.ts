@@ -13,6 +13,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AccessGateway, type EnrollmentGrantVerifyResult, type GatewayOptions } from "./index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
+const OUTER_PROXY_HEADERS = {
+  "x-outer-proxy-user": "recipient@example.com",
+  "x-outer-proxy-groups": "gla-users",
+  cookie: "outer_proxy_session=outer-session",
+};
 
 /** A fake verified operator-discharge capability (only the fields the gateway reads). */
 const fakeCap: Capability = {
@@ -430,6 +435,26 @@ describe("Access Gateway — POST /enroll/options + /enroll/verify grant enforce
 });
 
 describe("Access Gateway — NO BYPASS of grant verification (GLA-012 AC#2)", () => {
+  it("outer proxy headers/cookies do not replace the GLA enrollment grant", async () => {
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(new StubGrants(), identity);
+    closers.push(close);
+
+    const page = await fetch(`${base}/enroll`, {
+      headers: OUTER_PROXY_HEADERS,
+    });
+    expect(page.status).toBe(400);
+
+    const verify = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...OUTER_PROXY_HEADERS },
+      body: JSON.stringify({ attestation: { fake: "attestation" } }),
+    });
+    expect(verify.status).toBe(401);
+    expect(identity.optionsCalls).toBe(0);
+    expect(identity.completeCalls).toBe(0);
+  });
+
   it("a direct POST /enroll/verify WITHOUT a grant is refused (401), stores nothing", async () => {
     const identity = new StubIdentity();
     const { base, close } = await bootGateway(new StubGrants(), identity);
