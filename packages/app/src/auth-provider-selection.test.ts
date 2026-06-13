@@ -99,6 +99,47 @@ const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
       required: true,
     },
   ],
+  loginMethodProofs: [
+    {
+      method: "password",
+      kind: "password",
+      label: "Password",
+      stage: "gla-password-prompt",
+      status: "verified",
+      authStrength: "password",
+      assuranceLevel: "password",
+      observedAt: "2026-06-13T22:00:00Z",
+      evidence: { amr: ["pwd"] },
+    },
+    {
+      method: "webauthn-passkey",
+      kind: "webauthn-passkey",
+      label: "Passkey",
+      stage: "gla-webauthn-setup",
+      status: "verified",
+      authStrength: "webauthn",
+      assuranceLevel: "phishing-resistant",
+      observedAt: "2026-06-13T22:00:00Z",
+      evidence: {
+        amr: ["swk"],
+        gla_uv: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
+    },
+    {
+      method: "oauth:github",
+      kind: "external-source",
+      source: "github-oauth",
+      status: "verified",
+      authStrength: "password",
+      assuranceLevel: "password",
+      subjectStable: true,
+      observedAt: "2026-06-13T22:00:00Z",
+      evidence: { source: "github-oauth", subjectMode: "stable" },
+    },
+  ],
   notes: ["WPM verified invitation flow exposes password, passkey, and OAuth source choices."],
 });
 
@@ -279,6 +320,11 @@ describe("AC#6 · daemon parseServeArgs threads the provider switch + the authen
       expect(parsed.options.authEnrollmentPolicy?.optionalRecipientChoices[0]?.choices).toContain(
         "webauthn-passkey",
       );
+      expect(parsed.options.authEnrollmentPolicy?.loginMethodProofs?.map((p) => p.method)).toEqual([
+        "password",
+        "webauthn-passkey",
+        "oauth:github",
+      ]);
     }
   });
 
@@ -368,8 +414,76 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
       "webauthn-passkey",
       "oauth:github",
     ]);
+    expect(d.enrollmentPolicy.loginMethodProofs?.map((p) => `${p.method}:${p.status}`)).toEqual([
+      "password:verified",
+      "webauthn-passkey:verified",
+      "oauth:github:verified",
+    ]);
+    expect(d.summary).toContain("loginMethodProofs=password:verified");
     expect(d.bindingSemantics.providerAccount).toMatch(/not a GLA enrollment/i);
     expect(d.actions.join("\n")).toMatch(/MFA\/recovery factors as provider evidence/i);
+  });
+
+  it("accepts deployed passkey proof matched by stage when GLA UV, binding, and replay evidence are present", () => {
+    const policy = parseAuthEnrollmentPolicyJson(
+      JSON.stringify({
+        provider: "authentik",
+        enrollmentFlow: "gla-invitation-enrollment",
+        invitationStage: "gla-invitation-stage",
+        userWriteStage: "gla-user-write-stage",
+        credentialSetupStages: [
+          {
+            method: "password",
+            stage: "ak-stage-password",
+            authStrength: "password",
+            assuranceLevel: "password",
+          },
+          {
+            method: "passkey-choice",
+            stage: "ak-stage-webauthn-login",
+            label: "Passkey autofill",
+            authStrength: "webauthn",
+            assuranceLevel: "phishing-resistant",
+            providerEvidence: {
+              userVerified: true,
+              recipientBound: true,
+              replayResistant: true,
+            },
+          },
+        ],
+        loginMethodProofs: [
+          {
+            method: "observed-password-path",
+            stage: "ak-stage-password",
+            status: "verified",
+            authStrength: "password",
+            assuranceLevel: "password",
+            evidence: { amr: ["pwd"] },
+          },
+          {
+            method: "observed-passkey-path",
+            stage: "ak-stage-webauthn-login",
+            status: "verified",
+            authStrength: "webauthn",
+            assuranceLevel: "phishing-resistant",
+            evidence: {
+              amr: ["swk"],
+              gla_uv: true,
+              recipientBound: true,
+              replayResistant: true,
+            },
+          },
+        ],
+      }),
+      "authentik",
+    );
+    const d = authEnrollmentDiagnostics({
+      authProvider: "authentik",
+      authAssuranceProfile: "phishing-resistant",
+      enrollmentPolicy: policy,
+    });
+    expect(d.concerns).toEqual([]);
+    expect(d.summary).toContain("observed-passkey-path:verified");
   });
 
   it("flags authentik proxy/forward-auth as an outer guard when GLA OIDC is not selected", () => {
@@ -419,6 +533,15 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
         credentialSetupStages: [
           { method: "password", authStrength: "password", assuranceLevel: "password" },
         ],
+        loginMethodProofs: [
+          {
+            method: "password",
+            status: "verified",
+            authStrength: "password",
+            assuranceLevel: "password",
+            evidence: { amr: ["pwd"] },
+          },
+        ],
       }),
       "authentik",
     );
@@ -429,6 +552,228 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
     });
     expect(d.concerns.join("\n")).toMatch(/do not prove.*phishing-resistant/i);
     expect(d.actions.join("\n")).toMatch(/WebAuthn\/passkey/i);
+  });
+
+  it("flags declared authentik methods when no deployed login-method proof was recorded", () => {
+    const policy = parseAuthEnrollmentPolicyJson(
+      JSON.stringify({
+        provider: "authentik",
+        enrollmentFlow: "gla-invitation-enrollment",
+        invitationStage: "gla-invitation-stage",
+        userWriteStage: "gla-user-write-stage",
+        credentialSetupStages: [
+          { method: "password", authStrength: "password", assuranceLevel: "password" },
+          {
+            method: "webauthn-passkey",
+            authStrength: "webauthn",
+            assuranceLevel: "phishing-resistant",
+            providerEvidence: {
+              userVerified: true,
+              recipientBound: true,
+              replayResistant: true,
+            },
+          },
+        ],
+      }),
+      "authentik",
+    );
+    const d = authEnrollmentDiagnostics({
+      authProvider: "authentik",
+      authAssuranceProfile: "phishing-resistant",
+      enrollmentPolicy: policy,
+    });
+    expect(d.concerns.join("\n")).toMatch(/deployed login-method proof is not declared/i);
+    expect(d.actions.join("\n")).toMatch(/record loginMethodProofs/i);
+  });
+
+  it("flags verified login-method proofs that omit emitted evidence or GLA assurance mapping", () => {
+    const policy = parseAuthEnrollmentPolicyJson(
+      JSON.stringify({
+        provider: "authentik",
+        enrollmentFlow: "gla-invitation-enrollment",
+        invitationStage: "gla-invitation-stage",
+        userWriteStage: "gla-user-write-stage",
+        credentialSetupStages: [
+          { method: "password", authStrength: "password", assuranceLevel: "password" },
+        ],
+        externalSources: [
+          {
+            kind: "oauth",
+            name: "github",
+            source: "github-oauth",
+            assuranceLevel: "password",
+          },
+        ],
+        loginMethodProofs: [
+          {
+            method: "password",
+            status: "verified",
+          },
+          {
+            method: "oauth:github",
+            source: "github-oauth",
+            status: "verified",
+            subjectStable: true,
+          },
+        ],
+      }),
+      "authentik",
+    );
+    const d = authEnrollmentDiagnostics({
+      authProvider: "authentik",
+      authAssuranceProfile: "password-permitted",
+      enrollmentPolicy: policy,
+    });
+    expect(d.concerns.join("\n")).toMatch(/password.*lacks GLA assurance mapping/i);
+    expect(d.concerns.join("\n")).toMatch(/password.*lacks emitted provider evidence/i);
+    expect(d.concerns.join("\n")).toMatch(/password fallback.*no verified deployed password/i);
+    expect(d.concerns.join("\n")).toMatch(/oauth:github.*lacks GLA assurance mapping/i);
+    expect(d.concerns.join("\n")).toMatch(/oauth:github.*lacks emitted provider evidence/i);
+    expect(d.concerns.join("\n")).toMatch(/oauth:github.*no verified deployed source/i);
+  });
+
+  it("flags login-method proofs that overstate phishing-resistant assurance beyond reported strength", () => {
+    const policy = parseAuthEnrollmentPolicyJson(
+      JSON.stringify({
+        provider: "authentik",
+        enrollmentFlow: "gla-invitation-enrollment",
+        invitationStage: "gla-invitation-stage",
+        userWriteStage: "gla-user-write-stage",
+        credentialSetupStages: [
+          {
+            method: "webauthn-passkey",
+            authStrength: "webauthn",
+            assuranceLevel: "phishing-resistant",
+            providerEvidence: {
+              userVerified: true,
+              recipientBound: true,
+              replayResistant: true,
+            },
+          },
+        ],
+        loginMethodProofs: [
+          {
+            method: "webauthn-passkey",
+            status: "verified",
+            authStrength: "password",
+            assuranceLevel: "phishing-resistant",
+            evidence: {
+              amr: ["swk"],
+              gla_uv: true,
+              recipientBound: true,
+              replayResistant: true,
+            },
+          },
+        ],
+      }),
+      "authentik",
+    );
+    const d = authEnrollmentDiagnostics({
+      authProvider: "authentik",
+      authAssuranceProfile: "phishing-resistant",
+      enrollmentPolicy: policy,
+    });
+    expect(d.concerns.join("\n")).toMatch(/webauthn-passkey.*overstates.*phishing-resistant/i);
+    expect(d.concerns.join("\n")).toMatch(/no verified deployed proof shows UV-backed/i);
+  });
+
+  it("flags deferred passkey proof as password-only risk under phishing-resistant policy", () => {
+    const policy = parseAuthEnrollmentPolicyJson(
+      JSON.stringify({
+        provider: "authentik",
+        enrollmentFlow: "gla-invitation-enrollment",
+        invitationStage: "gla-invitation-stage",
+        userWriteStage: "gla-user-write-stage",
+        credentialSetupStages: [
+          { method: "password", authStrength: "password", assuranceLevel: "password" },
+          {
+            method: "webauthn-passkey",
+            authStrength: "webauthn",
+            assuranceLevel: "phishing-resistant",
+            providerEvidence: {
+              userVerified: true,
+              recipientBound: true,
+              replayResistant: true,
+            },
+          },
+        ],
+        loginMethodProofs: [
+          {
+            method: "password",
+            status: "verified",
+            authStrength: "password",
+            assuranceLevel: "password",
+            evidence: { amr: ["pwd"] },
+          },
+          {
+            method: "webauthn-passkey",
+            status: "deferred",
+            authStrength: "webauthn",
+            assuranceLevel: "phishing-resistant",
+            diagnostics: ["live-passkey-browser-proof-not-run"],
+            evidence: { amr: ["swk"], gla_uv: true },
+          },
+        ],
+      }),
+      "authentik",
+    );
+    const d = authEnrollmentDiagnostics({
+      authProvider: "authentik",
+      authAssuranceProfile: "phishing-resistant",
+      enrollmentPolicy: policy,
+    });
+    expect(d.concerns.join("\n")).toMatch(/webauthn-passkey.*deferred/i);
+    expect(d.concerns.join("\n")).toMatch(/may see only password-grade choices/i);
+    expect(d.actions.join("\n")).toMatch(/Identification\/WebAuthn flow/i);
+  });
+
+  it("flags external source proof that lacks stable subject evidence", () => {
+    const policy = parseAuthEnrollmentPolicyJson(
+      JSON.stringify({
+        provider: "authentik",
+        enrollmentFlow: "gla-invitation-enrollment",
+        invitationStage: "gla-invitation-stage",
+        userWriteStage: "gla-user-write-stage",
+        credentialSetupStages: [
+          { method: "password", authStrength: "password", assuranceLevel: "password" },
+        ],
+        externalSources: [
+          {
+            kind: "oauth",
+            name: "github",
+            source: "github-oauth",
+            assuranceLevel: "password",
+          },
+        ],
+        loginMethodProofs: [
+          {
+            method: "password",
+            status: "verified",
+            authStrength: "password",
+            assuranceLevel: "password",
+            evidence: { amr: ["pwd"] },
+          },
+          {
+            method: "oauth:github",
+            kind: "external-source",
+            source: "github-oauth",
+            status: "verified",
+            authStrength: "password",
+            assuranceLevel: "password",
+            subjectStable: false,
+            evidence: { source: "github-oauth", subjectMode: "stable" },
+          },
+        ],
+      }),
+      "authentik",
+    );
+    const d = authEnrollmentDiagnostics({
+      authProvider: "authentik",
+      authAssuranceProfile: "password-permitted",
+      enrollmentPolicy: policy,
+    });
+    expect(d.concerns.join("\n")).toMatch(/oauth:github.*stable subject evidence/i);
+    expect(d.actions.join("\n")).toMatch(/Record stable subject proof/i);
   });
 
   it("flags a credential setup stage that overstates assurance beyond its reported strength", () => {
@@ -563,6 +908,25 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
             },
           },
         ],
+        loginMethodProofs: [
+          {
+            method: "webauthn-passkey",
+            status: "verified",
+            authStrength: "webauthn",
+            assuranceLevel: "phishing-resistant",
+            diagnostics: ["safe field LOGIN_PROOF_PASSWORD_CANARY_086"],
+            evidence: {
+              amr: ["swk"],
+              gla_uv: true,
+              recipientBound: true,
+              replayResistant: true,
+              claim: "LOGIN_PROOF_CREDENTIAL_CANARY_086",
+              access_token: "LOGIN_PROOF_ACCESS_TOKEN_CANARY_086",
+              password: "LOGIN_PROOF_PASSWORD_KEY_CANARY_086",
+              credential: "LOGIN_PROOF_CREDENTIAL_KEY_CANARY_086",
+            },
+          },
+        ],
       }),
       "authentik",
     );
@@ -576,7 +940,13 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
     expect(text).not.toContain("ACCESS_TOKEN_CANARY_085");
     expect(text).not.toContain("PASSWORD_CANARY_085");
     expect(text).not.toContain("CREDENTIAL_CANARY_085");
+    expect(text).not.toContain("LOGIN_PROOF_ACCESS_TOKEN_CANARY_086");
+    expect(text).not.toContain("LOGIN_PROOF_PASSWORD_CANARY_086");
+    expect(text).not.toContain("LOGIN_PROOF_CREDENTIAL_CANARY_086");
+    expect(text).not.toContain("LOGIN_PROOF_PASSWORD_KEY_CANARY_086");
+    expect(text).not.toContain("LOGIN_PROOF_CREDENTIAL_KEY_CANARY_086");
     expect(text).toContain("<redacted>");
+    expect(text).toContain("<redacted-canary>");
   });
 });
 

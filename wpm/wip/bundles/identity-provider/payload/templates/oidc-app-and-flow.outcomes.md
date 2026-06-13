@@ -69,6 +69,35 @@ an `identity-provider-5`/`-6` acceptance criterion.
       recipient output distinguishes provider-local account state from the GLA enrollment binding; no client
       secret, grant, invitation token, or password material in output.
 
+## 2.6 · Deployed login-method proofs for doctor output (GLA-086)
+
+- [ ] The verify task records `loginMethodProofs[]` as sanitized structured evidence, either in the WPM
+      `DependencyBinding.lastProbe.detail` and/or in the rendered `GLA_AUTH_ENROLLMENT_POLICY_JSON` descriptor.
+      These proofs are current observations of the deployed authentik application, not seeded defaults.
+- [ ] When `loginMethodProofs[]` is rendered into `GLA_AUTH_ENROLLMENT_POLICY_JSON`, each item uses only the
+      daemon descriptor fields accepted by GLA: `method`, `kind`, `label`, `stage`, `source`, `status`,
+      `authStrength`, `assuranceLevel`, `observedAt`, `subjectStable`, `evidence`, and `diagnostics`. Richer
+      presentation fields such as `loginChoiceVisible`, `observedClaims`, `assuranceOutcome`, or
+      `eligiblePolicies` are WPM receipt-only detail and must not be copied into the daemon env descriptor.
+- [ ] The password proof records that the password path is visible in the login flow, the relevant stage/source
+      name, `status`, `authStrength:"password"`, `assuranceLevel:"password"`, observed safe claim metadata under
+      `evidence` such as `{amr:["pwd"],gla_uv:false}`, and diagnostics explaining that it is eligible only under
+      `password-permitted`.
+- [ ] The WebAuthn/passkey proof records that a recipient with an enrolled compatible authenticator can see/use
+      the passkey path, that the validation stage requires user verification, `authStrength:"webauthn"`,
+      `assuranceLevel:"phishing-resistant"`, and observed safe claim metadata under `evidence` such as
+      `{amr:["swk"],gla_uv:true,recipientBound:true,replayResistant:true}`.
+- [ ] Each configured OAuth/SAML/social/enterprise source proof records the source id/name shown as a login
+      choice using `source`, whether enroll and re-auth yield a stable source subject / authentik `sub` using
+      `subjectStable`, and the resulting GLA mapping. Source choices are never automatically passkey-grade unless
+      explicit evidence maps them higher.
+- [ ] Missing, stale, deferred, ambiguous, or unverified method proofs are recorded as `degraded`,
+      `unavailable`, or `deferred`; they are never interpreted as `available`. A password-only screen is
+      acceptable only when the selected `GLA_AUTH_ASSURANCE_POLICY` permits password-grade evidence.
+- [ ] Proofs record only redacted facts: method ids, stage/source names, booleans, timestamps, claim labels, and
+      mapping outcomes. They never record id_tokens, access tokens, OIDC codes, code verifiers, grants,
+      invitation tokens, passwords, source tokens, or passkey material.
+
 ## 3 · A stable, immutable subject (§3.3)
 
 - [ ] The provider's **subject mode** yields a **stable, immutable `sub`** — based on the user's **UUID / hashed
