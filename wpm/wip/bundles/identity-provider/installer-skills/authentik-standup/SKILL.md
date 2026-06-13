@@ -84,8 +84,20 @@ to find on the instance; `payload/templates/oidc-app-and-flow.outcomes.md` is th
   to a **GLA-served page on GLA's own origin** (the snippet in `payload/templates/caddy-authentik-callback.snippet`).
   The callback runs the page's return-detection that re-POSTs `{code,state}` to the gateway's **unchanged**
   `/handoff/auth/verify` (resp. `/enroll/verify`). **No grant leak:** the GLA grant rides only between GLA's page
-  and GLA's verify route (same-origin sessionStorage); authentik sees only the OIDC `code`/`state`. The callback
-  is on GLA's origin, **not** authentik's, and is **not** the local bridge (the S-6 guard keeps the bridge local).
+  and GLA's own options/verify routes (same-origin browser state); GLA disables referrers on its HTML; authentik
+  sees only the OIDC `code`/`state`. The callback is on GLA's origin, **not** authentik's, and is **not** the local
+  bridge (the S-6 guard keeps the bridge local).
+- **A declared invitation enrollment method policy** — record the safe descriptor that GLA reads as
+  `GLA_AUTH_ENROLLMENT_POLICY_JSON`. It is **not** an authentik secret and it is **not** an access decision; it is
+  operator-visible deployment evidence for `gla auth diagnostics`. The descriptor names the authentik enrollment
+  flow, authentication flow, invitation stage, user-write/login stages, recipient-owned password setup stage,
+  WebAuthn/passkey setup stage, configured OAuth/SAML source stages, required method ids, optional recipient
+  choice groups, and MFA/recovery factors as provider evidence. Do **not** encode generated recipient passwords,
+  invitation tokens, OAuth/SAML tokens, TOTP seeds, recovery codes, or client secrets. If the configured
+  password/passkey/source methods cannot satisfy the selected `GLA_AUTH_ASSURANCE_POLICY`, the diagnostic must
+  report a concern before the operator relies on invites for handoff. Every optional choice and required method id
+  must be backed by a listed credential setup stage, source, or MFA/recovery method; unsupported choices are a
+  diagnostic concern and must not be advertised as recipient-selectable.
 - **First-boot bootstrap (to configure UNATTENDED)** — creating the OIDC provider/app + the `amr` scope mapping
   via the API needs an admin + an API token. authentik reads **`AUTHENTIK_BOOTSTRAP_PASSWORD`** (the initial
   `akadmin` password) and **`AUTHENTIK_BOOTSTRAP_TOKEN`** (an initial API token) **on first boot only**. The
@@ -113,6 +125,10 @@ receipt. Use the probes (next section); the acceptance evidence (`§7`):
 - a **passkey** login → `id_token.amr` maps to `webauthn`; a **password** login → maps to `password` → **both
   methods AND the distinction**;
 - **enroll → re-auth → same `sub`** → **stable subject**;
+- `gla auth diagnostics` against the running daemon reports the declared enrollment flow/stages/sources/choices,
+  `gla auth diagnostics --recipient <recipient-ref>` reports the concrete GLA-side binding state, provider-local
+  authentik accounts are not conflated with GLA recipient bindings, no secrets are emitted, and the selected
+  assurance profile has no concern (or a clear concern/action when the configured methods are too weak);
 - GLA's `doctor`/`probe` reads the binding and reports `identity-provider` **available** → **the loop closes**.
 
 Then **record the `DependencyBinding`** — the receipt that crosses the GLA↔wpm seam
@@ -122,6 +138,7 @@ Then **record the `DependencyBinding`** — the receipt that crosses the GLA↔w
 dependency:    "identity-provider"
 ownershipMode: "local-external" | "remote-external" | "managed"   // reference: local-external
 connection:    { issuer, clientId, redirectUri /*, scopes?, amrMap? */ }   // NO clientSecret here
+enrollmentPolicyRef: <safe descriptor handle or literal summary>           // NO credential/token material
 clientSecretRef: <secret-ref handle>            // the secret lives behind the secret seam, never inline
 installed:     false   // local/remote-external = adopted; true only for a Managed standup
 inverseOp:     <teardown step>   // present ONLY for a Managed (installed) stack
@@ -129,9 +146,9 @@ lastProbe:     { at, result: "available" | "degraded" | "unavailable", detail }
 ```
 
 Record **only what inspection cannot recover**: installed-vs-adopted, the inverse op (Managed only), the chosen
-issuer/redirect_uri/clientId, and the `amrMap` if you tuned it. GLA's runtime **reads** this and re-verifies it
-at runtime; **availability is system-derived** from the latest probe (a down authentik → `unavailable`,
-admission/step-up fails closed).
+issuer/redirect_uri/clientId, the safe enrollment-policy descriptor, and the `amrMap` if you tuned it. GLA's
+runtime **reads** this and re-verifies it at runtime; **availability is system-derived** from the latest probe
+(a down authentik → `unavailable`, admission/step-up fails closed).
 
 **Honest deferral.** A real authentik cannot be stood up in a constrained build/sandbox (it is a multi-container
 heavyweight stack). Where one is not available to probe, **record the end-to-end method-distinguishing proof and

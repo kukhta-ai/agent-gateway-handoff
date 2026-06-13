@@ -32,9 +32,17 @@ import {
   DEFAULT_AUTH_ASSURANCE_PROFILE,
   type OpaqueToken,
   type RecipientRef,
+  glaError,
   isRedactionOrTemplatePlaceholder,
   parseAuthAssuranceProfile,
 } from "@gla/kernel";
+import {
+  type AuthDiagnostics,
+  type AuthEnrollmentMethodPolicy,
+  authEnrollmentDiagnostics,
+  parseAuthEnrollmentPolicyJson,
+  withRecipientBindingDiagnostic,
+} from "./auth-enrollment-policy.js";
 import { redactDaemonState } from "./daemon-state.js";
 import { type AuthentikConfig, createProvisioningBridge } from "./index.js";
 
@@ -71,6 +79,12 @@ export interface ServeOptions {
    * `password-permitted` only when password-grade evidence is an intentional deployment policy.
    */
   authAssuranceProfile?: AuthAssuranceProfile;
+  /**
+   * Provider-extensible enrollment method policy descriptor, normally emitted by the identity-provider bundle after
+   * verifying the active flow/stages/sources. Used for operator diagnostics; runtime enforcement still uses provider
+   * evidence returned through the AuthProviderPort.
+   */
+  authEnrollmentPolicy?: AuthEnrollmentMethodPolicy;
   /** The authentik OIDC issuer (only when `authProvider=authentik`), e.g. `https://idp.example/application/o/gla/`. */
   authentikIssuerUrl?: string;
   /** The authentik OIDC client/application id (the id_token audience). */
@@ -81,6 +95,8 @@ export interface ServeOptions {
   authentikRedirectUri?: string;
   /** Optional OIDC scopes (space-separated). Default `openid profile`. */
   authentikScopes?: string;
+  /** JSON form of {@link authEnrollmentPolicy}; accepted from env/flags for deployment templates. */
+  authEnrollmentPolicyJson?: string;
   /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `localhost`. (WebAuthn path.) */
   rpID?: string;
   /** The human-visible RP name in the passkey UI. Default `GLA`. (WebAuthn path.) */
@@ -130,6 +146,8 @@ export interface DaemonHandle {
   enrollInvite(
     recipient: RecipientRef,
   ): Promise<{ link: string; grant: OpaqueToken; nonce: string }>;
+  /** Read-only operator diagnostics for selected auth provider, enrollment method policy, and assurance fit. */
+  authDiagnostics(): AuthDiagnostics;
   /**
    * The session ids of all currently-LIVE capsules (the worker's live-capsule truth). A graceful shutdown
    * tears every one of these down; after `close()` this is empty (the no-orphan assertion). Read-only.
@@ -164,21 +182,122 @@ export function endpointIsLocal(endpoint: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
+function authDiagnosticsInput(opts: {
+  authProvider: "webauthn" | "authentik" | undefined;
+  authAssuranceProfile: AuthAssuranceProfile | undefined;
+  authEnrollmentPolicy: AuthEnrollmentMethodPolicy | undefined;
+}): {
+  authProvider?: "webauthn" | "authentik";
+  authAssuranceProfile?: AuthAssuranceProfile;
+  enrollmentPolicy?: AuthEnrollmentMethodPolicy;
+} {
+  const input: {
+    authProvider?: "webauthn" | "authentik";
+    authAssuranceProfile?: AuthAssuranceProfile;
+    enrollmentPolicy?: AuthEnrollmentMethodPolicy;
+  } = {};
+  if (opts.authProvider !== undefined) {
+    input.authProvider = opts.authProvider;
+  }
+  if (opts.authAssuranceProfile !== undefined) {
+    input.authAssuranceProfile = opts.authAssuranceProfile;
+  }
+  if (opts.authEnrollmentPolicy !== undefined) {
+    input.enrollmentPolicy = opts.authEnrollmentPolicy;
+  }
+  return input;
+}
+
 /** Operator-facing diagnostic for whether the selected provider can satisfy the selected assurance profile. */
 export function authAssuranceProviderDiagnostic(opts: {
   authProvider?: "webauthn" | "authentik";
   authAssuranceProfile?: AuthAssuranceProfile;
+  authEnrollmentPolicy?: AuthEnrollmentMethodPolicy;
 }): string {
-  const provider = opts.authProvider ?? "webauthn";
-  const profile = opts.authAssuranceProfile ?? DEFAULT_AUTH_ASSURANCE_PROFILE;
-  if (provider === "webauthn") {
-    return profile === "password-permitted"
-      ? "webauthn reports phishing-resistant assurance, which satisfies password-permitted; no password fallback is available from this provider"
-      : "webauthn reports phishing-resistant assurance and satisfies the selected policy";
+  const d = authEnrollmentDiagnostics(
+    authDiagnosticsInput({
+      authProvider: opts.authProvider,
+      authAssuranceProfile: opts.authAssuranceProfile,
+      authEnrollmentPolicy: opts.authEnrollmentPolicy,
+    }),
+  );
+  if (d.concerns.length > 0) {
+    return `${d.summary}; concerns: ${d.concerns.join("; ")}`;
   }
-  return profile === "password-permitted"
-    ? "authentik can satisfy password-permitted when OIDC amr/acr maps to password or phishing-resistant evidence; installer/doctor must verify the mapping"
-    : "authentik can satisfy phishing-resistant only when OIDC amr/acr maps to passkey-grade evidence; installer/doctor must verify the mapping";
+  return `${d.summary}; satisfies the selected policy`;
+}
+
+function authDiagnosticsForRequest(
+  base: AuthDiagnostics,
+  identity: { getCredential(recipient: RecipientRef): unknown } | undefined,
+  arg: unknown,
+): AuthDiagnostics {
+  const recipient = recipientDiagnosticArg(arg);
+  if (recipient === undefined) {
+    return base;
+  }
+  const record = identity?.getCredential(recipient as RecipientRef);
+  if (record !== undefined && !authEnrollmentRecordLike(record)) {
+    throw new Error("identity enrollment record has an unexpected diagnostic shape");
+  }
+  return withRecipientBindingDiagnostic(base, recipient, record);
+}
+
+function recipientDiagnosticArg(arg: unknown): string | undefined {
+  if (arg === undefined) {
+    return undefined;
+  }
+  if (typeof arg === "string" && arg.length > 0) {
+    return arg;
+  }
+  if (typeof arg === "object" && arg !== null && !Array.isArray(arg)) {
+    const recipient = (arg as { recipient?: unknown }).recipient;
+    if (typeof recipient === "string" && recipient.length > 0) {
+      return recipient;
+    }
+  }
+  throw glaError(
+    "usage.bad_argument",
+    "auth diagnostics recipient must be a non-empty recipient ref",
+  );
+}
+
+function authEnrollmentRecordLike(record: unknown): record is {
+  userId: string;
+  authStrength: "none" | "password" | "webauthn";
+  authAssurance?: { level?: "none" | "password" | "phishing-resistant" };
+} {
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    return false;
+  }
+  const candidate = record as { userId?: unknown; authStrength?: unknown; authAssurance?: unknown };
+  if (typeof candidate.userId !== "string") {
+    return false;
+  }
+  if (
+    candidate.authStrength !== "none" &&
+    candidate.authStrength !== "password" &&
+    candidate.authStrength !== "webauthn"
+  ) {
+    return false;
+  }
+  if (candidate.authAssurance === undefined) {
+    return true;
+  }
+  if (
+    typeof candidate.authAssurance !== "object" ||
+    candidate.authAssurance === null ||
+    Array.isArray(candidate.authAssurance)
+  ) {
+    return false;
+  }
+  const level = (candidate.authAssurance as { level?: unknown }).level;
+  return (
+    level === undefined ||
+    level === "none" ||
+    level === "password" ||
+    level === "phishing-resistant"
+  );
 }
 
 /**
@@ -214,6 +333,21 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   //    the authentik config object only when selected (its secret is `sensitive` — passed inward, never logged).
   const authentikConfig =
     opts.authProvider === "authentik" ? buildAuthentikConfig(opts, publicBase) : undefined;
+  const authEnrollmentPolicy =
+    opts.authEnrollmentPolicy ??
+    (opts.authEnrollmentPolicyJson !== undefined
+      ? parseAuthEnrollmentPolicyJson(
+          opts.authEnrollmentPolicyJson,
+          opts.authProvider ?? "webauthn",
+        )
+      : undefined);
+  const authDiagnostics = authEnrollmentDiagnostics(
+    authDiagnosticsInput({
+      authProvider: opts.authProvider,
+      authAssuranceProfile: opts.authAssuranceProfile,
+      authEnrollmentPolicy,
+    }),
+  );
 
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
@@ -272,6 +406,8 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   const enrollInvite = stack.enrollInvite;
   const operators: OperatorOps = {
     enrollInvite: (...args: unknown[]) => enrollInvite(args[0] as RecipientRef),
+    authDiagnostics: (...args: unknown[]) =>
+      authDiagnosticsForRequest(authDiagnostics, stack.identity, args[0]),
   };
 
   // ── Bind the Agent Bridge on the LOCAL endpoint: a node:net server that hands each accepted socket to the
@@ -293,7 +429,13 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     }`,
   );
   log(`  auth assurance   : ${opts.authAssuranceProfile ?? DEFAULT_AUTH_ASSURANCE_PROFILE}`);
-  log(`  auth capability  : ${authAssuranceProviderDiagnostic(opts)}`);
+  log(`  auth enrollment  : ${authDiagnostics.summary}`);
+  for (const concern of authDiagnostics.concerns) {
+    log(`  auth concern     : ${concern}`);
+  }
+  for (const action of authDiagnostics.actions) {
+    log(`  auth action      : ${action}`);
+  }
   log(`  public base url  : ${publicBaseUrl}  (handoff/enroll links use this)`);
   log(
     `  doctor           : bridge endpoint is ${bridgeIsLocal ? "LOCAL ✓ (not 0.0.0.0)" : "NON-LOCAL ✗ — REFUSED"} (S-6 single-public-entry)`,
@@ -320,6 +462,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     publicBaseUrl,
     bridgeIsLocal,
     enrollInvite,
+    authDiagnostics: () => authDiagnostics,
     liveSessions: () => stack.lifecycle.liveSessions(),
     close,
   };
@@ -475,6 +618,7 @@ Usage:
             [--auth-provider <webauthn|authentik>] [--auth-assurance-policy <phishing-resistant|password-permitted>]
             [--authentik-issuer-url <url>] [--authentik-client-id <id>]
             [--authentik-client-secret <secret>] [--authentik-redirect-uri <url>] [--authentik-scopes <s>]
+            [--auth-enrollment-policy-json <json>]
 
 Binds:
   • the Access Gateway (PUBLIC) on  host:port           default 0.0.0.0:3000   (front with Caddy)
@@ -490,7 +634,7 @@ Auth assurance (--auth-assurance-policy, default phishing-resistant): unset dema
 
 Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_TRUST_FORWARDED_PREFIX,
   GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_WORKSPACE_ROOT, GLA_STATE_ROOT,
-  GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY,
+  GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY, GLA_AUTH_ENROLLMENT_POLICY_JSON,
   GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET,
   GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
 
@@ -629,6 +773,16 @@ export function parseServeArgs(
   if (authentikScopes !== undefined) {
     options.authentikScopes = authentikScopes;
   }
+  const authEnrollmentPolicyJson =
+    str("auth-enrollment-policy-json", "GLA_AUTH_ENROLLMENT_POLICY_JSON") ??
+    str("authentik-enrollment-policy-json", "GLA_AUTHENTIK_ENROLLMENT_POLICY_JSON");
+  if (authEnrollmentPolicyJson !== undefined) {
+    options.authEnrollmentPolicyJson = authEnrollmentPolicyJson;
+    options.authEnrollmentPolicy = parseAuthEnrollmentPolicyJson(
+      authEnrollmentPolicyJson,
+      options.authProvider ?? "webauthn",
+    );
+  }
   const launcher = str("launcher", "GLA_LAUNCHER_MODE");
   if (launcher !== undefined) {
     if (launcher !== "auto" && launcher !== "full" && launcher !== "headless") {
@@ -678,6 +832,7 @@ function validateServeOptions(opts: ServeOptions): void {
   assertUsableServeOption("authentikClientSecret", opts.authentikClientSecret);
   assertUsableServeOption("authentikRedirectUri", opts.authentikRedirectUri);
   assertUsableServeOption("authentikScopes", opts.authentikScopes);
+  assertUsableServeOption("authEnrollmentPolicyJson", opts.authEnrollmentPolicyJson);
   assertUsableServeOption("rpID", opts.rpID);
   assertUsableServeOption("rpName", opts.rpName);
   assertUsableServeOption("expectedOrigin", opts.expectedOrigin);

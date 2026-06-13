@@ -35,12 +35,21 @@ class StubGrants {
   /** The reason an invalid token fails with (default malformed). */
   invalidReason: ErrorCode = "auth.malformed";
 
-  private verify(token: string): EnrollmentGrantVerifyResult {
+  private verify(
+    token: string,
+    spentMode: "reject-spent" | "require-spent" = "reject-spent",
+  ): EnrollmentGrantVerifyResult {
     const nonce = this.validTokens.get(token);
-    if (nonce === undefined || this.spent.includes(nonce)) {
+    if (nonce === undefined) {
       // A spent nonce mimics the reused-grant refusal (auth.revoked); an unknown token uses invalidReason.
-      const reason: ErrorCode = nonce !== undefined ? "auth.revoked" : this.invalidReason;
-      return { ok: false, reason };
+      return { ok: false, reason: this.invalidReason };
+    }
+    const isSpent = this.spent.includes(nonce);
+    if (spentMode === "reject-spent" && isSpent) {
+      return { ok: false, reason: "auth.revoked" };
+    }
+    if (spentMode === "require-spent" && !isSpent) {
+      return { ok: false, reason: "auth.revoked" };
     }
     return { ok: true, capability: fakeCap, recipient, nonce };
   }
@@ -56,6 +65,10 @@ class StubGrants {
     }
     return r;
   }
+  /** Verify a signed token whose nonce has already been spent by the delegated options step. */
+  verifyConsumedEnrollmentGrantToken(token: OpaqueToken): EnrollmentGrantVerifyResult {
+    return this.verify(token, "require-spent");
+  }
   /** Roll back an optimistic consume (un-spend) — called on a ceremony failure. */
   unspend(nonce: string): void {
     this.spent = this.spent.filter((n) => n !== nonce);
@@ -70,8 +83,17 @@ class StubIdentity {
   failComplete = false;
   /** An async delay inside enrollComplete (ms), so two requests are genuinely in-flight in the concurrency test. */
   completeDelayMs = 0;
+  /** An async delay inside enrollmentOptions (ms), so concurrent delegated begins can overlap. */
+  optionsDelayMs = 0;
+  redirectOptions = false;
   async enrollmentOptions(_recipient: RecipientRef, _discharge: OpaqueToken): Promise<unknown> {
     this.optionsCalls++;
+    if (this.optionsDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, this.optionsDelayMs));
+    }
+    if (this.redirectOptions) {
+      return { kind: "redirect", authorizeUrl: "https://idp.example/authorize?state=state-1" };
+    }
     return { challenge: "opts-challenge", rp: { id: "localhost" } };
   }
   async enrollComplete(_recipient: RecipientRef, _attestation: unknown): Promise<unknown> {
@@ -116,9 +138,14 @@ describe("Access Gateway — GET /enroll grant enforcement (GLA-012 AC#2)", () =
     const res = await fetch(`${base}/enroll?grant=valid`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     const html = await res.text();
-    expect(html).toMatch(/Register your passkey/);
+    expect(html).toMatch(/Complete enrollment/);
+    expect(html).toMatch(/Start enrollment/);
     expect(html).toMatch(/navigator\.credentials\.create/);
+    expect(html).toMatch(/params\.has\("grant"\).*history\.replaceState/);
   });
 
   it("ABSENT grant → 400, the refusal page, no enrollment work", async () => {
@@ -256,6 +283,123 @@ describe("Access Gateway — POST /enroll/options + /enroll/verify grant enforce
     const body = (await res.json()) as { challenge?: string };
     expect(body.challenge).toBe("opts-challenge");
     expect(identity.optionsCalls).toBe(1);
+  });
+
+  it("delegated redirect options consume the GLA grant before the browser leaves this origin", async () => {
+    const identity = new StubIdentity();
+    identity.redirectOptions = true;
+    identity.optionsDelayMs = 50;
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const res = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { kind?: string; authorizeUrl?: string };
+    expect(body.kind).toBe("redirect");
+    expect(body.authorizeUrl).toMatch(/^https:\/\/idp\.example\//);
+    expect(grants.spent).toContain("nonce-1");
+
+    const abandonedReuse = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(abandonedReuse.status).toBe(403);
+    expect(identity.completeCalls).toBe(0);
+  });
+
+  it("concurrent delegated options calls return at most one provider redirect URL", async () => {
+    const identity = new StubIdentity();
+    identity.redirectOptions = true;
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const post = () =>
+      fetch(`${base}/enroll/options`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grant: "valid" }),
+      });
+    const [a, b] = await Promise.all([post(), post()]);
+    const responses = await Promise.all(
+      [a, b].map(async (r) => ({ status: r.status, text: await r.text() })),
+    );
+    const ok = responses.filter((r) => r.status === 200);
+    const refused = responses.filter((r) => r.status === 403);
+    expect(ok.length).toBe(1);
+    expect(refused.length).toBe(1);
+    expect(JSON.parse(ok[0]?.text ?? "{}").authorizeUrl).toMatch(/^https:\/\/idp\.example\//);
+    expect(refused[0]?.text).not.toContain("idp.example");
+    expect(grants.spent).toEqual(["nonce-1"]);
+  });
+
+  it("delegated callback can complete only once against the pending consumed grant", async () => {
+    const identity = new StubIdentity();
+    identity.redirectOptions = true;
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const options = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(options.status).toBe(200);
+
+    const verify = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", attestation: { code: "code-1", state: "state-1" } }),
+    });
+    expect(verify.status).toBe(200);
+    expect(identity.completeCalls).toBe(1);
+
+    const replay = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", attestation: { code: "code-1", state: "state-1" } }),
+    });
+    expect(replay.status).toBe(403);
+    expect(identity.completeCalls).toBe(1);
+  });
+
+  it("failed delegated callback leaves the GLA grant spent and unreusable", async () => {
+    const identity = new StubIdentity();
+    identity.redirectOptions = true;
+    identity.failComplete = true;
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const options = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(options.status).toBe(200);
+
+    const verify = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", attestation: { code: "bad-code", state: "state-1" } }),
+    });
+    expect(verify.status).toBe(403);
+    expect(grants.spent).toContain("nonce-1");
+
+    identity.failComplete = false;
+    const retryOptions = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(retryOptions.status).toBe(403);
   });
 
   it("POST /enroll/options and /enroll/verify work through a configured public base path", async () => {

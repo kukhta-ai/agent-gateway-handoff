@@ -454,10 +454,16 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
     expect(JSON.parse(await reuse.text()).error.code).toBe("auth.revoked");
   });
 
-  it("an unknown-state enrollment callback is a catchable refusal and leaves the recipient unenrolled", async () => {
+  it("an unknown-state enrollment callback is a catchable refusal, leaves the recipient unenrolled, and burns that invite", async () => {
     const { origin, stack, deliveredLinks } = await authentikStack();
     await stack.enrollInvite(recipient);
     const grant = lastDeliveredGrant(deliveredLinks);
+    const optRes = await fetch(`${origin}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant }),
+    });
+    expect(optRes.status).toBe(200);
     const callback = await fetch(`${origin}/auth/callback?code=bad-code&state=missing-state`);
     expect(callback.status).toBe(200);
     const { status } = executeEnrollmentCallback(await callback.text(), {
@@ -475,7 +481,8 @@ describe("AC#2 · the single-use operator-discharge grant gate holds with the au
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ grant }),
     });
-    expect(retry.status).toBe(200);
+    expect(retry.status).toBe(403);
+    expect(JSON.parse(await retry.text()).error.code).toBe("auth.revoked");
   });
 });
 
