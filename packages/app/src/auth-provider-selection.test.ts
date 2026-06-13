@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AUTH_AUTHENTIK_MODULE } from "@gla/auth-authentik";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { describe, expect, it } from "vitest";
 import { authAssuranceProviderDiagnostic, parseServeArgs } from "./daemon.js";
 import { type AuthentikConfig, createEnrollmentStack, createProvisioningBridge } from "./index.js";
@@ -53,6 +54,7 @@ describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unc
 
   it("createProvisioningBridge() handoff with no authProvider records the WebAuthn module", () => {
     const stack = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherMode: "headless",
       handoff: { ...ENROLL_BASE },
     });
@@ -80,6 +82,7 @@ describe("AC#1/#6 · opting into authentik flips ONLY the adapter the compositio
 
   it("createProvisioningBridge() handoff with authProvider=authentik records the authentik module", () => {
     const stack = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherMode: "headless",
       handoff: { ...ENROLL_BASE, authProvider: "authentik", authentik: AUTHENTIK },
     });

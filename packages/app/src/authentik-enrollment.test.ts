@@ -30,6 +30,7 @@ import {
 } from "@gla/auth-authentik";
 import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { IdentityService } from "@gla/identity";
 import type { RecipientRef } from "@gla/kernel";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -636,6 +637,7 @@ describe("AC#5 · the default / webauthn provider's enrollment path is unchanged
 
   it("createProvisioningBridge enrollment wiring also defaults to webauthn (the handoff stack's provider is unchanged)", () => {
     const stack = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherMode: "headless",
       handoff: {
         expectedOrigin: "http://localhost:3000",

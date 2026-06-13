@@ -12,6 +12,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
@@ -76,6 +77,7 @@ describe("provisioning composition root — real `session create` + `session con
     async () => {
       const path = specFile(OK_ASSEMBLY);
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,
@@ -136,7 +138,10 @@ describe("provisioning composition root — real `session create` + `session con
     // the no-live-capsule conflict (exit 7) without spawning, we create a session via a dry-run-then-…:
     // simplest is to assert the unknown-id path (exit 5) and the conflict path is covered by the unit
     // tests + the real-CDP test above. Here we assert the CLI maps an unknown id cleanly (not a crash).
-    const stack = createProvisioningBridge({ launcherMode: "headless" });
+    const stack = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      launcherMode: "headless",
+    });
     const c = capture();
     const code = await run(["session", "connector", "sess_never"], c.out, { bridge: stack.bridge });
     expect(code).toBe(5); // unknown session id → state.not_found → exit 5 (a clean error, not a crash)
@@ -148,6 +153,7 @@ describe("provisioning composition root — real `session create` + `session con
     "#1 WIRING: the connector cap is a CHILD of the session's TASK cap (shared signer; cascade domain)",
     async () => {
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,
@@ -216,6 +222,7 @@ describe("provisioning composition root — real `session create` + `session con
     "#2 WIRING: terminal teardown REVOKES the connector cap AND drops its secret_ref binding (no residual)",
     async () => {
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,

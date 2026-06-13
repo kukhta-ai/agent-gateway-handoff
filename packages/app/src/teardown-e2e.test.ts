@@ -23,6 +23,7 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import {
   type CapabilityId,
@@ -174,6 +175,7 @@ async function provisionAndOpen(stack: ProvisioningStack): Promise<{
 function buildStack(): ProvisioningStack {
   const wsRoot = workspaceRoot();
   const stack = createProvisioningBridge({
+    dependencyBindings: referenceWpmDependencyBindings(),
     launcherMode: "headless",
     workspaceRoot: wsRoot,
     startTimeoutMs: 40_000,

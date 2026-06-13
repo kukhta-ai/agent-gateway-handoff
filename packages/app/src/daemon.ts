@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { type Server as NetServer, createServer as createIpcServer } from "node:net";
 import { dirname } from "node:path";
 import type { AgentBridge } from "@gla/bridge";
+import type { DependencyBinding } from "@gla/catalog";
 import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
 import { parsePublicBaseUrl } from "@gla/gateway";
@@ -93,6 +94,11 @@ export interface ServeOptions {
   launcherMode?: "auto" | "full" | "headless";
   /** Override the workspace root (where ephemeral temp profiles are created). */
   workspaceRoot?: string;
+  /**
+   * Structured WPM dependency binding receipts. Absent means host-touching catalog providers fail closed until
+   * deployment composition supplies machine-readable WPM receipt evidence.
+   */
+  dependencyBindings?: DependencyBinding[];
   /**
    * Restart-safe daemon state root. Critical state is stored outside capsule workspaces with 0700/0600 permissions.
    */
@@ -209,6 +215,9 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
   const stack = createProvisioningBridge({
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
     ...(opts.stateRoot !== undefined ? { stateRoot: opts.stateRoot } : {}),

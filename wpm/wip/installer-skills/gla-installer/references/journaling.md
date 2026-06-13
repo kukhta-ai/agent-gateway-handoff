@@ -38,3 +38,23 @@ about *this* environment goes into the typed fields plus one structured notes bl
 - **Repair** re-runs detection, re-checks each `--ac`, and reconciles drift by re-applying.
 - **Config** files are compared against their recorded checksums; a user-modified file is preserved with
   keep / replace / merge offered.
+
+## What GLA's runtime catalog can consume
+
+GLA does not read prose memories or infer that a dependency is available because a task looks complete. The
+runtime catalog accepts only a structured `DependencyBinding` view derived from the receipt facts above. When a
+bundle records a host-touching dependency intended for GLA, make sure the recorded notes can be translated into
+these machine-readable fields:
+
+- `source: "wpm-receipt"`;
+- dependency name and bundle identity/version;
+- declared bundle `requires`;
+- ownership mode: managed, local-external, remote-external, manual-byo, or disabled;
+- state: installed, adopted, remote, manual, or disabled;
+- connection references needed by GLA, with secrets represented only as secret refs;
+- last verify/probe result with `available`, `degraded`, or `unavailable`;
+- inverse operation and decision notes where needed for repair/uninstall safety.
+
+The catalog uses this receipt evidence to answer "did install/adoption converge?", then runs its own runtime
+probe to answer "is it healthy now?". Keep those facts separate in the receipt; GLA displays both and executes
+neither installer nor inverse operations.

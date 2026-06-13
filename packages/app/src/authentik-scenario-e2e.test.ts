@@ -52,6 +52,7 @@ import {
 } from "@gla/auth-authentik";
 import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import type { DeliverySink } from "@gla/channel-cli";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { IdentityService } from "@gla/identity";
@@ -318,6 +319,7 @@ async function coldAuthentikStack(opts: {
   const wsRoot = workspaceRoot();
   const sink: DeliverySink = { write: () => {} };
   const stack = createProvisioningBridge({
+    dependencyBindings: referenceWpmDependencyBindings(),
     launcherMode: "headless",
     workspaceRoot: wsRoot,
     startTimeoutMs: 40_000,
@@ -702,11 +704,16 @@ describe("GLA-076 AC#5 — the auth seam is full-capability: provider swap is co
       deliverySink: { write: () => {} },
     };
     // Default → in-tree WebAuthn.
-    const web = createProvisioningBridge({ launcherMode: "headless", handoff: { ...base } });
+    const web = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      launcherMode: "headless",
+      handoff: { ...base },
+    });
     expect(web.authModule).toBe(AUTH_WEBAUTHN_MODULE);
     // The switch → delegated authentik. The ONLY difference is which adapter `app` constructs (the gateway,
     // session, route, capability — every other wired seam — is byte-for-byte the same).
     const atk = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherMode: "headless",
       handoff: {
         ...base,
