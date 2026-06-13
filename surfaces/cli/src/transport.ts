@@ -25,7 +25,9 @@ import type {
   WhoamiResult,
 } from "@gla/bridge";
 import type { IndexedEntity, TemplateShowResult } from "@gla/catalog";
-import { type GlaError, type OpaqueToken, glaError } from "@gla/kernel";
+import { type GlaError, type OpaqueToken, glaError, redactOperatorText } from "@gla/kernel";
+
+const BRIDGE_ENDPOINT_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 /**
  * The exact surface the `gla` dispatcher (`run()`) invokes on "the bridge" — every noun-verb op it calls,
@@ -119,6 +121,23 @@ export function resolveClientEndpoint(env: NodeJS.ProcessEnv = process.env): str
   return ep !== undefined && ep.length > 0 ? ep : undefined;
 }
 
+/** True when a CLI bridge endpoint is local: a Unix-socket path or loopback TCP, never a public URL/host. */
+export function endpointIsLocalBridgeEndpoint(endpoint: string): boolean {
+  if (BRIDGE_ENDPOINT_URL_RE.test(endpoint)) {
+    return false;
+  }
+  const m = endpoint.match(/^(\[?[^\]]*\]?|[^:]+):(\d+)$/);
+  if (m === null) {
+    return true;
+  }
+  const host = (m[1] ?? "").replace(/^\[|\]$/g, "").toLowerCase();
+  return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
+function endpointForDiagnostic(endpoint: string): string {
+  return redactOperatorText(endpoint);
+}
+
 /** Parse an endpoint string into the node:net connect target (`{path}` for a uds, `{host,port}` for tcp). */
 export function endpointToConnectTarget(
   endpoint: string,
@@ -201,6 +220,16 @@ export class DaemonBridgeClient implements BridgeLike {
 
   /** Connect to the daemon at `endpoint` (a uds path or `host:port`). Rejects if the daemon is not running. */
   static connect(endpoint: string): Promise<DaemonBridgeClient> {
+    if (!endpointIsLocalBridgeEndpoint(endpoint)) {
+      return Promise.reject(
+        glaError(
+          "usage.bad_argument",
+          `refusing to connect to non-local Agent Bridge endpoint "${endpointForDiagnostic(
+            endpoint,
+          )}" — use a Unix socket for trusted-local operation or 127.0.0.1:<port> only for development/advanced loopback mode.`,
+        ),
+      );
+    }
     const target = endpointToConnectTarget(endpoint);
     return new Promise((resolve, reject) => {
       const socket = ipcConnect(target as never);
