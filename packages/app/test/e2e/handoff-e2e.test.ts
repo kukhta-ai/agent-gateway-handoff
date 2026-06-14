@@ -36,7 +36,7 @@ import { RouteController } from "@gla/route";
 import { type HandoffDeps, SessionService } from "@gla/session";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import type { DeliverySink } from "./index.js";
+import type { DeliverySink } from "../../src/index.js";
 
 function chromiumAvailable(): boolean {
   if (process.env.GLA_BROWSER_E2E_MODE === "optional") {

@@ -33,8 +33,12 @@ import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { IdentityService } from "@gla/identity";
 import type { RecipientRef } from "@gla/kernel";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FakeAuthentik } from "../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
-import { type EnrollmentStack, createEnrollmentStack, createProvisioningBridge } from "./index.js";
+import { FakeAuthentik } from "../../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
+import {
+  type EnrollmentStack,
+  createEnrollmentStack,
+  createProvisioningBridge,
+} from "../../src/index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
 const otherRecipient = "tg:user:999" as RecipientRef;

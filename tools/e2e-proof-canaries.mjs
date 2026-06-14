@@ -14,7 +14,13 @@ const cases = [
 for (const c of cases) {
   const result = spawnSync(
     "pnpm",
-    ["exec", "vitest", "run", "packages/app/src/authentik-scenario-e2e.test.ts", "--reporter=dot"],
+    [
+      "exec",
+      "vitest",
+      "run",
+      "packages/app/test/e2e/authentik-scenario-e2e.test.ts",
+      "--reporter=dot",
+    ],
     {
       cwd: process.cwd(),
       env: {

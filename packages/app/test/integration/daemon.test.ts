@@ -46,7 +46,7 @@ import { DaemonBridgeClient, Output, type OutputStreams, run } from "@gla/cli";
 import type { RecipientRef } from "@gla/kernel";
 import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it } from "vitest";
-import { type DaemonHandle, endpointIsLocal, parseServeArgs, serve } from "./daemon.js";
+import { type DaemonHandle, endpointIsLocal, parseServeArgs, serve } from "../../src/daemon.js";
 
 const recipient = "tg:user:123" as RecipientRef;
 function authentikConfig(

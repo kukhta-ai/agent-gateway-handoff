@@ -15,13 +15,13 @@ import {
   authEnrollmentDiagnostics,
   parseAuthDeploymentRolesJson,
   parseAuthEnrollmentPolicyJson,
-} from "./auth-enrollment-policy.js";
-import { authAssuranceProviderDiagnostic, parseServeArgs } from "./daemon.js";
+} from "../../src/auth-enrollment-policy.js";
+import { authAssuranceProviderDiagnostic, parseServeArgs } from "../../src/daemon.js";
 import {
   type AuthProviderConfig,
   createEnrollmentStack,
   createProvisioningBridge,
-} from "./index.js";
+} from "../../src/index.js";
 
 const AUTHENTIK: AuthProviderConfig = {
   issuerUrl: "https://idp.example/application/o/gla/",
@@ -165,7 +165,7 @@ const AUTHENTIK_EDGE_GUARD_ROLES_JSON = JSON.stringify([
 
 function repoRootFromHere(): string {
   const here = fileURLToPath(import.meta.url);
-  return here.replace(/\/packages\/app\/(dist|src)\/.*$/, "");
+  return here.replace(/\/packages\/app\/(?:dist|src|test)\/.*$/, "");
 }
 
 describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unchanged)", () => {
@@ -201,7 +201,7 @@ describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unc
   });
 
   it("createApp().wiring.auth (the static default profile) still names @gla/auth-webauthn", async () => {
-    const { createApp } = await import("./index.js");
+    const { createApp } = await import("../../src/index.js");
     expect(createApp().wiring.auth).toBe(AUTH_WEBAUTHN_MODULE);
   });
 });

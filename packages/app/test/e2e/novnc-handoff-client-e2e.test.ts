@@ -13,8 +13,8 @@ import { type RecipientRef, type SessionId, decodeRuntimeHandle } from "@gla/ker
 import { fullStackAvailable } from "@gla/launcher-process";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import type { ProvisioningStack } from "./index.js";
-import { createProvisioningBridge } from "./index.js";
+import type { ProvisioningStack } from "../../src/index.js";
+import { createProvisioningBridge } from "../../src/index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
 const REAL_NOVNC_CANARY = "real-novnc-secret-agent-must-not-see";

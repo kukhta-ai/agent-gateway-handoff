@@ -56,14 +56,14 @@ import {
   WorkspaceManager,
 } from "@gla/worker";
 import { afterEach, describe, expect, it } from "vitest";
-import { FakeAuthentik } from "../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
+import { FakeAuthentik } from "../../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
 import {
   DAEMON_PERSISTED_RECORDS,
   DaemonStateError,
   DaemonStateRoot,
   redactDaemonState,
-} from "./daemon-state.js";
-import { createProvisioningBridge } from "./index.js";
+} from "../../src/daemon-state.js";
+import { createProvisioningBridge } from "../../src/index.js";
 
 const roots: string[] = [];
 

@@ -49,7 +49,7 @@ import {
   authAssurancePolicyFromProfile,
 } from "@gla/kernel";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FakeAuthentik } from "../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
+import { FakeAuthentik } from "../../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
 
 const recipient = "tg:user:123" as RecipientRef;
 const GRANT_ID = "cap_grant1" as CapabilityId;
@@ -687,10 +687,10 @@ describe("authAssuranceProfile wiring + the never-up-map floor", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("provider-agnostic gateway — no provider knowledge leaks into packages/gateway", () => {
-  /** The repo root, derived from this test's location (works under both src/ and dist/). */
+  /** The repo root, derived from this test's location (works under src/, test/, or dist/). */
   function repoRoot(): string {
     const here = fileURLToPath(import.meta.url);
-    return here.replace(/\/packages\/app\/(dist|src)\/.*$/, "");
+    return here.replace(/\/packages\/app\/(?:dist|src|test)\/.*$/, "");
   }
 
   function deps(relFromRepoRoot: string): string[] {
