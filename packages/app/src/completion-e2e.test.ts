@@ -233,8 +233,12 @@ describe("REAL completion + close-window + agent-blind end-to-end (scenario-01 P
         expect(handoffView.state).toBe("open");
         // S-2 (the REAL threat): the agent's ALREADY-OPEN brokered socket is DESTROYED this instant.
         expect(stack.connector.isSuspended(cdpUrl)).toBe(true);
-        await new Promise((r) => setTimeout(r, 300)); // let the sever propagate
-        expect(stack.connector.liveSocketCount(cdpUrl)).toBe(0); // the agent's live socket is GONE
+        await expect
+          .poll(() => stack.connector.liveSocketCount(cdpUrl), {
+            message: "window-open severance must close the agent's live CDP socket",
+            timeout: 5_000,
+          })
+          .toBe(0); // the agent's live socket is GONE
         // A read over the agent's SAME pre-existing CDP connection now FAILS (the socket was severed) — the agent
         // CANNOT read the password field over CDP through Phases 7-8.
         let agentReadFailed = false;
@@ -255,13 +259,19 @@ describe("REAL completion + close-window + agent-blind end-to-end (scenario-01 P
         // ── The HUMAN (over the non-brokered interface) submits the SECRET to the site (the human path works) and
         //    drives /verify. The secret reaches the SITE, never the agent. ──
         await hpage.goto(`${site.base}/submit?password=${encodeURIComponent(KNOWN_SECRET)}`);
+        await expect
+          .poll(() => site.submitted().includes(KNOWN_SECRET), {
+            message:
+              "site must receive the human-submitted secret before completion checks continue",
+            timeout: 5_000,
+          })
+          .toBe(true);
 
         // ── `gla handoff wait` blocks until completion; the human reaches /verify → the url-watcher fires the
         //    INTERMEDIATE → the Completion service normalizes → wait RETURNS the envelope. This is scenario-01
         //    Phase 8 EXACTLY: the FIRST handoff window closes on the `/verify` intermediate with status "submitted"
         //    + next "email-verification" (the human's form-submit step is done; the agent reads the code next). ──
         const waitPromise = stack.bridge.handoffWait(handoffView.handoff_id, 25_000);
-        await new Promise((r) => setTimeout(r, 400));
         await hpage.goto(`${site.base}/verify`);
         const envelope = await waitPromise;
 
