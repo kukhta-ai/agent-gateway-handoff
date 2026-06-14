@@ -712,32 +712,35 @@ function clientAssetDeclarations(
   return Array.isArray(assets) ? assets.filter(isRecord) : [];
 }
 
-function unique(values: readonly string[]): string[] {
-  return [...new Set(values)];
+/** Provider ids that should replace the reference browser-handoff defaults for this composition. */
+export interface ReferenceTemplateProviderDefaults {
+  launcher?: ProviderId;
+  entrypoint?: ProviderId;
+  connector?: ProviderId;
+  workspace?: ProviderId;
+  detector?: ProviderId;
 }
 
-function providerIdsByFamily(
-  host: ProviderHost,
-  family: ProviderManifest["spec"]["family"],
-): string[] {
-  return host
-    .providerManifests()
-    .filter((provider) => provider.spec.family === family)
-    .map((provider) => provider.metadata.name);
-}
-
-function templateWithHostCompatibleProviders(host: ProviderHost): typeof BROWSER_HANDOFF_TEMPLATE {
+function templateWithProviderDefaults(
+  defaults: ReferenceTemplateProviderDefaults = {},
+): typeof BROWSER_HANDOFF_TEMPLATE {
   const template = structuredClone(BROWSER_HANDOFF_TEMPLATE);
-  const compatible = template.spec.compatibleProviders ?? {};
-  template.spec.compatibleProviders = {
-    ...compatible,
-    entrypoint: unique([
-      ...(compatible.entrypoint ?? []),
-      ...providerIdsByFamily(host, "entrypoint"),
-    ]),
-    connector: unique([...(compatible.connector ?? []), ...providerIdsByFamily(host, "connector")]),
-    detector: unique([...(compatible.detector ?? []), ...providerIdsByFamily(host, "detector")]),
-  };
+  const required = template.spec.requiredParts;
+  if (defaults.launcher !== undefined) {
+    required.launcher = defaults.launcher;
+  }
+  if (defaults.entrypoint !== undefined) {
+    required.entrypoint = defaults.entrypoint;
+  }
+  if (defaults.connector !== undefined) {
+    required.connector = defaults.connector;
+  }
+  if (defaults.workspace !== undefined) {
+    required.workspace = defaults.workspace;
+  }
+  if (defaults.detector !== undefined) {
+    required.detector = defaults.detector;
+  }
   return template;
 }
 
@@ -763,9 +766,10 @@ export function referenceEntrypointClientAssetMounts(
 /** Catalog store content derived from Provider Host registration data, not parallel app tables. */
 export function referenceProviderStoreContent(
   host: ProviderHost = createReferenceProviderHost(),
+  templateDefaults: ReferenceTemplateProviderDefaults = {},
 ): StoreContent {
   return {
     providers: host.providerManifests(),
-    templates: [templateWithHostCompatibleProviders(host)],
+    templates: [templateWithProviderDefaults(templateDefaults)],
   };
 }

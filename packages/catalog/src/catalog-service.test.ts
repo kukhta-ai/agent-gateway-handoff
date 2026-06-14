@@ -92,6 +92,12 @@ describe("CatalogService.list — WPM receipt-derived availability (GLA-082)", (
       ]),
     );
     expect(cat.show("launcher-process")?.requires[0]?.status).toBe("bound");
+    expect(cat.show("browser-handoff")?.requires[0]).toMatchObject({
+      dependency: "edge-proxy",
+      status: "bound",
+      ownershipMode: "local-external",
+      state: "adopted",
+    });
   });
 
   it("a current GLA probe degraded result keeps the provider out of available listings", () => {
@@ -441,9 +447,26 @@ describe("CatalogService.templateShow (GLA-082 diagnostics)", () => {
     expect(show.requiredParts.sort()).toEqual(
       ["connector", "detector", "entrypoint", "launcher", "workspace"].sort(),
     );
+    expect(show.compatibleProviders).toMatchObject({
+      entrypoint: expect.arrayContaining(["entrypoint-novnc"]),
+      connector: expect.arrayContaining(["connector-cdp"]),
+      detector: expect.arrayContaining(["url-watcher", "user-done"]),
+    });
+    expect(show.dependencies[0]).toMatchObject({
+      dependency: "edge-proxy",
+      status: "bound",
+      connection: {
+        refs: {
+          publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/" },
+          gatewayUpstream: { kind: "uri-ref", ref: "http://127.0.0.1:3000" },
+        },
+      },
+    });
     const launcherPart = show.parts.find((p) => p.part === "launcher");
     expect(launcherPart?.provider).toBe("launcher-process");
+    expect(launcherPart?.family).toBe("launcher");
     expect(launcherPart?.availability).toBe("available");
+    expect(launcherPart?.available).toBe(true);
     expect(launcherPart?.dependencies[0]).toMatchObject({
       dependency: "browser-runtime",
       status: "bound",
@@ -457,6 +480,111 @@ describe("CatalogService.templateShow (GLA-082 diagnostics)", () => {
       receipt: { taskId: "browser-runtime-3", status: "Done" },
       lastProbe: { result: "available" },
       diagnostics: { install: "available", runtime: "available" },
+    });
+  });
+
+  it("does not mark every same-family provider compatible without a template relation or default", () => {
+    const content = defaultStoreContent();
+    content.providers.push({
+      apiVersion: "gla.dev/v1",
+      kind: "AgentConnector",
+      metadata: { name: "connector-unrelated", version: "0.1.0" },
+      spec: {
+        family: "connector",
+        capability: { summary: "available connector not declared compatible with browser-handoff" },
+        probe: "connector-unrelated",
+      },
+    });
+
+    const show = new CatalogService({
+      content,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    }).templateShow("browser-handoff");
+
+    expect(show.compatibleProviders?.connector).toContain("connector-cdp");
+    expect(show.compatibleProviders?.connector).not.toContain("connector-unrelated");
+  });
+
+  it("keeps public-edge dependency evidence separate from access-gateway authorization facts", () => {
+    const bindings = referenceWpmDependencyBindings().filter(
+      (binding) => binding.dependency !== "edge-proxy",
+    );
+    const show = new CatalogService({ dependencyBindings: bindings }).templateShow(
+      "browser-handoff",
+    );
+
+    expect(show.available).toBe(false);
+    expect(show.availability).toBe("unavailable");
+    expect(show.dependencies[0]).toMatchObject({
+      dependency: "edge-proxy",
+      status: "unbound",
+      missingEvidence: ["wpm-receipt"],
+      diagnostics: { install: "unavailable", runtime: "available" },
+    });
+    expect(show.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "template.dependency_unavailable",
+          dependency: "edge-proxy",
+        }),
+      ]),
+    );
+  });
+
+  it("accepts custom-base and subpath public-edge refs as transport dependency evidence", () => {
+    const bindings = referenceWpmDependencyBindings();
+    receipt(bindings, "edge-proxy").connection = {
+      refs: {
+        publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/team-a/" },
+        gatewayUpstream: { kind: "uri-ref", ref: "http://127.0.0.1:3000" },
+      },
+    };
+
+    const show = new CatalogService({ dependencyBindings: bindings }).templateShow(
+      "browser-handoff",
+    );
+
+    expect(show.available).toBe(true);
+    expect(show.dependencies[0]).toMatchObject({
+      dependency: "edge-proxy",
+      status: "bound",
+      connection: {
+        refs: {
+          publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/team-a/" },
+        },
+      },
+    });
+  });
+
+  it("marks templates with unknown required providers unavailable with stable provider diagnostics", () => {
+    const content = defaultStoreContent();
+    const template = content.templates.find(
+      (candidate) => candidate.metadata.name === "browser-handoff",
+    );
+    if (template === undefined) {
+      throw new Error("missing browser-handoff fixture");
+    }
+    template.spec.requiredParts.connector = "connector-missing";
+
+    const show = new CatalogService({
+      content,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    }).templateShow("browser-handoff");
+
+    expect(show.available).toBe(false);
+    expect(show.availability).toBe("unavailable");
+    const connectorPart = show.parts.find((part) => part.part === "connector");
+    expect(connectorPart).toMatchObject({
+      provider: "connector-missing",
+      available: false,
+      availability: "unavailable",
+      diagnostics: [
+        expect.objectContaining({
+          code: "provider.unknown",
+          provider: "connector-missing",
+          part: "connector",
+        }),
+      ],
     });
   });
 
