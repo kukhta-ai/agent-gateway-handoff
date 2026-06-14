@@ -26,7 +26,7 @@
 // Spawns REAL browsers — generous timeouts; the capsule + broker + gateway are always reaped in a finally/afterAll.
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { type AddressInfo, createServer as createNet } from "node:net";
 import { tmpdir } from "node:os";
@@ -52,9 +52,12 @@ const KNOWN_CODE = "VERIFY-CODE-7Q2X-AGENTMUSTNOTSEE";
 const recipient = "tg:user:123" as RecipientRef;
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }

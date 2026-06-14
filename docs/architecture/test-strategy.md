@@ -10,7 +10,7 @@
 > `docs/architecture/kernel-contracts.md`, `docs/architecture/dependency-strategy.md`,
 > `docs/01-architecture-overview.md §6`, `docs/05-cli-and-entities.md §5–§6`.
 >
-> **Quality gate:** `pnpm gate` = `tsc -b && biome ci . && vitest run` — the one bar used locally,
+> **Quality gate:** `pnpm gate` = `tsc -b && biome ci . && browser-E2E preflight && vitest run` — the one bar used locally,
 > in pre-commit, in CI, and as every task's Definition of Done (see CONTRIBUTING.md).
 
 ---
@@ -245,28 +245,37 @@ GLA-066 (`Pass the scenario-01 through-case end to end`) depends on every scenar
 dependencies stated in the backlog: GLA-013,015,017,019,021,023,025,027,033,035,039,041,043,045,065, plus the
 delta chain 047–063). It is the **final test gate** that proves the whole system composes correctly:
 
-- Clean checkout, `pnpm install`, `pnpm gate` (all unit + contract tests green) — then run the E2E suite.
+- Clean checkout, `pnpm install`, `pnpm gate`: one command runs unit, contract, browser/full-human-view
+  preflight, and browser-backed E2E evidence inside the same DoD gate.
 - No warm state: the GLA process is started fresh; the `hermes-1` variant additionally verifies no residual
   capsule processes from prior runs.
 - The harness runs Phases E,0–15 in the order above (§2.4).
 - All 10 security invariants (§3) are asserted within the same E2E run.
-- `pnpm gate` remains the final CLI command — the E2E suite is wired into `vitest run` via a separate workspace
-  Vitest project (`vitest.e2e.config.ts`) that is included in the gate's `vitest run` invocation.
+- `pnpm gate` remains the final CLI command. Before Vitest runs, `test:e2e:preflight` verifies that the
+  Playwright Chromium runtime is installed, executable, and launchable; `Xvfb`, `x11vnc`, and `websockify`
+  are on `PATH`; and the browser-backed E2E fixture files are present. Browser/full-human-view absence is
+  therefore a gate failure, not a skipped green result.
 
 ### 4.3 `pnpm gate` is the single DoD bar
 
 ```
-pnpm gate = tsc -b && biome ci . && vitest run
-                                      ↑
-                         includes:  unit tests (packages/*)
-                                    contract tests (adapters/*)
-                                    boundary selftest (tools/boundary-check)
-                                    E2E suite (vitest.e2e.config.ts, tags=e2e)
+pnpm gate = tsc -b && biome ci . && test:e2e:preflight && vitest run
+                                                   ↑              ↑
+                   browser + full human-view runtime/fixtures     includes:
+                                                                 unit tests (packages/*)
+                                                                 contract tests (adapters/*)
+                                                                 boundary selftest (tools/boundary-check)
+                                                                 browser-backed E2E suite
 ```
 
-The E2E suite is tagged `e2e` in Vitest; on a developer's machine it can be excluded with
-`vitest run --reporter=verbose --project=unit,contract` for speed, but the full `pnpm gate` always includes it
-(this is the Definition of Done requirement for GLA-066 and for CI).
+The full `pnpm gate` always requires browser-backed E2E availability. For local iteration only, a developer
+can run `pnpm run gate:without-browser-e2e`; that command sets `GLA_BROWSER_E2E_MODE=optional`, uses
+`test:e2e:preflight:optional`, prints an explicit opt-out warning, and is not valid backlog
+Definition-of-Done evidence for work whose acceptance criteria require browser-level proof.
+
+To prove browser-backed E2E assertions are actually inside the full gate, `pnpm run gate:browser-canary`
+temporarily sets `GLA_BROWSER_E2E_CANARY_FAIL=1`, runs the real `pnpm gate`, and passes only when the gate
+turns red for the deliberate assertion inside `packages/gateway/src/handoff-client-browser.test.ts`.
 
 ---
 

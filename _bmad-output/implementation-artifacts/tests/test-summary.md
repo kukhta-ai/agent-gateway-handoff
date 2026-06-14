@@ -1,6 +1,6 @@
-# Test Automation Summary: GLA-086
+# Test Automation Summary
 
-Task: GLA-086 - Verify deployed authentik login method choices
+## GLA-086 - Verify Deployed Authentik Login Method Choices
 
 Workflow: `bmad-qa-generate-e2e-tests`
 
@@ -62,3 +62,74 @@ Result: passed after formatting and review-fix validation. Typecheck passed, Bio
 
 - No source test changes are required from this QA pass.
 - If a future environment provides a running authentik instance with browser/passkey automation, add a WPM-owned live proof that records `loginMethodProofs[]`; keep GLA runtime consuming only the sanitized receipt/diagnostic evidence.
+
+## GLA-092 - Make Browser-Backed E2E Availability A Hard Quality Gate
+
+Workflow: `bmad-qa-generate-e2e-tests` / TEA review, spec-exists fallback
+
+Date: 2026-06-14
+
+### Scope
+
+This QA summary covers the gate-hardening changes that make browser-backed and full human-view E2E
+availability mandatory for the default project quality gate while preserving an explicit, visible non-DoD
+opt-out for local iteration.
+
+The implementation adds a root preflight before Vitest, hardens Chromium availability helpers to distinguish
+default gate mode from explicit optional mode, requires the noVNC human-view binaries in default mode, aligns
+CI/docs/scripts, and adds canary/static tests for the new gate contract.
+
+### Generated And Updated Tests
+
+- [x] `tools/browser-e2e-preflight.test.ts` - proves missing browser-runtime and full human-view canaries fail the default path, proves optional mode is visible and non-DoD, and asserts package scripts, CI, CONTRIBUTING, and test-strategy docs stay aligned.
+- [x] `packages/gateway/src/handoff-client-browser.test.ts` - contains the controlled `GLA_BROWSER_E2E_CANARY_FAIL=1` browser-file assertion canary used by `gate:browser-canary`.
+- [x] `tools/browser-e2e-canary.mjs` - runs the real `pnpm gate` with the browser-file canary enabled and passes only when that full gate turns red for the deliberate browser E2E assertion.
+- [x] Chromium-gated app/gateway/adapter tests now check `GLA_BROWSER_E2E_MODE=optional` and require the Chromium executable to exist before reporting browser availability.
+- [x] `tools/browser-e2e-preflight.mjs` verifies required browser E2E fixture files exist, verifies `Xvfb`, `x11vnc`, and `websockify` are on `PATH`, resolves Playwright Chromium from `@gla/app`, checks execute permission, launches Chromium headless, and renders a preflight page before full Vitest runs.
+
+### AC Coverage
+
+| AC | Coverage Evidence | Status |
+| --- | --- | --- |
+| AC1 | `pnpm gate` now runs `test:e2e:preflight` before `vitest run`; missing browser runtime is a non-zero preflight failure instead of a skipped-success Vitest result. | Covered. |
+| AC2 | Preflight diagnostics name missing Chromium resolution, executable absence, execute permission, launch/render failure, full human-view binary absence, and remediation commands including `playwright install`, `--with-deps`, and `xvfb x11vnc websockify`. Required fixture absence is also a hard failure. | Covered. |
+| AC3 | `gate:without-browser-e2e` sets `GLA_BROWSER_E2E_MODE=optional`, optional preflight prints a visible non-DoD warning, and browser tests report skipped branches under that mode. | Covered. |
+| AC4 | CI installs `xvfb`, `x11vnc`, `websockify`, and `playwright@1.60.0` Chromium with Linux launch dependencies before running `pnpm gate`. | Covered by workflow config. |
+| AC5 | Package scripts, CONTRIBUTING, test strategy, and GLA-092 task-specific DoD describe the same default/full/opt-out behavior; the Backlog.md global `definitionOfDone` key is CLI-protected and remains indirectly aligned through `pnpm gate`. | Covered with implementation note. |
+| AC6 | `pnpm run gate:browser-canary` sets `GLA_BROWSER_E2E_CANARY_FAIL=1`, runs the real `pnpm gate`, and passes only because a deliberate assertion inside `packages/gateway/src/handoff-client-browser.test.ts` fails the full gate; normal full gate output shows browser-backed E2Es execute when the canary is not set. | Covered. |
+
+### Validation
+
+Focused validation:
+
+```bash
+pnpm exec vitest run tools/browser-e2e-preflight.test.ts --reporter=dot
+pnpm run test:e2e:preflight
+GLA_BROWSER_E2E_MODE=optional pnpm run test:e2e:preflight:optional
+pnpm run gate:browser-canary
+pnpm run gate:without-browser-e2e
+```
+
+Result: passed. The browser assertion canary proved a failing assertion inside a browser-backed E2E file fails
+the full `pnpm gate`. The explicit opt-out gate reported optional mode and passed with 64 test files, 696 passed,
+24 skipped.
+
+Full DoD validation:
+
+```bash
+GLA_BROWSER_E2E_MODE=optional pnpm run gate
+pnpm run gate
+```
+
+Result: passed. The ambient-optional run proved `pnpm gate` forces `GLA_BROWSER_E2E_MODE=required` for
+preflight and Vitest. Typecheck passed, Biome passed, browser E2E preflight verified the full human-view stack
+and launched Chromium, and Vitest passed with 64 test files, 705 passed, 15 skipped. Browser-backed E2Es
+executed, including GLA-066 scenario-01, GLA-076 authentik capstone, GLA-077 noVNC handoff client,
+launcher-process full noVNC, detector-url real CDP, provisioning, handoff, completion, teardown, two-handoff,
+gateway browser-client, and daemon live-capsule coverage.
+
+### Coverage Notes
+
+- The default full gate requires browser-backed E2E and full human-view runtime availability but does not install host dependencies at application runtime.
+- CI owns browser and human-view runtime installation before the single `pnpm gate` entrypoint.
+- The explicit opt-out command is intentionally non-DoD evidence for browser-dependent tasks.

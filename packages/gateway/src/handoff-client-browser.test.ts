@@ -2,6 +2,7 @@
 // gateway's same-origin client-asset path, so it proves the handoff page loads provider assets and renders an
 // interactive viewport without requiring the host Xvfb/x11vnc/websockify stack in CI.
 
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { type Page, chromium } from "playwright-core";
@@ -9,9 +10,12 @@ import { describe, expect, it } from "vitest";
 import { handoffReusedPageHtml } from "./handoff-page.js";
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
@@ -124,6 +128,19 @@ async function withBrowserPage<T>(
 }
 
 describe("handoff page RFB browser client", () => {
+  it("GLA-092 canary proves browser-backed E2E failures fail the full gate when requested", async () => {
+    if (process.env.GLA_BROWSER_E2E_CANARY_FAIL !== "1") {
+      return;
+    }
+    expect(HAVE_CHROMIUM).toBe(true);
+    const server = await serveClientPage();
+    await withBrowserPage(server, async (page) => {
+      await page.goto(`${server.origin}/handoff`);
+      await page.waitForSelector("#remote-secret-field", { timeout: 30_000 });
+      expect("GLA-092 browser E2E canary failure").toBe("not-triggered");
+    });
+  });
+
   it.runIf(HAVE_CHROMIUM)(
     "renders an interactive viewport from same-origin provider assets instead of opening a raw socket",
     async () => {

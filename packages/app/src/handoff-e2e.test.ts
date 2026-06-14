@@ -16,6 +16,7 @@
 // lib needed at compile time).
 
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { type IncomingMessage, type Server, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { AuthWebauthnProvider } from "@gla/auth-webauthn";
@@ -36,9 +37,12 @@ import { type Browser, type CDPSession, type Page, chromium } from "playwright-c
 import { afterAll, describe, expect, it } from "vitest";
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }

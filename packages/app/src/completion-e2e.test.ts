@@ -20,7 +20,7 @@
 // unit/contract tests (adapters/connector-cdp's live-socket sever, packages/completion, packages/session) regardless.
 // Spawns a REAL browser — generous timeouts; the capsule + broker are always reaped in a finally.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -64,9 +64,12 @@ afterAll(async () => {
 });
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -30,8 +30,12 @@ const sessionId = "sess_gla089" as SessionId;
 const routePath = `/handoff/${sessionId}`;
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
-    return chromium.executablePath().length > 0;
+    const p = chromium.executablePath();
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
