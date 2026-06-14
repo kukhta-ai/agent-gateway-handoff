@@ -499,6 +499,7 @@ The direction is implemented when:
 `docs/architecture/provider-author-workflow.md` (provider contribution rules) ·
 `docs/architecture/provider-authoring-ux.md` (provider-authoring UX flow) ·
 `docs/architecture/provider-install-update-ux.md` (operator install/update UX flow) ·
+`docs/architecture/provider-runtime-consumption-ux.md` (runtime discovery and session proposal UX flow) ·
 `docs/architecture/catalog-dependency-bindings.md` (WPM receipt availability) ·
 `docs/03-software-candidates.md` (layer inventory and alternatives) ·
 `docs/04-capsule-assembly.md` (templates and session assembly).
