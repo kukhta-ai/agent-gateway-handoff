@@ -28,7 +28,6 @@
     { "path": "../route" },
     { "path": "../session" },
     { "path": "../task" },
-    { "path": "../worker" },
-    { "path": "../../adapters/workspace-profile" }
+    { "path": "../worker" }
   ]
 }

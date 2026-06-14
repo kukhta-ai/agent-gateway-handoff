@@ -27,7 +27,10 @@
 
 The **import-boundary test** (the deliberate-bad fixture `tools/boundary-check/fixtures/core-importing-adapter.ts`
 must be rejected by `biome ci .`) is exercised inside `vitest run` and re-asserts on every gate run — it sits at
-the unit level conceptually but is the boundary-enforcement selftest (see CONTRIBUTING.md §Quality gate).
+the unit level conceptually but is the boundary-enforcement selftest (see CONTRIBUTING.md §Quality gate). The
+Provider Host migration adds a project-owned scanner in `tools/boundary-check/provider-boundary.mjs`: migrated
+provider adapters may be imported by provider-set packages and tests, but protected runtime packages must use
+provider ids, kernel ports, `ProviderHost`, or the selected provider set.
 
 ### 1.2 Package-to-level map
 
@@ -264,7 +267,7 @@ pnpm gate = tsc -b && biome ci . && test:e2e:preflight && vitest run
                    browser + full human-view runtime/fixtures     includes:
                                                                  unit tests (packages/*)
                                                                  contract tests (adapters/*)
-                                                                 boundary selftest (tools/boundary-check)
+                                                                 boundary selftests (tools/boundary-check)
                                                                  browser-backed E2E suite
 ```
 
