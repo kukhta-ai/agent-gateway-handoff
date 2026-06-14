@@ -164,6 +164,7 @@ export class AuthAuthentikProvider implements AuthProviderPort {
   private readonly randomness: OidcRandomness;
   private readonly now: () => number;
   private readonly onVerifyOutcome: ((outcome: VerifyOutcome) => void) | undefined;
+  private readonly jwksInjected: boolean;
 
   /** A configured JWKS resolver (injected, or built lazily from the discovered `jwks_uri` on first use). */
   private jwksResolver: JwksResolver | undefined;
@@ -184,6 +185,7 @@ export class AuthAuthentikProvider implements AuthProviderPort {
     this.attempts = opts.attempts ?? new InMemoryKv<PendingAttempt>();
     this.fetchImpl = opts.fetch ?? fetch;
     this.jwksResolver = opts.jwks;
+    this.jwksInjected = opts.jwks !== undefined;
     this.randomness = opts.randomness ?? DEFAULT_RANDOMNESS;
     this.now = opts.now ?? Date.now;
     this.onVerifyOutcome = opts.onVerifyOutcome;
@@ -407,7 +409,7 @@ export class AuthAuthentikProvider implements AuthProviderPort {
     }
 
     // (d) Validate the id_token (signature/iss/aud/exp/iat/nbf/nonce). The nonce is the ATTEMPT's nonce.
-    const validated = await validateIdToken(
+    let validated = await validateIdToken(
       {
         idToken: exchanged.idToken,
         issuerUrl: this.issuerUrl,
@@ -418,6 +420,22 @@ export class AuthAuthentikProvider implements AuthProviderPort {
       },
       await this.resolveJwks(),
     );
+    if (!validated.ok && validated.reason === "bad_signature" && !this.jwksInjected) {
+      // Authentik can rotate signing keys. A cached remote JWKS resolver may not know a new key yet, so
+      // rebuild it once and re-validate before classifying the token as a signature failure.
+      this.jwksResolver = undefined;
+      validated = await validateIdToken(
+        {
+          idToken: exchanged.idToken,
+          issuerUrl: this.issuerUrl,
+          clientId: this.clientId,
+          expectedNonce: attempt.nonce,
+          clockToleranceSec: this.clockToleranceSec,
+          nowMs: this.now(),
+        },
+        await this.resolveJwks(),
+      );
+    }
     if (!validated.ok) {
       return this.fail(expectedKind, validated.reason);
     }

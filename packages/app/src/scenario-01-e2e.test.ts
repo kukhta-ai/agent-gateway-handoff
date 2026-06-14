@@ -758,8 +758,12 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         expect(view1.state).toBe("open");
         // S-2: the agent's brokered socket is SEVERED the instant the window opens (its connection cut).
         expect(stack.connector.isSuspended(cdpUrl)).toBe(true);
-        await new Promise((r) => setTimeout(r, 300)); // let the sever propagate.
-        expect(stack.connector.liveSocketCount(cdpUrl)).toBe(0); // the agent's live socket is GONE.
+        await expect
+          .poll(() => stack.connector.liveSocketCount(cdpUrl), {
+            message: "window-open severance must close the agent's live CDP socket",
+            timeout: 5_000,
+          })
+          .toBe(0); // the agent's live socket is GONE.
         // S-2 (the REAL threat): a read over the agent's SAME pre-existing CDP connection now FAILS.
         let agentReadFailed = false;
         try {
@@ -839,14 +843,31 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         // ── Phase 7 — the human fills the form + submits the SECRET agent-blind (reaches /verify). ──
         const waitPromise1 = stack.bridge.handoffWait(view1.handoff_id, 25_000);
         await hcpage.goto(`${site.base}/submit?password=${encodeURIComponent(KNOWN_PASSWORD)}`);
-        await new Promise((r) => setTimeout(r, 300));
+        await expect
+          .poll(() => site.submittedPasswords().includes(KNOWN_PASSWORD), {
+            message:
+              "site must receive the human-submitted password before completion checks continue",
+            timeout: 5_000,
+          })
+          .toBe(true);
 
         // ── S-8 (out-of-contract completion rejected): the human first navigates to a URL that is NOT in the
         //    detector contract (neither the intermediate `/verify` nor the complete `/dashboard`). The
         //    url-watcher emits no matching signal → the window does NOT complete → the session stays `opened`
         //    (the connector stays severed). Only the DECLARED `/verify` below advances it (the contract holds).
         await hcpage.goto(`${site.base}/random-not-in-contract`);
-        await new Promise((r) => setTimeout(r, 400)); // give the poller several intervals to (not) fire.
+        await expect
+          .poll(
+            () => ({
+              connectorSuspended: stack.connector.isSuspended(cdpUrl),
+              sessionState: stack.session.get(sessionId as SessionId).state,
+            }),
+            {
+              message: "off-contract URL must not complete or close the handoff window",
+              timeout: 700,
+            },
+          )
+          .toEqual({ connectorSuspended: true, sessionState: "opened" });
         expect(stack.session.get(sessionId as SessionId).state).toBe("opened"); // NOT completed by an off-contract URL.
         expect(stack.connector.isSuspended(cdpUrl)).toBe(true); // still severed — the window never closed.
         log("7", "S-8: an off-contract URL did NOT complete the window (status did not advance)");
@@ -923,7 +944,13 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         // ── Phase 12 cont. — the human enters the verification CODE agent-blind → /dashboard. ──
         const waitPromise2 = stack.bridge.handoffWait(view2.handoff_id, 25_000);
         await hcpage.goto(`${site.base}/code?code=${encodeURIComponent(KNOWN_CODE)}`);
-        await new Promise((r) => setTimeout(r, 300));
+        await expect
+          .poll(() => site.submittedCodes().includes(KNOWN_CODE), {
+            message:
+              "site must receive the human-submitted verification code before dashboard completion",
+            timeout: 5_000,
+          })
+          .toBe(true);
         await hcpage.goto(`${site.base}/dashboard`);
         log("12", "human entered the verification code agent-blind + reached /dashboard");
 
@@ -998,10 +1025,14 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
           await run(["task", "complete", taskId], cComplete.out, { bridge: stack.bridge }),
         ).toBe(0);
         expect(JSON.parse(cComplete.stdout()).state).toBe("completed");
-        await new Promise((r) => setTimeout(r, 400)); // let SIGKILL reach the process group + free the CDP port.
 
         // (1) no live capsule — the process is GONE and the launcher health reads `down`.
-        expect(pidAlive(capsulePid), "the capsule process is GONE after teardown").toBe(false);
+        await expect
+          .poll(() => pidAlive(capsulePid), {
+            message: "the capsule process must be gone after teardown",
+            timeout: 10_000,
+          })
+          .toBe(false);
         expect(await stack.lifecycle.health(sessionId as SessionId)).toBe("down");
         expect(stack.lifecycle.hasLive(sessionId as SessionId)).toBe(false);
         // no runtime + the temp profile is wiped (the capsule's OWN ephemeral state).

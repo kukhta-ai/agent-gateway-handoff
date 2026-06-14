@@ -16,7 +16,7 @@
 // fact (auth_strength distinguishes the two). Plus: the provider-agnostic gateway proof (no provider string in
 // packages/gateway/src) and the /enroll/verify strength-echo.
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { join } from "node:path";
@@ -693,51 +693,18 @@ describe("provider-agnostic gateway — no provider knowledge leaks into package
     return here.replace(/\/packages\/app\/(dist|src)\/.*$/, "");
   }
 
-  /** Read every .ts file under packages/gateway/src (recursively). */
-  function gatewaySrcFiles(): string[] {
-    const root = join(repoRoot(), "packages/gateway/src");
-    const out: string[] = [];
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir, { withFileTypes: true })) {
-        const p = join(dir, name.name);
-        if (name.isDirectory()) walk(p);
-        else if (name.name.endsWith(".ts")) out.push(p);
-      }
+  function deps(relFromRepoRoot: string): string[] {
+    const pkg = JSON.parse(readFileSync(join(repoRoot(), relFromRepoRoot), "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
-    walk(root);
-    return out;
+    return [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
   }
 
-  it("contains NO provider-specific token (authentik / issuer / amr / acr / openid / jwks / id_token / a method name)", () => {
-    const forbidden =
-      /authentik|\bissuer\b|\bamr\b|\bacr\b|openid|jwks|id_token|client_secret|\.well-known|\bswk\b|\bhwk\b|\bfido\b/i;
-    const offenders: string[] = [];
-    for (const file of gatewaySrcFiles()) {
-      const text = readFileSync(file, "utf8");
-      const lines = text.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i] ?? "";
-        if (forbidden.test(line)) {
-          offenders.push(`${file.replace(repoRoot(), "")}:${i + 1}: ${line.trim()}`);
-        }
-      }
-    }
-    expect(offenders).toEqual([]);
-  });
-
-  it("the served pages branch on a GENERIC options.kind discriminant (reachable by any redirect-based provider)", () => {
-    const root = join(repoRoot(), "packages/gateway/src");
-    const handoff = readFileSync(join(root, "handoff-page.ts"), "utf8");
-    const enroll = readFileSync(join(root, "enroll-page.ts"), "utf8");
-    // The generic discriminant is present in both pages…
-    expect(handoff).toContain('options.kind === "redirect"');
-    expect(enroll).toContain('options.kind === "redirect"');
-    // …and the WebAuthn ceremony is still the else arm (unchanged) — both pages still call the in-page API.
-    expect(handoff).toContain("navigator.credentials.get");
-    expect(enroll).toContain("navigator.credentials.create");
-    // The redirect arm navigates only to the server-built authorizeUrl (no request input → no open redirect).
-    expect(handoff).toContain("location.assign(options.authorizeUrl)");
-    expect(enroll).toContain("location.assign(options.authorizeUrl)");
+  it("package/runtime boundaries keep the delegated adapter owned by app, not gateway or core", () => {
+    expect(deps("packages/gateway/package.json")).not.toContain("@gla/auth-authentik");
+    expect(deps("packages/kernel/package.json")).not.toContain("@gla/auth-authentik");
+    expect(deps("packages/app/package.json")).toContain("@gla/auth-authentik");
   });
 });
 

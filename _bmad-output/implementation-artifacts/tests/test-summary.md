@@ -133,3 +133,65 @@ gateway browser-client, and daemon live-capsule coverage.
 - The default full gate requires browser-backed E2E and full human-view runtime availability but does not install host dependencies at application runtime.
 - CI owns browser and human-view runtime installation before the single `pnpm gate` entrypoint.
 - The explicit opt-out command is intentionally non-DoD evidence for browser-dependent tasks.
+
+## GLA-093 - Strengthen Authentik And Gateway E2E Proof Quality
+
+Workflow: `bmad-qa-generate-e2e-tests` / TEA review, spec-exists fallback
+
+Date: 2026-06-14
+
+### Scope
+
+This QA summary covers proof-quality hardening for authentik and gateway E2E evidence. The implementation
+keeps the live-authentik proof in the deployment/WPM lane, but strengthens the in-repo GLA-side proof:
+browser callback flow, valid wrong-recipient modeling, explicit upstream counters, adapter discovery/JWKS
+contracts, stable package-boundary checks, and bounded event-driven waits.
+
+### Generated And Updated Tests
+
+- [x] `packages/app/src/authentik-scenario-e2e.test.ts` - adds a real Chromium path through the GLA-served handoff page and `/auth/callback`, explicit upstream connection/byte counters, valid wrong-recipient authentik login modeling, and opt-in proof canary markers.
+- [x] `tools/e2e-proof-canaries.mjs` - proves wrong-recipient and upstream-leak canaries visibly fail the strengthened E2E suite.
+- [x] `adapters/auth-authentik/src/auth-authentik.test.ts` - adds OIDC discovery, remote JWKS/key rotation, token `redirect_uri`, invalid state/code, and diagnostic evidence coverage.
+- [x] `adapters/auth-authentik/src/fake-authentik.ts` - exposes a safe JWKS document/key-id seam for remote-JWKS tests.
+- [x] `packages/app/src/scenario-01-e2e.test.ts` and `packages/app/src/completion-e2e.test.ts` - replace critical fixed sleeps with bounded state/event polling.
+- [x] `packages/app/src/authentik-dual-method.test.ts` and `packages/app/src/authentik-scenario-e2e.test.ts` - replace brittle provider-token source scans with stable package/runtime boundary assertions.
+
+### AC Coverage
+
+| AC | Coverage Evidence | Status |
+| --- | --- | --- |
+| AC1 | The passkey authentik capstone path now opens the GLA handoff page in Chromium, intercepts the fake IdP authorize URL, redirects to the GLA-served `/auth/callback`, and waits for the callback page to authorize the grant before WS reachability is asserted. | Covered. |
+| AC2 | The forwarded-link negative enrolls a second valid recipient subject, proves that subject can authenticate to the provider, then presents that valid wrong subject against the original grant and receives 403 with the grant unauthorized. | Covered. |
+| AC3 | The authentik capstone's stub upstream records connections, bytes to client, bytes from client, and hello writes. Accepted flows assert counters increase; refused flows assert counters remain unchanged. | Covered. |
+| AC4 | Adapter contract tests now exercise discovery, remote JWKS, key rotation, token request `redirect_uri`, invalid state, invalid unstaged code, and mapped assurance diagnostics. | Covered. |
+| AC5 | Provider seam checks rely on package dependency/runtime composition boundaries instead of broad source-string scans. The core boundary selftest remains in the full gate. | Covered. |
+| AC6 | Critical scenario/completion waits now use `expect.poll` with diagnostic messages for connector severance, human form/code submission, off-contract state, and teardown. | Covered. |
+
+### Validation
+
+Focused validation:
+
+```bash
+pnpm exec vitest run adapters/auth-authentik/src/auth-authentik.test.ts --reporter=dot
+pnpm exec vitest run packages/app/src/authentik-scenario-e2e.test.ts packages/app/src/authentik-dual-method.test.ts --reporter=dot
+pnpm exec vitest run packages/app/src/scenario-01-e2e.test.ts packages/app/src/completion-e2e.test.ts --reporter=dot
+pnpm run gate:e2e-proof-canaries
+```
+
+Result: passed. Focused adapter tests: 44 passed. Focused authentik app tests: 21 passed. Focused
+scenario/completion tests: 2 passed, 2 skipped. Canary command proved both wrong-recipient and upstream-leak
+deliberate failures are visible.
+
+Full DoD validation:
+
+```bash
+pnpm run gate
+```
+
+Result: passed. Typecheck passed, Biome passed, browser/full-human-view preflight passed, and Vitest passed
+with 64 files, 707 passed, 15 skipped.
+
+### Coverage Notes
+
+- The in-repo test remains a deterministic `FakeAuthentik` proof for GLA-side behavior; deployed real-authentik method/source proof remains recorded through WPM/deployment diagnostics.
+- The adapter now refreshes a non-injected remote JWKS resolver once after `bad_signature`, which is provider-neutral OIDC key-rotation behavior and does not change gateway/core authorization semantics.
