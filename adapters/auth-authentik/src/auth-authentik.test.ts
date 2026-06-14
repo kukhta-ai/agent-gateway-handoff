@@ -10,6 +10,8 @@
 // AC#5 (the amr/acr mapping table) · AC#6 (default-provider wiring lives in the app test, see app/test).
 // The no-half-bound + one-time-consume invariants mirror auth-webauthn's atomic tests.
 
+import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { OpaqueToken, UserIdentity } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import { FakeAuthentik } from "./fake-authentik.js";
@@ -92,6 +94,119 @@ function onlyAttempt(attempts: InMemoryKv<PendingAttempt>, state: string): Pendi
 function expectNoGlaGrant(value: string): void {
   for (const grant of forbiddenGlaGrants) {
     expect(value).not.toContain(String(grant));
+  }
+}
+
+function readRequestBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk as Buffer));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+async function withRemoteFakeAuthentik<T>(
+  run: (ctx: {
+    base: string;
+    fake: () => FakeAuthentik;
+    rotate: (next: FakeAuthentik) => void;
+    provider: AuthAuthentikProvider;
+    subjects: InMemoryKv<BoundSubject>;
+    attempts: InMemoryKv<PendingAttempt>;
+    outcomes: VerifyOutcome[];
+    counts: { discovery: number; jwks: number; token: number };
+  }) => Promise<T>,
+): Promise<T> {
+  let base = "";
+  let currentFake: FakeAuthentik | undefined;
+  const counts = { discovery: 0, jwks: 0, token: 0 };
+  const server: Server = createServer((req, res) => {
+    void (async () => {
+      const fake = currentFake;
+      if (fake === undefined) {
+        sendJson(res, 503, { error: "fake not ready" });
+        return;
+      }
+      const url = new URL(req.url ?? "/", base);
+      if (req.method === "GET" && url.pathname === "/.well-known/openid-configuration") {
+        counts.discovery++;
+        sendJson(res, 200, {
+          issuer: base,
+          authorization_endpoint: `${base}authorize`,
+          token_endpoint: `${base}token`,
+          jwks_uri: `${base}jwks`,
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/jwks") {
+        counts.jwks++;
+        sendJson(res, 200, fake.jwksDocument());
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/token") {
+        counts.token++;
+        const body = await readRequestBody(req);
+        const response = await fake.fetch(`${base}token`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body,
+        });
+        res.writeHead(response.status, {
+          "content-type": response.headers.get("content-type") ?? "application/json",
+        });
+        res.end(await response.text());
+        return;
+      }
+      sendJson(res, 404, { error: "not found" });
+    })().catch((e) => {
+      sendJson(res, 500, { error: String(e) });
+    });
+  });
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    base = `http://127.0.0.1:${port}/`;
+    currentFake = await FakeAuthentik.create({ issuerUrl: base, tokenEndpoint: `${base}token` });
+    const subjects = new InMemoryKv<BoundSubject>();
+    const attempts = new InMemoryKv<PendingAttempt>();
+    const outcomes: VerifyOutcome[] = [];
+    const provider = new AuthAuthentikProvider({
+      issuerUrl: base,
+      clientId: currentFake.clientId,
+      clientSecret: "remote-secret",
+      redirectUri: "https://gla.example/auth/callback",
+      subjects,
+      attempts,
+      onVerifyOutcome: (o) => outcomes.push(o),
+      randomness: fixedRandomness([
+        { state: "remote-1", nonce: "nonce-1" },
+        { state: "remote-2", nonce: "nonce-2" },
+        { state: "remote-3", nonce: "nonce-3" },
+      ]),
+    });
+    return await run({
+      base,
+      fake: () => {
+        if (currentFake === undefined) throw new Error("fake not ready");
+        return currentFake;
+      },
+      rotate: (next) => {
+        currentFake = next;
+      },
+      provider,
+      subjects,
+      attempts,
+      outcomes,
+      counts,
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
 
@@ -227,6 +342,140 @@ describe("AC#2 · verifyAssertion happy path → {ok:true, authStrength} with th
         diagnostics: ["missing-user-verification"],
         providerEvidence: { amr: ["swk"] },
       },
+    });
+  });
+});
+
+describe("GLA-093 · discovery, remote JWKS, token shape, and diagnostic evidence", () => {
+  it("discovers endpoints, validates through remote JWKS, and sends the configured redirect_uri without GLA grants", async () => {
+    await withRemoteFakeAuthentik(async ({ base, fake, provider, subjects, counts }) => {
+      subjects.set(userId, { sub: "sub-abc" });
+      const challenge = (await provider.challenge(userId)) as RedirectChallenge;
+      const url = new URL(challenge.authorizeUrl);
+      expect(url.origin).toBe(new URL(base).origin);
+      expect(url.pathname).toBe("/authorize");
+      expect(counts.discovery).toBe(1);
+
+      await fake().stageValidLogin("remote-code", {
+        sub: "sub-abc",
+        nonce: "nonce-1",
+        amr: ["swk"],
+        userVerified: true,
+      });
+      const result = await provider.verifyAssertion(userId, {
+        code: "remote-code",
+        state: "remote-1",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.authStrength).toBe("webauthn");
+      expect(counts.token).toBe(1);
+      expect(counts.jwks).toBeGreaterThanOrEqual(1);
+      expect(fake().lastTokenRequest).toMatchObject({
+        grantType: "authorization_code",
+        code: "remote-code",
+        clientId: "gla-client",
+        hasClientSecret: true,
+        hasCodeVerifier: true,
+        redirectUri: "https://gla.example/auth/callback",
+      });
+      expectNoGlaGrant(JSON.stringify(fake().lastTokenRequest));
+    });
+  });
+
+  it("refetches remote JWKS when authentik rotates to a new key id", async () => {
+    await withRemoteFakeAuthentik(async ({ base, fake, rotate, provider, subjects, counts }) => {
+      subjects.set(userId, { sub: "sub-abc" });
+
+      await provider.challenge(userId);
+      await fake().stageValidLogin("remote-code-1", {
+        sub: "sub-abc",
+        nonce: "nonce-1",
+        amr: ["pwd"],
+      });
+      const first = await provider.verifyAssertion(userId, {
+        code: "remote-code-1",
+        state: "remote-1",
+      });
+      expect(first).toMatchObject({ ok: true, authStrength: "password" });
+      const jwksAfterFirst = counts.jwks;
+
+      const rotated = await FakeAuthentik.create({
+        issuerUrl: base,
+        tokenEndpoint: `${base}token`,
+        keyId: "fake-key-2",
+      });
+      rotate(rotated);
+      await provider.challenge(userId);
+      await rotated.stageValidLogin("remote-code-2", {
+        sub: "sub-abc",
+        nonce: "nonce-2",
+        amr: ["swk"],
+        userVerified: true,
+      });
+      const second = await provider.verifyAssertion(userId, {
+        code: "remote-code-2",
+        state: "remote-2",
+      });
+
+      expect(second).toMatchObject({ ok: true, authStrength: "webauthn" });
+      expect(counts.jwks).toBeGreaterThan(jwksAfterFirst);
+    });
+  });
+
+  it("invalid state and unstaged authorization code fail closed with diagnostic reasons", async () => {
+    await withRemoteFakeAuthentik(async ({ provider, subjects, outcomes }) => {
+      subjects.set(userId, { sub: "sub-abc" });
+      const unknownState = await provider.verifyAssertionDetailed(userId, {
+        code: "unused",
+        state: "missing-state",
+      });
+      expect(unknownState).toEqual({ ok: false, kind: "authenticate", reason: "state_unknown" });
+
+      await provider.challenge(userId);
+      const badCode = await provider.verifyAssertionDetailed(userId, {
+        code: "not-staged-at-token-endpoint",
+        state: "remote-1",
+      });
+      expect(badCode).toEqual({
+        ok: false,
+        kind: "authenticate",
+        reason: "token_exchange_failed",
+      });
+      expect(outcomes).toEqual([unknownState, badCode]);
+    });
+  });
+
+  it("successful mapped assurance evidence is emitted to diagnostics without secrets", async () => {
+    await withRemoteFakeAuthentik(async ({ fake, provider, subjects, outcomes }) => {
+      subjects.set(userId, { sub: "sub-abc" });
+      await provider.challenge(userId);
+      await fake().stageValidLogin("remote-code", {
+        sub: "sub-abc",
+        nonce: "nonce-1",
+        amr: ["swk"],
+        userVerified: true,
+      });
+
+      const result = await provider.verifyAssertion(userId, {
+        code: "remote-code",
+        state: "remote-1",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(outcomes.at(-1)).toMatchObject({
+        ok: true,
+        kind: "authenticate",
+        authStrength: "webauthn",
+        methodResolvable: true,
+        assurance: {
+          level: "phishing-resistant",
+          providerEvidence: { amr: ["swk"], userVerified: true },
+          recipientBound: true,
+          replayResistant: true,
+        },
+      });
+      expect(JSON.stringify(outcomes)).not.toContain("remote-secret");
     });
   });
 });

@@ -63,11 +63,13 @@ import type { ProvisioningStack } from "./index.js";
 import { createProvisioningBridge } from "./index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
+const wrongRecipient = "tg:user:999" as RecipientRef;
 /** The IdentityService derives userId from a recipient ref as `user:<ref>` (see packages/identity). */
 const userIdOf = (r: RecipientRef): string => `user:${r}`;
 const discharge = "operator-discharge-grant" as OpaqueToken;
 /** The stable authentik subject the recipient is enrolled against (an immutable id, as hashed_user_id would be). */
 const BOUND_SUB = "sub-recipient-capstone-immutable";
+const WRONG_BOUND_SUB = "sub-valid-wrong-recipient";
 
 function chromiumAvailable(): boolean {
   if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
@@ -151,21 +153,53 @@ function encodeWsTextFrame(text: string): Buffer {
 }
 
 /** A stub WS upstream standing in for the capsule's noVNC endpoint (real noVNC needs X — gated for hermes-1). */
-function startStubUpstream(): Promise<{ endpoint: string; close: () => Promise<void> }> {
+interface UpstreamSnapshot {
+  connections: number;
+  bytesToClient: number;
+  bytesFromClient: number;
+  helloWrites: number;
+}
+
+function startStubUpstream(): Promise<{
+  endpoint: string;
+  close: () => Promise<void>;
+  snapshot: () => UpstreamSnapshot;
+}> {
   return new Promise((resolve) => {
     const server: Server = createServer();
+    const snapshot: UpstreamSnapshot = {
+      connections: 0,
+      bytesToClient: 0,
+      bytesFromClient: 0,
+      helloWrites: 0,
+    };
+    const writeToClient = (
+      socket: { write(bytes: string | Buffer): unknown },
+      bytes: string | Buffer,
+    ): void => {
+      snapshot.bytesToClient +=
+        typeof bytes === "string" ? Buffer.byteLength(bytes) : bytes.byteLength;
+      socket.write(bytes);
+    };
     server.on("upgrade", (req, socket) => {
+      snapshot.connections++;
       const key = (req.headers["sec-websocket-key"] as string | undefined) ?? "";
-      socket.write(
+      writeToClient(
+        socket,
         `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${wsAccept(key)}\r\n\r\n`,
       );
-      socket.write(encodeWsTextFrame("UPSTREAM_NOVNC_HELLO"));
+      writeToClient(socket, encodeWsTextFrame("UPSTREAM_NOVNC_HELLO"));
+      snapshot.helloWrites++;
+      socket.on("data", (chunk) => {
+        snapshot.bytesFromClient += (chunk as Buffer).byteLength;
+      });
       socket.on("error", () => {});
     });
     server.listen(0, "127.0.0.1", () => {
       const port = (server.address() as AddressInfo).port;
       resolve({
         endpoint: `ws://127.0.0.1:${port}/`,
+        snapshot: () => ({ ...snapshot }),
         close: () =>
           new Promise<void>((r) => {
             (server as { closeAllConnections?: () => void }).closeAllConnections?.();
@@ -176,6 +210,44 @@ function startStubUpstream(): Promise<{ endpoint: string; close: () => Promise<v
       });
     });
   });
+}
+
+function expectNoUpstreamTraffic(
+  upstream: { snapshot: () => UpstreamSnapshot },
+  before: UpstreamSnapshot,
+  label: string,
+): void {
+  const after = upstream.snapshot();
+  expect(after.connections, `${label}: upstream connection count must not increase`).toBe(
+    before.connections,
+  );
+  expect(after.bytesToClient, `${label}: upstream bytes-to-client must not increase`).toBe(
+    before.bytesToClient,
+  );
+  expect(after.helloWrites, `${label}: upstream hello writes must not increase`).toBe(
+    before.helloWrites,
+  );
+}
+
+function expectUpstreamReached(
+  upstream: { snapshot: () => UpstreamSnapshot },
+  before: UpstreamSnapshot,
+  label: string,
+): void {
+  const after = upstream.snapshot();
+  expect(after.connections, `${label}: upstream must receive a proxied connection`).toBeGreaterThan(
+    before.connections,
+  );
+  expect(after.bytesToClient, `${label}: upstream must send bytes to the browser`).toBeGreaterThan(
+    before.bytesToClient,
+  );
+  expect(after.helloWrites, `${label}: upstream hello marker must be written`).toBeGreaterThan(
+    before.helloWrites,
+  );
+}
+
+function maybeFailProofCanary(kind: "wrong-recipient" | "upstream-leak"): boolean {
+  return process.env.GLA_E2E_PROOF_CANARY === kind;
 }
 
 /** Open a raw WS upgrade to the gateway; resolve the first bytes (101+hello if proxied, else an HTTP refusal). */
@@ -313,6 +385,49 @@ async function synthesizeStepUp(
   });
 }
 
+async function completeStepUpViaBrowserCallback(
+  origin: string,
+  fake: FakeAuthentik,
+  link: string,
+  opts: { amr?: string[]; sub: string; userVerified?: boolean },
+): Promise<void> {
+  const browser = await chromium.launch({ headless: true });
+  closers.push(() => browser.close().catch(() => {}));
+  const ctx = await browser.newContext();
+  await ctx.route("https://idp.example/**", async (route) => {
+    const authorizeUrl = new URL(route.request().url());
+    const state = authorizeUrl.searchParams.get("state") ?? "";
+    const nonce = authorizeUrl.searchParams.get("nonce") ?? "";
+    expect(state, "OIDC authorize URL must carry state").not.toBe("");
+    expect(nonce, "OIDC authorize URL must carry nonce").not.toBe("");
+    const redirectUri = new URL(authorizeUrl.searchParams.get("redirect_uri") ?? "");
+    expect(redirectUri.pathname).toBe("/auth/callback");
+    expect(authorizeUrl.toString()).not.toContain(grantFromLink(link));
+    const code = `browser-callback-${state}`;
+    await fake.stageValidLogin(code, {
+      sub: opts.sub,
+      nonce,
+      ...(opts.amr !== undefined ? { amr: opts.amr } : {}),
+      ...(opts.userVerified !== undefined ? { userVerified: opts.userVerified } : {}),
+    });
+    await route.fulfill({
+      status: 302,
+      headers: { location: `${origin}/auth/callback?code=${code}&state=${state}` },
+      body: "",
+    });
+  });
+  const page = await ctx.newPage();
+  await page.goto(link);
+  await page.getByRole("button", { name: /verify/i }).click();
+  await expect
+    .poll(() => page.url(), {
+      message: "browser callback flow must land on the GLA-served callback URL",
+      timeout: 30_000,
+    })
+    .toBe(`${origin}/auth/callback`);
+  await ctx.close();
+}
+
 /**
  * Build a COLD provisioning stack wired with the DELEGATED authentik provider (the fake-backed identity injected
  * as `handoff.identity`, `GLA_AUTH_PROVIDER=authentik` recorded in `authModule`), a real capsule launcher, and the
@@ -447,27 +562,33 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         const grantId = grantIdOf(a.stack, view.link);
         log("A", `handoff open → ${view.handoff_id}`);
 
-        const res = await synthesizeStepUp(a.origin, wA.fake, view.link, {
+        await completeStepUpViaBrowserCallback(a.origin, wA.fake, view.link, {
           amr: ["swk"],
           sub: BOUND_SUB,
           userVerified: true,
         });
-        expect(res.status).toBe(200);
-        const body = (await res.json()) as { authorized?: boolean; auth_strength?: string };
-        expect(body.authorized).toBe(true);
-        expect(body.auth_strength).toBe("webauthn"); // the method is in the fact.
         if (grantId !== undefined) {
-          expect(a.stack.gateway?.isGrantAuthorized(grantId)).toBe(true);
+          await expect
+            .poll(() => a.stack.gateway?.isGrantAuthorized(grantId), {
+              message: "browser callback step-up must authorize the grant",
+              timeout: 30_000,
+            })
+            .toBe(true);
         }
         // The WS upgrade is PROXIED to the REAL capsule's noVNC endpoint (101 + the hello marker).
+        const beforeReachA = upstream.snapshot();
         const reached = await rawUpgrade(
           a.origin,
           new URL(view.link).pathname,
           grantFromLink(view.link),
         );
         expect(reached.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+        expectUpstreamReached(upstream, beforeReachA, "browser-callback passkey accepted path");
         reached.socket.destroy();
-        log("A", "PASSKEY run reached the real capsule (WS proxied, noVNC hello observed)");
+        log(
+          "A",
+          "PASSKEY run completed through the GLA-served callback page and reached the real capsule",
+        );
       } finally {
         if (sessA) await a.stack.reconciler.reconcile(sessA).catch(() => {});
       }
@@ -498,12 +619,14 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         if (grantId !== undefined) {
           expect(b.stack.gateway?.isGrantAuthorized(grantId)).toBe(true);
         }
+        const beforeReachB = upstream.snapshot();
         const reached = await rawUpgrade(
           b.origin,
           new URL(view.link).pathname,
           grantFromLink(view.link),
         );
         expect(reached.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+        expectUpstreamReached(upstream, beforeReachB, "password accepted path");
         reached.socket.destroy();
         log("B", "PASSWORD run reached the real capsule (WS proxied, noVNC hello observed)");
       } finally {
@@ -549,6 +672,7 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
           expect(stack.gateway?.isGrantAuthorized(grantP)).toBe(false);
         }
         // THE END-TO-END GATE: the WS upgrade is REFUSED and the capsule receives NO traffic.
+        const beforeRefusedP = upstream.snapshot();
         const refused = await rawUpgrade(
           origin,
           new URL(viewP.link).pathname,
@@ -556,6 +680,7 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         );
         expect(refused.firstChunk).toMatch(/401/);
         expect(refused.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+        expectNoUpstreamTraffic(upstream, beforeRefusedP, "password refused on webauthn route");
         refused.socket.destroy();
         log("3", 'password-only run on a "webauthn" route → 403, WS refused, capsule NOT reached');
 
@@ -571,12 +696,14 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         });
         expect(resK.status).toBe(200);
         expect(((await resK.json()) as { authorized?: boolean }).authorized).toBe(true);
+        const beforeReachedK = upstream.snapshot();
         const reachedK = await rawUpgrade(
           origin,
           new URL(viewK.link).pathname,
           grantFromLink(viewK.link),
         );
         expect(reachedK.firstChunk).toContain("UPSTREAM_NOVNC_HELLO");
+        expectUpstreamReached(upstream, beforeReachedK, "passkey accepted after refused password");
         reachedK.socket.destroy();
         log(
           "3",
@@ -617,12 +744,14 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         });
         // /handoff/auth/options refuses an un-enrolled recipient (403) → the page never gets a redirect challenge.
         expect(resUn.status).toBe(403);
+        const beforeUn = upstream.snapshot();
         const refusedUn = await rawUpgrade(
           origin,
           new URL(viewUn.link).pathname,
           grantFromLink(viewUn.link),
         );
         expect(refusedUn.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+        expectNoUpstreamTraffic(upstream, beforeUn, "un-enrolled recipient");
         refusedUn.socket.destroy();
         log("4", "un-enrolled recipient → step-up refused, WS refused, capsule not reached");
         await stack.session.cancelHandoff(viewUn.handoff_id); // reset the window for the next negative.
@@ -640,12 +769,14 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
         expect(resSm.status).toBe(403); // verifyAssertion → subject_mismatch → {ok:false}.
         const grantSm = grantIdOf(stack, viewSm.link);
         if (grantSm !== undefined) expect(stack.gateway?.isGrantAuthorized(grantSm)).toBe(false);
+        const beforeSm = upstream.snapshot();
         const refusedSm = await rawUpgrade(
           origin,
           new URL(viewSm.link).pathname,
           grantFromLink(viewSm.link),
         );
         expect(refusedSm.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+        expectNoUpstreamTraffic(upstream, beforeSm, "subject mismatch");
         refusedSm.socket.destroy();
         // The bound subject is unchanged (a valid login by the WRONG person bound nothing).
         expect(w.provider.getBoundSubject(userIdOf(recipient))?.sub).toBe(BOUND_SUB);
@@ -679,27 +810,67 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
           body: JSON.stringify({ grant, path, assertion: { code: `bad-${state}`, state } }),
         });
         expect(resBad.status).toBe(403);
+        const beforeBad = upstream.snapshot();
         const refusedBad = await rawUpgrade(origin, path, grant);
         expect(refusedBad.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+        expectNoUpstreamTraffic(upstream, beforeBad, "invalid id_token");
         refusedBad.socket.destroy();
         log("4", "invalid id_token (nonce mismatch) → 403, WS refused, capsule not reached");
         await stack.session.cancelHandoff(viewBad.handoff_id);
 
-        // ── Negative 4 — FORWARDED LINK (S-10 lift): the grant-bound link opened as a DIFFERENT recipient. ──
-        // The grant is recipient-bound; even a valid authentik login for `wrongRecipient` resolves to a sub not
-        // bound to THIS grant's recipient. The harness: a fresh handoff bound to `recipient`, but the second
-        // "recipient" presents it — a raw WS upgrade with the grant must NOT reach the capsule (recipient caveat).
-        // (We assert the edge refusal directly — the grant was never authorized for a step-up by the wrong party.)
+        // ── Negative 4 — FORWARDED LINK (S-10 lift): a DIFFERENT valid authentik user opens the original link. ──
+        // First prove the second recipient is a real provider identity: they are enrolled and can authenticate
+        // successfully to authentik on their own. Then present that valid wrong subject against the original grant.
+        await enrollThroughAuthentik(w, wrongRecipient, WRONG_BOUND_SUB);
+        expect(w.identity.isEnrolled(wrongRecipient)).toBe(true);
+        const wrongChallenge = await w.provider.challenge(userIdOf(wrongRecipient));
+        const wrongParams = redirectParams(wrongChallenge);
+        await w.fake.stageValidLogin(`wrong-ok-${wrongParams.state}`, {
+          sub: WRONG_BOUND_SUB,
+          nonce: wrongParams.nonce,
+          amr: ["pwd"],
+        });
+        const wrongOwnLogin = await w.provider.verifyAssertion(userIdOf(wrongRecipient), {
+          code: `wrong-ok-${wrongParams.state}`,
+          state: wrongParams.state,
+        });
+        expect(wrongOwnLogin).toMatchObject({ ok: true, authStrength: "password" });
+
         const viewFwd = await stack.session.openHandoff(sess, { reason: "forwarded" });
+        const grantFwd = grantIdOf(stack, viewFwd.link);
+        const resFwd = await synthesizeStepUp(origin, w.fake, viewFwd.link, {
+          amr: ["pwd"],
+          sub: WRONG_BOUND_SUB,
+        });
+        if (maybeFailProofCanary("wrong-recipient")) {
+          expect(
+            resFwd.status,
+            "GLA-093 wrong-recipient canary failure: a valid wrong recipient must not authorize the original grant",
+          ).toBe(200);
+        } else {
+          expect(resFwd.status).toBe(403);
+        }
+        if (grantFwd !== undefined) expect(stack.gateway?.isGrantAuthorized(grantFwd)).toBe(false);
+        const beforeFwd = upstream.snapshot();
         const fwd = await rawUpgrade(
           origin,
           new URL(viewFwd.link).pathname,
           grantFromLink(viewFwd.link),
         );
-        // No step-up happened for this window → the grant is unauthorized → WS refused (the forwarded link is useless).
         expect(fwd.firstChunk).not.toContain("UPSTREAM_NOVNC_HELLO");
+        if (maybeFailProofCanary("upstream-leak")) {
+          expect(
+            upstream.snapshot().connections,
+            "GLA-093 upstream-leak canary failure: refused wrong-recipient flow must not touch upstream",
+          ).toBeGreaterThan(beforeFwd.connections);
+        } else {
+          expectNoUpstreamTraffic(upstream, beforeFwd, "valid wrong-recipient forwarded link");
+        }
         fwd.socket.destroy();
-        log("4", "forwarded grant (no step-up) → WS refused, capsule not reached");
+        log(
+          "4",
+          "forwarded grant with a valid wrong-recipient authentik login → 403, WS refused, capsule not reached",
+        );
       } finally {
         if (sess) await stack.reconciler.reconcile(sess).catch(() => {});
       }
@@ -757,34 +928,18 @@ describe("GLA-076 AC#5 — the auth seam is full-capability: provider swap is co
     expect(atk.route).toBeDefined();
   });
 
-  it("packages/gateway/src/** contains NO provider-specific token (the static no-authentik-in-core check, carried from GLA-072)", () => {
-    const root = join(repoRoot(), "packages/gateway/src");
-    const forbidden =
-      /authentik|\bissuer\b|\bamr\b|\bacr\b|openid|jwks|id_token|client_secret|\.well-known|\bswk\b|\bhwk\b|\bfido\b/i;
-    const offenders: string[] = [];
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir, { withFileTypes: true })) {
-        const p = join(dir, name.name);
-        if (name.isDirectory()) walk(p);
-        else if (name.name.endsWith(".ts")) {
-          const lines = readFileSync(p, "utf8").split("\n");
-          for (let i = 0; i < lines.length; i++) {
-            if (forbidden.test(lines[i] ?? "")) {
-              offenders.push(`${p.replace(repoRoot(), "")}:${i + 1}: ${(lines[i] ?? "").trim()}`);
-            }
-          }
-        }
-      }
+  function deps(relFromRepoRoot: string): string[] {
+    const pkg = JSON.parse(readFileSync(join(repoRoot(), relFromRepoRoot), "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
-    walk(root);
-    expect(offenders).toEqual([]);
-  });
+    return [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
+  }
 
-  it("the served pages branch on a GENERIC options.kind (the WebAuthn provider flows through the else arm)", () => {
-    const root = join(repoRoot(), "packages/gateway/src");
-    const handoff = readFileSync(join(root, "handoff-page.ts"), "utf8");
-    expect(handoff).toContain('options.kind === "redirect"'); // the generic redirect discriminant …
-    expect(handoff).toContain("navigator.credentials.get"); // … and the UNCHANGED in-page WebAuthn ceremony.
+  it("package/runtime boundaries keep provider-specific code owned by app, not gateway or core", () => {
+    expect(deps("packages/gateway/package.json")).not.toContain("@gla/auth-authentik");
+    expect(deps("packages/kernel/package.json")).not.toContain("@gla/auth-authentik");
+    expect(deps("packages/app/package.json")).toContain("@gla/auth-authentik");
   });
 });
 

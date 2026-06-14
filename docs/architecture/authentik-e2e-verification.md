@@ -243,6 +243,21 @@ in-dev proof**, and a **live real-authentik round-trip is a deploy-time confirma
 > actually configured to emit the distinguishing `amr` and the routing agrees on one origin** in the live
 > environment. Neither substitutes for the other; together they are the complete proof.
 
+### §6.1 · GLA-093 proof-quality labels
+
+GLA-093 tightens how the proof is reported and tested. The evidence labels are:
+
+| Evidence class | What it proves | Current owner |
+|---|---|---|
+| **Synthetic OIDC proof** | `FakeAuthentik` signs deterministic id_tokens, stages token/JWKS behavior, and lets the GLA adapter/gateway/session/capsule thread prove strength mapping, recipient binding, failure reasons, and replay behavior without a live IdP. | `adapters/auth-authentik/src/auth-authentik.test.ts` and synthetic branches of `packages/app/src/authentik-scenario-e2e.test.ts` |
+| **Browser-level GLA proof** | A real Chromium page opens the GLA handoff page, receives the delegated redirect challenge, is redirected back to the **GLA-served** `/auth/callback` URL, and the callback page posts `{code,state}` to the unchanged verify route before the grant can reach the capsule. | `packages/app/src/authentik-scenario-e2e.test.ts` |
+| **Gateway/capsule no-leak proof** | Refused flows assert explicit upstream connection and byte counters, not only absence of a marker string. Positive flows assert the counters increase. Wrong-recipient and upstream-leak canaries intentionally fail the suite when enabled. | `packages/app/src/authentik-scenario-e2e.test.ts` and `pnpm run gate:e2e-proof-canaries` |
+| **Deployed-provider proof** | Real authentik login flows, real emitted `amr`/`acr`/`gla_uv`, real sources, and same-origin Caddy routing are verified in the WPM/deployment layer and recorded as redacted `loginMethodProofs[]`. | GLA-074 installer/deployment verification and GLA-086 diagnostics |
+
+These labels prevent over-claiming. A green in-repo gate proves the GLA-side contract and browser callback
+handling; it does **not** by itself prove that a particular deployed authentik instance exposes every intended
+login method or emits the production claims correctly.
+
 ---
 
 ## §7 · Risks GLA-076 must watch
