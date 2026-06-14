@@ -5,10 +5,10 @@
 
 phase: 5
 phase_name: "Autonomous build — GLA-095..GLA-105 provider-host and test-layout migration"
-branch: feature/provider-host-task-103
+branch: feature/provider-host
 epic: provider-host-and-test-layout-095-105
-active_story: GLA-103
-review_cycle: 1
+active_story: null
+review_cycle: 0
 follow_on_scope:
   tasks: "GLA-095..GLA-105"
   branch_base: "feature/provider-host"
