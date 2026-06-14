@@ -49,6 +49,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type DaemonHandle, endpointIsLocal, parseServeArgs, serve } from "./daemon.js";
 
 const recipient = "tg:user:123" as RecipientRef;
+function authentikConfig(
+  redirectUri = "https://gla.example/team-a/auth/callback",
+  clientSecret = "secret",
+): Record<string, unknown> {
+  return {
+    issuerUrl: "https://idp.example/application/o/gla/",
+    clientId: "gla-client",
+    clientSecret,
+    redirectUri,
+  };
+}
+
 const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
   provider: "authentik",
   declared: true,
@@ -698,32 +710,39 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
       bridgeEndpoint: join(scratch("gla-authentik-base-"), "gla.sock"),
       publicBaseUrl: "https://gla.example/team-a/",
       authProvider: "authentik" as const,
-      authentikIssuerUrl: "https://idp.example/application/o/gla/",
-      authentikClientId: "gla-client",
-      authentikClientSecret: "secret",
+      dependencyBindings: referenceWpmDependencyBindings(),
       log: () => {},
     };
     await expect(
-      serve({ ...common, authentikRedirectUri: "https://other.example/team-a/auth/callback" }),
+      serve({
+        ...common,
+        authProviderConfig: authentikConfig("https://other.example/team-a/auth/callback"),
+      }),
     ).rejects.toThrow(/same origin/i);
     await expect(
-      serve({ ...common, authentikRedirectUri: "https://gla.example/auth/callback" }),
+      serve({
+        ...common,
+        authProviderConfig: authentikConfig("https://gla.example/auth/callback"),
+      }),
     ).rejects.toThrow(/path prefix/i);
     await expect(
-      serve({ ...common, authentikRedirectUri: "https://gla.example/team-a/outpost/callback" }),
+      serve({
+        ...common,
+        authProviderConfig: authentikConfig("https://gla.example/team-a/outpost/callback"),
+      }),
     ).rejects.toThrow(/GLA gateway callback path \/team-a\/auth\/callback/i);
     await expect(
       serve({
         ...common,
         publicBaseUrl: "https://gla.example/",
-        authentikRedirectUri: "https://gla.example/outpost.goauthentik.io/callback",
+        authProviderConfig: authentikConfig("https://gla.example/outpost.goauthentik.io/callback"),
       }),
     ).rejects.toThrow(/GLA gateway callback path \/auth\/callback/i);
 
     const ok = await serve({
       ...common,
       bridgeEndpoint: join(scratch("gla-authentik-base-ok-"), "gla.sock"),
-      authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+      authProviderConfig: authentikConfig(),
     });
     liveHandles.push(ok);
     expect(ok.publicBaseUrl).toBe("https://gla.example/team-a/");
@@ -738,10 +757,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
       bridgeEndpoint: join(scratch("gla-authentik-redaction-"), "gla.sock"),
       publicBaseUrl: "https://gla.example/team-a/",
       authProvider: "authentik",
-      authentikIssuerUrl: "https://idp.example/application/o/gla/",
-      authentikClientId: "gla-client-canary",
-      authentikClientSecret: secret,
-      authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+      authProviderConfig: authentikConfig("https://gla.example/team-a/auth/callback", secret),
       authDeploymentRolesJson: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
       dependencyBindings: referenceWpmDependencyBindings(),
       deliverySink: { write: () => {} },
@@ -770,10 +786,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
       publicBaseUrl: "https://gla.example/team-a/",
       authProvider: "authentik",
       authAssuranceProfile: "phishing-resistant",
-      authentikIssuerUrl: "https://idp.example/application/o/gla/",
-      authentikClientId: "gla-client-canary",
-      authentikClientSecret: secret,
-      authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+      authProviderConfig: authentikConfig("https://gla.example/team-a/auth/callback", secret),
       authEnrollmentPolicyJson: AUTHENTIK_ENROLLMENT_POLICY_JSON,
       authDeploymentRolesJson: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
       dependencyBindings: referenceWpmDependencyBindings(),
@@ -899,8 +912,8 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     expect(diag.code, diag.stderr).toBe(0);
     expect(diag.stdout).toMatch(/outer proxy.*does not perform GLA handoff step-up/i);
     expect(diag.stdout).toContain("GLA_AUTH_PROVIDER=authentik");
-    expect(diag.stdout).toContain("GLA_AUTHENTIK_ISSUER_URL");
-    expect(diag.stdout).toContain("GLA_AUTHENTIK_REDIRECT_URI");
+    expect(diag.stdout).toContain("GLA_AUTH_PROVIDER_CONFIG_JSON");
+    expect(diag.stdout).toMatch(/issuerUrl.*clientId.*clientSecret.*redirectUri/);
     expect(diag.stdout).toMatch(/intentionally.*WebAuthn/i);
     expect(diag.stdout).not.toContain("EDGE_TOKEN_CANARY_087");
   });
@@ -1073,7 +1086,13 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
 
   it("rejects redaction and unresolved template placeholders from flags and env", () => {
     expect(() =>
-      parseServeArgs(["--authentik-client-secret", "***"], {} as NodeJS.ProcessEnv),
+      parseServeArgs(
+        [
+          "--auth-provider-config-json",
+          JSON.stringify({ ...authentikConfig(), clientSecret: "***" }),
+        ],
+        {} as NodeJS.ProcessEnv,
+      ),
     ).toThrow(/placeholder/i);
     expect(() =>
       parseServeArgs(["--public-base-url", "<redacted>"], {} as NodeJS.ProcessEnv),
@@ -1082,7 +1101,13 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
       /placeholder/i,
     );
     expect(() =>
-      parseServeArgs(["--authentik-client-id", "⟨client-id⟩"], {} as NodeJS.ProcessEnv),
+      parseServeArgs(
+        [
+          "--auth-provider-config-json",
+          JSON.stringify({ ...authentikConfig(), clientId: "⟨client-id⟩" }),
+        ],
+        {} as NodeJS.ProcessEnv,
+      ),
     ).toThrow(/placeholder/i);
     expect(() =>
       parseServeArgs([], {
@@ -1091,12 +1116,18 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
     ).toThrow(/placeholder/i);
     expect(() =>
       parseServeArgs([], {
-        GLA_AUTHENTIK_ISSUER_URL: "<issuer-url>",
+        GLA_AUTH_PROVIDER_CONFIG_JSON: JSON.stringify({
+          ...authentikConfig(),
+          issuerUrl: "<issuer-url>",
+        }),
       } as NodeJS.ProcessEnv),
     ).toThrow(/placeholder/i);
     expect(() =>
       parseServeArgs([], {
-        GLA_AUTHENTIK_CLIENT_SECRET: "<secret>",
+        GLA_AUTH_PROVIDER_CONFIG_JSON: JSON.stringify({
+          ...authentikConfig(),
+          clientSecret: "<secret>",
+        }),
       } as NodeJS.ProcessEnv),
     ).toThrow(/placeholder/i);
   });
@@ -1111,10 +1142,7 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
         bridgeEndpoint: endpoint,
         publicBaseUrl: "https://gla.example/",
         authProvider: "authentik",
-        authentikIssuerUrl: "https://idp.example/application/o/gla/",
-        authentikClientId: "gla-client",
-        authentikClientSecret: "***",
-        authentikRedirectUri: "https://gla.example/auth/callback",
+        authProviderConfig: authentikConfig("https://gla.example/auth/callback", "***"),
         log: () => {},
       }),
     ).rejects.toThrow(/placeholder/i);
@@ -1162,10 +1190,11 @@ describe("deployment templates — public base path guidance", () => {
     expect(combined).toMatch(/GLA_TRUST_FORWARDED_PREFIX=true/i);
     expect(combined).toMatch(/sanitize|overwrites/i);
     expect(combined).toMatch(/WebSocket/i);
-    expect(combined).toMatch(/GLA_AUTHENTIK_ISSUER_URL=https:\/\/idp\.example/i);
+    expect(combined).toMatch(/GLA_AUTH_PROVIDER_CONFIG_JSON=.*https:\/\/idp\.example/i);
     expect(combined).toMatch(
-      /GLA_AUTHENTIK_REDIRECT_URI=https:\/\/gla\.example\/team-a\/auth\/callback/i,
+      /GLA_AUTH_PROVIDER_CONFIG_JSON=.*https:\/\/gla\.example\/team-a\/auth\/callback/i,
     );
+    expect(combined).toMatch(/GLA_DEPENDENCY_BINDINGS_JSON=.*identity-provider/i);
     expect(combined).toMatch(/forward_auth/i);
     expect(combined).toMatch(/\/outpost\.goauthentik\.io\/\*/i);
     expect(combined).toMatch(/defense-in-depth/i);

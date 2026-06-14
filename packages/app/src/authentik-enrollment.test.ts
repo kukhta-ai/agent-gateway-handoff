@@ -711,12 +711,13 @@ describe("AC#5 · the default / webauthn provider's enrollment path is unchanged
     });
     const atk = createEnrollmentStack({
       authProvider: "authentik",
-      authentik: {
+      authProviderConfig: {
         issuerUrl: "https://idp.example/application/o/gla/",
         clientId: "gla-client",
         clientSecret: "s",
         redirectUri: "https://gla.example/auth/callback",
       },
+      dependencyBindings: referenceWpmDependencyBindings(),
       expectedOrigin: "http://localhost:3000",
       publicBaseUrl: "http://localhost:3000",
       port: 0,

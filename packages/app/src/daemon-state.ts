@@ -77,7 +77,7 @@ export const DAEMON_PERSISTED_RECORDS: readonly PersistedRecordClassification[] 
     disposal: "delete or replace on re-enrollment/removal with redacted audit context",
   },
   {
-    kind: "auth.webauthn.credentials",
+    kind: "provider.webauthn.credentials",
     owner: "@gla/auth-webauthn",
     classification: "sensitive",
     recovery: "restore credential public key/counter before WebAuthn step-up",
@@ -85,7 +85,7 @@ export const DAEMON_PERSISTED_RECORDS: readonly PersistedRecordClassification[] 
     disposal: "delete on re-enrollment/removal; never expose raw credential details in diagnostics",
   },
   {
-    kind: "auth.webauthn.challenges",
+    kind: "provider.webauthn.challenges",
     owner: "@gla/auth-webauthn",
     classification: "secret",
     recovery: "unexpired challenges may complete; stale or wrong-kind challenges fail closed",
@@ -93,7 +93,7 @@ export const DAEMON_PERSISTED_RECORDS: readonly PersistedRecordClassification[] 
     disposal: "delete on claim, completion, expiry, or incident cleanup",
   },
   {
-    kind: "auth.authentik.subjects",
+    kind: "provider.authentik.subjects",
     owner: "@gla/auth-authentik",
     classification: "sensitive",
     recovery: "restore stable userId-to-sub binding exactly; mismatch fails closed",
@@ -101,7 +101,7 @@ export const DAEMON_PERSISTED_RECORDS: readonly PersistedRecordClassification[] 
     disposal: "delete on re-enrollment/removal or identity binding incident",
   },
   {
-    kind: "auth.authentik.attempts",
+    kind: "provider.authentik.attempts",
     owner: "@gla/auth-authentik",
     classification: "secret",
     recovery: "unexpired pending OIDC attempts may complete once; consumed/expired attempts refuse",

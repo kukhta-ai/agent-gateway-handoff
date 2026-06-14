@@ -2,8 +2,14 @@
 // This package is allowed to import today's concrete adapters because it is a selected provider set,
 // not the neutral host and not narrow-waist core. App migration later imports this set as one opaque list.
 
-import { AuthAuthentikProvider, type BoundSubject, type PendingAttempt } from "@gla/auth-authentik";
 import {
+  AUTH_AUTHENTIK_MODULE,
+  AuthAuthentikProvider,
+  type BoundSubject,
+  type PendingAttempt,
+} from "@gla/auth-authentik";
+import {
+  AUTH_WEBAUTHN_MODULE,
   AuthWebauthnProvider,
   type PendingChallenge,
   type StoredCredential,
@@ -25,6 +31,7 @@ import { ConnectorCdpAdapter } from "@gla/connector-cdp";
 import { DetectorUrlAdapter } from "@gla/detector-url";
 import { EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
 import type {
+  AuthProviderPort,
   CompletionDetectorPort,
   ConfigSchema,
   IdentityPort,
@@ -34,15 +41,44 @@ import type {
 import { LauncherProcessAdapter } from "@gla/launcher-process";
 import { ProviderHost } from "@gla/provider-host";
 import type {
+  CreateProviderOptions,
   GlaProviderModule,
   ProviderCreateContext,
+  ProviderHostOptions,
   ProviderId,
   ProviderRegistrationContext,
+  ProviderStateRoot,
 } from "@gla/provider-host";
 import { WorkspaceProfileAdapter } from "@gla/workspace-profile";
 
 /** Stable package-identity marker. */
 export const PROVIDER_SET_REFERENCE_MODULE = "@gla/provider-set-reference" as const;
+/** Provider id for the in-tree WebAuthn auth provider. */
+export const AUTH_WEBAUTHN_PROVIDER_ID = "webauthn" as const;
+/** Provider id for the delegated authentik auth provider. */
+export const AUTH_AUTHENTIK_PROVIDER_ID = "authentik" as const;
+
+/** Provider-owned auth config values keyed by the selected provider's schema. */
+export type ReferenceAuthProviderConfig = Record<string, unknown>;
+
+/** Inputs for creating a reference auth provider through Provider Host. */
+export interface ReferenceAuthProviderCreateOptions {
+  /** Opaque provider id. Defaults to {@link AUTH_WEBAUTHN_PROVIDER_ID}. */
+  providerId?: ProviderId;
+  /** Provider-owned config validated against the provider's registered schema. */
+  config?: ReferenceAuthProviderConfig;
+  /** Provider Host state root used for provider-owned durable state namespaces. */
+  stateRoot?: ProviderStateRoot;
+  /** WPM/catalog dependency evidence required by host-touching auth providers. */
+  dependencyBindings?: CreateProviderOptions["dependencyBindings"];
+}
+
+/** Result of creating a reference auth provider through Provider Host. */
+export interface ReferenceAuthProviderCreateResult {
+  providerId: ProviderId;
+  module: string;
+  provider: AuthProviderPort;
+}
 
 function requiredString(ctx: ProviderCreateContext, field: string): string {
   const value = ctx.config[field];
@@ -55,6 +91,20 @@ function requiredString(ctx: ProviderCreateContext, field: string): string {
 function optionalString(ctx: ProviderCreateContext, field: string): string | undefined {
   const value = ctx.config[field];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function requiredStringList(ctx: ProviderCreateContext, field: string): string[] {
+  const value = ctx.config[field];
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((item) => typeof item === "string" && item.length > 0)
+  ) {
+    throw new Error(
+      `provider "${ctx.providerId}" expected non-empty string list config field "${field}"`,
+    );
+  }
+  return value;
 }
 
 function optionalNumber(ctx: ProviderCreateContext, field: string): number | undefined {
@@ -100,14 +150,19 @@ class UserDoneDetectorAdapter implements CompletionDetectorPort {
 export const AUTH_WEBAUTHN_PROVIDER_MANIFEST: ProviderManifest = {
   apiVersion: "gla.dev/v1",
   kind: "AuthProvider",
-  metadata: { name: "webauthn", version: "0.1.0" },
+  metadata: { name: AUTH_WEBAUTHN_PROVIDER_ID, version: "0.1.0" },
   spec: {
     family: "auth",
     capability: { summary: "in-tree WebAuthn/passkey auth provider" },
     config_schema: {
       rpID: { type: "string", required: true, min: 1 },
       rpName: { type: "string", required: false, min: 1 },
-      expectedOrigin: { type: "string", required: true, min: 1 },
+      expectedOrigin: {
+        type: "list",
+        required: true,
+        min: 1,
+        items: { type: "string", min: 1 },
+      },
     },
     probe: "webauthn",
     skills: [
@@ -123,7 +178,7 @@ export const AUTH_WEBAUTHN_PROVIDER_MANIFEST: ProviderManifest = {
 export const AUTH_AUTHENTIK_PROVIDER_MANIFEST: ProviderManifest = {
   apiVersion: "gla.dev/v1",
   kind: "AuthProvider",
-  metadata: { name: "authentik", version: "0.1.0" },
+  metadata: { name: AUTH_AUTHENTIK_PROVIDER_ID, version: "0.1.0" },
   spec: {
     family: "auth",
     capability: { summary: "delegated authentik OIDC auth provider" },
@@ -164,7 +219,7 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
         const rpName = optionalString(createCtx, "rpName");
         return new AuthWebauthnProvider({
           rpID: requiredString(createCtx, "rpID"),
-          expectedOrigin: requiredString(createCtx, "expectedOrigin"),
+          expectedOrigin: requiredStringList(createCtx, "expectedOrigin"),
           ...(rpName !== undefined ? { rpName } : {}),
           credentials: createCtx.state.kv<StoredCredential>("credentials"),
           challenges: createCtx.state.kv<PendingChallenge>("challenges"),
@@ -250,9 +305,38 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
   }),
 ];
 
+/** Return the adapter module marker associated with a reference auth provider id. */
+export function referenceAuthModuleForProviderId(providerId: ProviderId): string {
+  if (providerId === AUTH_WEBAUTHN_PROVIDER_ID) {
+    return AUTH_WEBAUTHN_MODULE;
+  }
+  if (providerId === AUTH_AUTHENTIK_PROVIDER_ID) {
+    return AUTH_AUTHENTIK_MODULE;
+  }
+  return providerId;
+}
+
 /** Build the trusted reference Provider Host from today's in-tree provider modules. */
-export function createReferenceProviderHost(): ProviderHost {
-  return new ProviderHost().registerModules(referenceProviderModules);
+export function createReferenceProviderHost(opts: ProviderHostOptions = {}): ProviderHost {
+  return new ProviderHost(opts).registerModules(referenceProviderModules);
+}
+
+/** Create a reference AuthProviderPort through Provider Host. */
+export function createReferenceAuthProvider(
+  opts: ReferenceAuthProviderCreateOptions = {},
+): ReferenceAuthProviderCreateResult {
+  const providerId = opts.providerId ?? AUTH_WEBAUTHN_PROVIDER_ID;
+  const host = createReferenceProviderHost(
+    opts.stateRoot !== undefined ? { stateRoot: opts.stateRoot } : {},
+  );
+  const provider = host.createProviderSync("auth", providerId, {
+    config: opts.config ?? {},
+    ...(opts.stateRoot !== undefined ? { stateRoot: opts.stateRoot } : {}),
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
+  });
+  return { providerId, module: referenceAuthModuleForProviderId(providerId), provider };
 }
 
 /** Catalog store content derived from Provider Host registration data, not parallel app tables. */

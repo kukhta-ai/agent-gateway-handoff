@@ -1,12 +1,9 @@
-// Wiring test for the AUTH-PROVIDER SELECTION at the composition root (packages/app), GLA-068 AC#1/#6.
+// Wiring test for AUTH-PROVIDER SELECTION through Provider Host, GLA-096 AC#1/#6.
 // Proves: (a) the DEFAULT (provider unset / "webauthn") wires the in-tree WebAuthn adapter — the existing
-// path is unchanged; (b) opting into "authentik" flips ONLY the adapter the composition constructs (the
-// wiring record names @gla/auth-authentik) while everything downstream (the IdentityService injection, the
-// gateway, the route) is identical because both adapters satisfy the SAME kernel AuthProviderPort; (c) the
-// daemon's parseServeArgs threads GLA_AUTH_PROVIDER + the GLA_AUTHENTIK_* OIDC config; (d) the structural
-// boundary claim — selecting authentik touches only the adapter + app, never the gateway/kernel (enforced by
-// the import-boundary lint + the package graph, asserted here by checking neither core package declares an
-// auth adapter dependency).
+// path is unchanged; (b) opting into "authentik" resolves through the trusted reference provider set while
+// everything downstream (IdentityService, gateway, route) consumes only AuthProviderPort; (c) the daemon's
+// parseServeArgs threads opaque provider ids plus the reference authentik OIDC config; (d) structural
+// boundaries keep auth adapter implementations out of app runtime files and core packages.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -20,9 +17,13 @@ import {
   parseAuthEnrollmentPolicyJson,
 } from "./auth-enrollment-policy.js";
 import { authAssuranceProviderDiagnostic, parseServeArgs } from "./daemon.js";
-import { type AuthentikConfig, createEnrollmentStack, createProvisioningBridge } from "./index.js";
+import {
+  type AuthProviderConfig,
+  createEnrollmentStack,
+  createProvisioningBridge,
+} from "./index.js";
 
-const AUTHENTIK: AuthentikConfig = {
+const AUTHENTIK: AuthProviderConfig = {
   issuerUrl: "https://idp.example/application/o/gla/",
   clientId: "gla-client",
   clientSecret: "super-secret",
@@ -182,6 +183,14 @@ describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unc
     expect(b.authModule).toBe(AUTH_WEBAUTHN_MODULE);
   });
 
+  it("preserves WebAuthn's existing multi-origin configuration shape through Provider Host", () => {
+    const stack = createEnrollmentStack({
+      ...ENROLL_BASE,
+      expectedOrigin: ["http://localhost:3000", "https://gla.example"],
+    });
+    expect(stack.authModule).toBe(AUTH_WEBAUTHN_MODULE);
+  });
+
   it("createProvisioningBridge() handoff with no authProvider records the WebAuthn module", () => {
     const stack = createProvisioningBridge({
       dependencyBindings: referenceWpmDependencyBindings(),
@@ -198,11 +207,12 @@ describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unc
 });
 
 describe("AC#1/#6 · opting into authentik flips ONLY the adapter the composition constructs", () => {
-  it('createEnrollmentStack({ authProvider: "authentik", authentik }) wires @gla/auth-authentik', () => {
+  it('createEnrollmentStack({ authProvider: "authentik", authProviderConfig }) wires @gla/auth-authentik', () => {
     const stack = createEnrollmentStack({
       ...ENROLL_BASE,
       authProvider: "authentik",
-      authentik: AUTHENTIK,
+      authProviderConfig: AUTHENTIK,
+      dependencyBindings: referenceWpmDependencyBindings(),
     });
     expect(stack.authModule).toBe(AUTH_AUTHENTIK_MODULE);
     // Downstream is identical: the IdentityService is the same service wired against the SAME port — an
@@ -214,7 +224,7 @@ describe("AC#1/#6 · opting into authentik flips ONLY the adapter the compositio
     const stack = createProvisioningBridge({
       dependencyBindings: referenceWpmDependencyBindings(),
       launcherMode: "headless",
-      handoff: { ...ENROLL_BASE, authProvider: "authentik", authentik: AUTHENTIK },
+      handoff: { ...ENROLL_BASE, authProvider: "authentik", authProviderConfig: AUTHENTIK },
     });
     expect(stack.authModule).toBe(AUTH_AUTHENTIK_MODULE);
     // The gateway/route/identity are still wired (the swap is one `new …`, nothing downstream changes).
@@ -224,62 +234,91 @@ describe("AC#1/#6 · opting into authentik flips ONLY the adapter the compositio
   });
 
   it("selecting authentik WITHOUT its OIDC config fails loud (no silent fallback to the default)", () => {
-    expect(() => createEnrollmentStack({ ...ENROLL_BASE, authProvider: "authentik" })).toThrow(
-      /authentik.*requires|issuer|client/i,
-    );
+    expect(() =>
+      createEnrollmentStack({
+        ...ENROLL_BASE,
+        authProvider: "authentik",
+        dependencyBindings: referenceWpmDependencyBindings(),
+      }),
+    ).toThrow(/authentik.*requires|issuer|client/i);
+  });
+
+  it("selecting authentik WITHOUT identity-provider dependency evidence fails closed (no silent fallback)", () => {
+    expect(() =>
+      createEnrollmentStack({
+        ...ENROLL_BASE,
+        authProvider: "authentik",
+        authProviderConfig: AUTHENTIK,
+      }),
+    ).toThrow(/authentik.*unavailable dependencies|identity-provider/i);
   });
 });
 
-describe("AC#6 · daemon parseServeArgs threads the provider switch + the authentik OIDC config", () => {
-  it("parses --auth-provider + the --authentik-* flags", () => {
+describe("AC#6 · daemon parseServeArgs threads opaque provider ids and provider-owned config", () => {
+  it("parses --auth-provider plus generic provider config JSON", () => {
     const parsed = parseServeArgs(
       [
         "--auth-provider",
         "authentik",
-        "--authentik-issuer-url",
-        "https://idp.example/application/o/gla/",
-        "--authentik-client-id",
-        "gla-client",
-        "--authentik-client-secret",
-        "shh",
-        "--authentik-redirect-uri",
-        "https://gla.example/auth/callback",
-        "--authentik-scopes",
-        "openid profile email",
+        "--auth-provider-config-json",
+        JSON.stringify({ ...AUTHENTIK, clientSecret: "shh", scopes: "openid profile email" }),
       ],
       {} as NodeJS.ProcessEnv,
     );
     expect(parsed.help).toBe(false);
     if (!parsed.help) {
       expect(parsed.options.authProvider).toBe("authentik");
-      expect(parsed.options.authentikIssuerUrl).toBe("https://idp.example/application/o/gla/");
-      expect(parsed.options.authentikClientId).toBe("gla-client");
-      expect(parsed.options.authentikClientSecret).toBe("shh");
-      expect(parsed.options.authentikRedirectUri).toBe("https://gla.example/auth/callback");
-      expect(parsed.options.authentikScopes).toBe("openid profile email");
+      expect(parsed.options.authProviderConfig).toMatchObject({
+        issuerUrl: "https://idp.example/application/o/gla/",
+        clientId: "gla-client",
+        clientSecret: "shh",
+        redirectUri: "https://gla.example/auth/callback",
+        scopes: "openid profile email",
+      });
     }
   });
 
-  it("falls back to env (GLA_AUTH_PROVIDER / GLA_AUTHENTIK_*); a flag overrides env", () => {
+  it("falls back to env (GLA_AUTH_PROVIDER / GLA_AUTH_PROVIDER_CONFIG_JSON); a flag overrides env", () => {
     const env = {
       GLA_AUTH_PROVIDER: "authentik",
-      GLA_AUTHENTIK_ISSUER_URL: "https://from-env/application/o/gla/",
-      GLA_AUTHENTIK_CLIENT_ID: "from-env",
-      GLA_AUTHENTIK_CLIENT_SECRET: "env-secret",
-      GLA_AUTHENTIK_REDIRECT_URI: "https://gla.example/auth/callback",
+      GLA_AUTH_PROVIDER_CONFIG_JSON: JSON.stringify({
+        ...AUTHENTIK,
+        issuerUrl: "https://from-env/application/o/gla/",
+      }),
     } as NodeJS.ProcessEnv;
-    const parsed = parseServeArgs(["--authentik-client-id", "from-flag"], env);
+    const parsed = parseServeArgs(
+      ["--auth-provider-config-json", JSON.stringify({ ...AUTHENTIK, clientId: "from-flag" })],
+      env,
+    );
     expect(parsed.help).toBe(false);
     if (!parsed.help) {
       expect(parsed.options.authProvider).toBe("authentik"); // from env
-      expect(parsed.options.authentikIssuerUrl).toBe("https://from-env/application/o/gla/"); // from env
-      expect(parsed.options.authentikClientId).toBe("from-flag"); // flag wins
+      expect(parsed.options.authProviderConfig?.issuerUrl).toBe(AUTHENTIK.issuerUrl); // flag wins
+      expect(parsed.options.authProviderConfig?.clientId).toBe("from-flag");
     }
   });
 
-  it("an invalid --auth-provider throws a stable error", () => {
-    expect(() => parseServeArgs(["--auth-provider", "ldap"], {} as NodeJS.ProcessEnv)).toThrow(
-      /auth-provider/i,
+  it("parses WPM dependency bindings JSON for the real serve command path", () => {
+    const parsed = parseServeArgs(
+      ["--dependency-bindings-json", JSON.stringify(referenceWpmDependencyBindings())],
+      {} as NodeJS.ProcessEnv,
+    );
+    expect(parsed.help).toBe(false);
+    if (!parsed.help) {
+      expect(parsed.options.dependencyBindings?.map((binding) => binding.dependency)).toContain(
+        "identity-provider",
+      );
+    }
+  });
+
+  it("an unknown --auth-provider remains an opaque provider id for Provider Host diagnostics", () => {
+    const parsed = parseServeArgs(["--auth-provider", "ldap"], {} as NodeJS.ProcessEnv);
+    expect(parsed.help).toBe(false);
+    if (!parsed.help) {
+      expect(parsed.options.authProvider).toBe("ldap");
+    }
+    expect(() => createEnrollmentStack({ ...ENROLL_BASE, authProvider: "ldap" })).toThrow(
+      /unknown provider "ldap"/i,
     );
   });
 
@@ -501,8 +540,8 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
     expect(d.edgeGuard.summary).toMatch(/authentik.*outer guard/i);
     expect(d.concerns.join("\n")).toMatch(/outer proxy.*does not perform GLA handoff step-up/i);
     expect(d.actions.join("\n")).toMatch(/GLA_AUTH_PROVIDER=authentik/i);
-    expect(d.actions.join("\n")).toMatch(/GLA_AUTHENTIK_ISSUER_URL/i);
-    expect(d.actions.join("\n")).toMatch(/GLA_AUTHENTIK_REDIRECT_URI/i);
+    expect(d.actions.join("\n")).toMatch(/GLA_AUTH_PROVIDER_CONFIG_JSON/i);
+    expect(d.actions.join("\n")).toMatch(/issuerUrl.*clientId.*clientSecret.*redirectUri/i);
     expect(d.actions.join("\n")).toMatch(/intentionally.*WebAuthn/i);
   });
 
@@ -950,7 +989,7 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
   });
 });
 
-describe("AC#1 · structural: selecting authentik changes only the adapter + app (no gateway/kernel edit)", () => {
+describe("AC#1/#2 · structural: auth adapters live behind the provider set, not app/core runtime", () => {
   /** Read a package.json's dependency names (relative to this test file's compiled location). */
   function deps(relFromRepoRoot: string): string[] {
     const pkg = JSON.parse(readFileSync(`${repoRootFromHere()}/${relFromRepoRoot}`, "utf8")) as {
@@ -978,9 +1017,21 @@ describe("AC#1 · structural: selecting authentik changes only the adapter + app
     expect(identityDeps).not.toContain("@gla/auth-webauthn");
   });
 
-  it("ONLY packages/app declares the authentik adapter dependency (the single adapter-importing package)", () => {
-    const appDeps = deps("packages/app/package.json");
-    expect(appDeps).toContain("@gla/auth-authentik");
-    expect(appDeps).toContain("@gla/auth-webauthn");
+  it("the trusted reference provider set declares the concrete auth adapter dependencies", () => {
+    const providerSetDeps = deps("packages/provider-set-reference/package.json");
+    expect(providerSetDeps).toContain("@gla/auth-authentik");
+    expect(providerSetDeps).toContain("@gla/auth-webauthn");
+  });
+
+  it("app runtime composition files do not import concrete auth adapters or authentik state types", () => {
+    const indexSource = readFileSync(`${repoRootFromHere()}/packages/app/src/index.ts`, "utf8");
+    const daemonSource = readFileSync(`${repoRootFromHere()}/packages/app/src/daemon.ts`, "utf8");
+    for (const source of [indexSource, daemonSource]) {
+      expect(source).not.toMatch(/from ["']@gla\/auth-authentik["']/);
+      expect(source).not.toMatch(/from ["']@gla\/auth-webauthn["']/);
+      expect(source).not.toMatch(
+        /BoundSubject|PendingAttempt|interface AuthentikConfig|type AuthentikConfig/,
+      );
+    }
   });
 });

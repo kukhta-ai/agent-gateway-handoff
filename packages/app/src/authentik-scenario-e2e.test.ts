@@ -452,7 +452,7 @@ async function coldAuthentikStack(opts: {
       authProvider: "authentik",
       // … its OIDC config is required by buildAuthProvider, but the actual provider used is the fake-backed
       // `identity` below (h.identity wins), so this throwaway never dials a real network.
-      authentik: {
+      authProviderConfig: {
         issuerUrl: opts.wiring.fake.issuerUrl,
         clientId: opts.wiring.fake.clientId,
         clientSecret: "capstone-secret",
@@ -912,7 +912,7 @@ describe("GLA-076 AC#5 — the auth seam is full-capability: provider swap is co
       handoff: {
         ...base,
         authProvider: "authentik",
-        authentik: {
+        authProviderConfig: {
           issuerUrl: "https://idp.example/application/o/gla/",
           clientId: "gla",
           clientSecret: "s",

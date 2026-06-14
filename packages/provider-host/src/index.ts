@@ -69,7 +69,8 @@ export type ProviderHostDiagnosticCode =
   | "provider.probe_missing"
   | "provider.probe_failed"
   | "provider.factory_missing"
-  | "provider.service_missing";
+  | "provider.service_missing"
+  | "provider.async_unsupported";
 
 /** A redacted, stable diagnostic suitable for operator and agent-facing surfaces. */
 export interface ProviderHostDiagnostic {
@@ -312,6 +313,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return typeof (value as { then?: unknown }).then === "function";
+}
+
 interface ProviderRegistrationStaging {
   factories: Map<RuntimeProviderFamily, Map<ProviderId, ProviderFactory<unknown>>>;
   probes: Map<ProviderId, ProviderProbe>;
@@ -431,6 +436,12 @@ class StaticProviderDependencyView implements ProviderDependencyView {
   }
 }
 
+interface PreparedProviderCreate<TPort> {
+  factory: ProviderFactory<TPort>;
+  probe?: ProviderProbe;
+  ctx: ProviderCreateContext;
+}
+
 /** Internal Provider Host for trusted installed provider modules. */
 export class ProviderHost {
   private readonly manifests = new Map<ProviderId, ProviderManifest>();
@@ -540,6 +551,69 @@ export class ProviderHost {
     id: ProviderId,
     opts: CreateProviderOptions = {},
   ): Promise<ProviderPortByFamily[TFamily]> {
+    const prepared = this.prepareProviderCreate(family, id, opts);
+    if (prepared.probe !== undefined) {
+      const result = await prepared.probe({
+        providerId: id,
+        dependencies: prepared.ctx.dependencies,
+        diagnostics: prepared.ctx.diagnostics,
+      });
+      this.assertProbeAvailable(id, family, result);
+    }
+
+    return prepared.factory.create(prepared.ctx);
+  }
+
+  /**
+   * Create a runtime provider port for sync composition roots.
+   *
+   * Use {@link createProvider} for providers with async probes or factories. This method preserves the
+   * synchronous app boot path while still routing provider selection through the host.
+   */
+  createProviderSync<TFamily extends RuntimeProviderFamily>(
+    family: TFamily,
+    id: ProviderId,
+    opts: CreateProviderOptions = {},
+  ): ProviderPortByFamily[TFamily] {
+    const prepared = this.prepareProviderCreate(family, id, opts);
+    if (prepared.probe !== undefined) {
+      const result = prepared.probe({
+        providerId: id,
+        dependencies: prepared.ctx.dependencies,
+        diagnostics: prepared.ctx.diagnostics,
+      });
+      if (isPromiseLike(result)) {
+        this.fail({
+          code: "provider.async_unsupported",
+          providerId: id,
+          family,
+          message: `provider "${id}" probe is async but sync creation was requested`,
+        });
+      }
+      this.assertProbeAvailable(id, family, result);
+    }
+    const created = prepared.factory.create(prepared.ctx);
+    if (isPromiseLike(created)) {
+      this.fail({
+        code: "provider.async_unsupported",
+        providerId: id,
+        family,
+        message: `provider "${id}" factory is async but sync creation was requested`,
+      });
+    }
+    return created;
+  }
+
+  /** Emit one redacted provider-host diagnostic into the host log. */
+  emit(diagnostic: ProviderHostDiagnostic): void {
+    this.diagnosticsLog.push(redactDiagnostic(diagnostic));
+  }
+
+  private prepareProviderCreate<TFamily extends RuntimeProviderFamily>(
+    family: TFamily,
+    id: ProviderId,
+    opts: CreateProviderOptions,
+  ): PreparedProviderCreate<ProviderPortByFamily[TFamily]> {
     const manifest = this.manifests.get(id);
     if (manifest === undefined) {
       this.fail({
@@ -631,29 +705,24 @@ export class ProviderHost {
         message: `provider "${id}" declares probe "${manifest.spec.probe}" but registered none`,
       });
     }
-    if (probe !== undefined) {
-      const result = await probe({
-        providerId: id,
-        dependencies,
-        diagnostics,
-      });
-      if (result !== "available") {
-        this.fail({
-          code: "provider.probe_failed",
-          providerId: id,
-          family,
-          message: `provider "${id}" probe reported ${result}`,
-          detail: { result },
-        });
-      }
-    }
 
-    return factory.create(ctx);
+    return { factory, ...(probe !== undefined ? { probe } : {}), ctx };
   }
 
-  /** Emit one redacted provider-host diagnostic into the host log. */
-  emit(diagnostic: ProviderHostDiagnostic): void {
-    this.diagnosticsLog.push(redactDiagnostic(diagnostic));
+  private assertProbeAvailable(
+    id: ProviderId,
+    family: RuntimeProviderFamily,
+    result: ProbeResult,
+  ): void {
+    if (result !== "available") {
+      this.fail({
+        code: "provider.probe_failed",
+        providerId: id,
+        family,
+        message: `provider "${id}" probe reported ${result}`,
+        detail: { result },
+      });
+    }
   }
 
   private registrationContext(

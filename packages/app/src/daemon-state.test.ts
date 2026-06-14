@@ -218,14 +218,14 @@ describe("DaemonStateRoot", () => {
   it("encrypts/authenticates record files and keeps root/file permissions least-privilege", () => {
     const root = tempRoot("state");
     const state = DaemonStateRoot.open({ root });
-    const kv = state.kv<{ codeVerifier: string; token: string }>("auth.authentik.attempts");
+    const kv = state.kv<{ codeVerifier: string; token: string }>("provider.authentik.attempts");
 
     kv.set("state-secret", {
       codeVerifier: "verifier-secret",
       token: "grant-bearer-secret",
     });
 
-    const recordPath = state.recordPath("auth.authentik.attempts");
+    const recordPath = state.recordPath("provider.authentik.attempts");
     const rootMode = lstatSync(root).mode & 0o777;
     const fileMode = lstatSync(recordPath).mode & 0o777;
     const raw = readFileSync(recordPath, "utf8");
@@ -243,16 +243,16 @@ describe("DaemonStateRoot", () => {
   it("fails closed when an encrypted state record is tampered", () => {
     const root = tempRoot("tamper");
     const state = DaemonStateRoot.open({ root });
-    state.kv<{ sub: string }>("auth.authentik.subjects").set("user:1", { sub: "sub-1" });
+    state.kv<{ sub: string }>("provider.authentik.subjects").set("user:1", { sub: "sub-1" });
 
-    const path = state.recordPath("auth.authentik.subjects");
+    const path = state.recordPath("provider.authentik.subjects");
     const envelope = JSON.parse(readFileSync(path, "utf8")) as { ciphertext: string };
     envelope.ciphertext = "AA";
     writeFileSync(path, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
     chmodSync(path, 0o600);
 
     const reopened = DaemonStateRoot.open({ root });
-    expect(() => reopened.kv<{ sub: string }>("auth.authentik.subjects").get("user:1")).toThrow(
+    expect(() => reopened.kv<{ sub: string }>("provider.authentik.subjects").get("user:1")).toThrow(
       /integrity/i,
     );
   });
@@ -260,11 +260,11 @@ describe("DaemonStateRoot", () => {
   it("refuses group/world-readable state directories, records, stale locks, and symlink roots", () => {
     const root = tempRoot("unsafe");
     const state = DaemonStateRoot.open({ root });
-    state.kv<{ sub: string }>("auth.authentik.subjects").set("user:1", { sub: "sub-1" });
-    chmodSync(state.recordPath("auth.authentik.subjects"), 0o644);
+    state.kv<{ sub: string }>("provider.authentik.subjects").set("user:1", { sub: "sub-1" });
+    chmodSync(state.recordPath("provider.authentik.subjects"), 0o644);
 
     const reopened = DaemonStateRoot.open({ root });
-    expect(() => reopened.kv<{ sub: string }>("auth.authentik.subjects").get("user:1")).toThrow(
+    expect(() => reopened.kv<{ sub: string }>("provider.authentik.subjects").get("user:1")).toThrow(
       DaemonStateError,
     );
 
@@ -383,8 +383,8 @@ describe("restart-safe security state wiring", () => {
   it("keeps authentik pending attempts and subject bindings in durable provider stores", async () => {
     const root = tempRoot("authentik");
     const state = DaemonStateRoot.open({ root });
-    const attempts = state.kv<PendingAttempt>("auth.authentik.attempts");
-    const subjects = state.kv<{ sub: string }>("auth.authentik.subjects");
+    const attempts = state.kv<PendingAttempt>("provider.authentik.attempts");
+    const subjects = state.kv<{ sub: string }>("provider.authentik.subjects");
     const userId = "user:tg:user:7" as UserIdentity["id"];
 
     const provider = new AuthAuthentikProvider({
@@ -410,10 +410,12 @@ describe("restart-safe security state wiring", () => {
     await provider.challenge(userId);
 
     const reopened = DaemonStateRoot.open({ root });
-    expect(reopened.kv<{ sub: string }>("auth.authentik.subjects").get(userId)).toEqual({
+    expect(reopened.kv<{ sub: string }>("provider.authentik.subjects").get(userId)).toEqual({
       sub: "authentik-sub",
     });
-    expect(reopened.kv<PendingAttempt>("auth.authentik.attempts").get("oidc-state")).toMatchObject({
+    expect(
+      reopened.kv<PendingAttempt>("provider.authentik.attempts").get("oidc-state"),
+    ).toMatchObject({
       userId,
       state: "oidc-state",
       nonce: "oidc-nonce",
@@ -437,8 +439,8 @@ describe("restart-safe security state wiring", () => {
         endpoints: fake.endpoints(),
         jwks: fake.jwks,
         fetch: fake.fetch,
-        subjects: state.kv<BoundSubject>("auth.authentik.subjects"),
-        attempts: state.kv<PendingAttempt>("auth.authentik.attempts"),
+        subjects: state.kv<BoundSubject>("provider.authentik.subjects"),
+        attempts: state.kv<PendingAttempt>("provider.authentik.attempts"),
         randomness,
       });
 
