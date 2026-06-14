@@ -16,7 +16,7 @@
 // authorizeUrl, stage a valid login for the chosen code with {sub:<enrolled>, amr:<chosen>, nonce:<the attempt's>},
 // and drive {code,state} into the UNCHANGED /handoff/auth/verify as the opaque assertion → the existing strength
 // gate → the WS proxy to the real capsule. (The sub/nonce threading is the central harness risk — §7.1; mirrored
-// from adapters/auth-authentik/src/auth-authentik.test.ts.)
+// from adapters/auth-authentik/test/contract/auth-authentik.test.ts.)
 //
 // ALREADY PROVEN AGAINST REAL AUTHENTIK: a GLA-074 rehearsal stood up real authentik 2025.10.4 and drove THIS
 // exact adapter through a real OIDC round-trip → `verifyAssertion` → {ok:true, authStrength:"password"} with a
@@ -50,7 +50,6 @@ import {
   InMemoryKv,
   type PendingAttempt,
 } from "@gla/auth-authentik";
-import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
@@ -58,6 +57,7 @@ import { IdentityService } from "@gla/identity";
 import type { CapabilityId, OpaqueToken, RecipientRef, SessionId, TaskId } from "@gla/kernel";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
+import { FakeAuthentik } from "../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
 import type { DeliverySink, ProvisioningStack } from "./index.js";
 import { createProvisioningBridge } from "./index.js";
 

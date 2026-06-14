@@ -21,7 +21,7 @@ the user and **block on a mandatory scope/mode selection** — the same blocker 
 `test-strategy.md` and `packages/app/src/scenario-01-e2e.test.ts`) and **cannot run unattended** here. Per
 `AGENTS.md` Rule 3's explicit allowance, that path was **stopped, the blocker named**, and this artifact was
 driven **docs-first** plus a direct read of the real capstone (`packages/app/src/scenario-01-e2e.test.ts`,
-GLA-066) and the test double (`adapters/auth-authentik/src/fake-authentik.ts`).
+GLA-066) and the test double (`adapters/auth-authentik/test/fixtures/fake-authentik.ts`).
 
 ---
 
@@ -49,7 +49,7 @@ builds the authentik analogue:** the **same full handoff thread**, composed with
 but wired with the **delegated authentik provider** (`AuthAuthentikProvider`) instead of `AuthWebauthnProvider`,
 and the OIDC ceremony stood in for by **`FakeAuthentik`** (the controllable OIDC double from GLA-068).
 
-**Why `FakeAuthentik`, and exactly what it doubles** (`see adapters/auth-authentik/src/fake-authentik.ts`). It
+**Why `FakeAuthentik`, and exactly what it doubles** (`see adapters/auth-authentik/test/fixtures/fake-authentik.ts`). It
 is an in-process double (no real network, no real authentik) that:
 - provides `endpoints()` + `jwks` to inject into the adapter (so discovery is skipped and signatures verify
   against the fake's local key),
@@ -249,7 +249,7 @@ GLA-093 tightens how the proof is reported and tested. The evidence labels are:
 
 | Evidence class | What it proves | Current owner |
 |---|---|---|
-| **Synthetic OIDC proof** | `FakeAuthentik` signs deterministic id_tokens, stages token/JWKS behavior, and lets the GLA adapter/gateway/session/capsule thread prove strength mapping, recipient binding, failure reasons, and replay behavior without a live IdP. | `adapters/auth-authentik/src/auth-authentik.test.ts` and synthetic branches of `packages/app/src/authentik-scenario-e2e.test.ts` |
+| **Synthetic OIDC proof** | `FakeAuthentik` signs deterministic id_tokens, stages token/JWKS behavior, and lets the GLA adapter/gateway/session/capsule thread prove strength mapping, recipient binding, failure reasons, and replay behavior without a live IdP. | `adapters/auth-authentik/test/contract/auth-authentik.test.ts` and synthetic branches of `packages/app/src/authentik-scenario-e2e.test.ts` |
 | **Browser-level GLA proof** | A real Chromium page opens the GLA handoff page, receives the delegated redirect challenge, is redirected back to the **GLA-served** `/auth/callback` URL, and the callback page posts `{code,state}` to the unchanged verify route before the grant can reach the capsule. | `packages/app/src/authentik-scenario-e2e.test.ts` |
 | **Gateway/capsule no-leak proof** | Refused flows assert explicit upstream connection and byte counters, not only absence of a marker string. Positive flows assert the counters increase. Wrong-recipient and upstream-leak canaries intentionally fail the suite when enabled. | `packages/app/src/authentik-scenario-e2e.test.ts` and `pnpm run gate:e2e-proof-canaries` |
 | **Deployed-provider proof** | Real authentik login flows, real emitted `amr`/`acr`/`gla_uv`, real sources, and same-origin Caddy routing are verified in the WPM/deployment layer and recorded as redacted `loginMethodProofs[]`. | GLA-074 installer/deployment verification and GLA-086 diagnostics |
@@ -328,6 +328,6 @@ scenario-01 E2E harness, `§3` S-1/S-2/S-10, `§4.2` the GLA-066 capstone) · `d
 (Phase 6, the handoff step-up) · `docs/01-architecture-overview.md §6`/`§7` (the security model + horizontal
 extension) · `docs/components/identity-and-auth.md` (the identity/auth model) ·
 `packages/app/src/scenario-01-e2e.test.ts` (GLA-066 — the capstone GLA-076 mirrors) ·
-`adapters/auth-authentik/src/fake-authentik.ts` (the controllable OIDC double GLA-076 drives) ·
+`adapters/auth-authentik/test/fixtures/fake-authentik.ts` (the controllable OIDC double GLA-076 drives) ·
 `adapters/auth-authentik/src/index.ts` (`challenge`/`verifyAssertion`, the `subject_mismatch` check) ·
 `packages/gateway/src/index.ts` (`AuthAssurancePolicy`/`strengthSufficient`, the unchanged `/handoff/auth/verify`).

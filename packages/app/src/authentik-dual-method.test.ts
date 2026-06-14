@@ -5,7 +5,7 @@
 //
 // This test lives in `packages/app` because it wires the concrete `AuthAuthentikProvider` (only the composition
 // root may import an adapter — the boundary lint forbids it in `packages/gateway`). It mirrors the harness of
-// `packages/gateway/src/handoff.test.ts` but injects the REAL IdentityService+AuthAuthentikProvider as `stepUp`, so
+// `packages/gateway/test/integration/handoff.test.ts` but injects the REAL IdentityService+AuthAuthentikProvider as `stepUp`, so
 // the strength is genuinely DERIVED from the minted `amr` (not a stub) — and drives the UNCHANGED /handoff/auth/verify
 // route in-process. The browser redirect/return path (the served page's `location.assign`/return-detection) is
 // exercised by the GLA-076 E2E; here we POST {code,state} straight to verify, the way that page's return arm would.
@@ -28,7 +28,6 @@ import {
   InMemoryKv,
   type PendingAttempt,
 } from "@gla/auth-authentik";
-import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import {
   AccessGateway,
   type EnrollmentGrantPort,
@@ -50,6 +49,7 @@ import {
   authAssurancePolicyFromProfile,
 } from "@gla/kernel";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { FakeAuthentik } from "../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
 
 const recipient = "tg:user:123" as RecipientRef;
 const GRANT_ID = "cap_grant1" as CapabilityId;

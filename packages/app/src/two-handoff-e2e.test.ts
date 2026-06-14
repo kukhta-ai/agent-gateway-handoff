@@ -22,7 +22,7 @@
 //   - AGENT-BLIND scan: a KNOWN password + a KNOWN code typed via the human path appear in ZERO agent-readable outputs.
 //
 // GATED: skips when no cached Chromium; the reuse logic + completion + severance are proven by the unit/contract tests
-// (packages/gateway/src/handoff.test.ts auth-reuse block, packages/completion, adapters/connector-cdp) regardless.
+// (packages/gateway/test/integration/handoff.test.ts auth-reuse block, packages/completion, adapters/connector-cdp) regardless.
 // Spawns REAL browsers — generous timeouts; the capsule + broker + gateway are always reaped in a finally/afterAll.
 
 import { createHash } from "node:crypto";

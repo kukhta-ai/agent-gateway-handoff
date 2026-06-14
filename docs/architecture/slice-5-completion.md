@@ -104,7 +104,7 @@ window closes → **the agent re-attaches onto the SAME brokered url and reads `
 agent-readable output** (the connector JSON, the `gla` results, the completion envelope, the events/audit surfaces, the
 delivered link, all stdout/stderr) for the known secret — assert the **occurrence count is ZERO**, while the **site**
 did receive it (the human path works). The **live-socket severance** is also proven deterministically at the
-contract level against a stub CDP upstream (`adapters/connector-cdp/src/connector-cdp.test.ts`): an agent's open
+contract level against a stub CDP upstream (`adapters/connector-cdp/test/contract/connector-cdp.test.ts`): an agent's open
 brokered socket is destroyed on `suspend` (the socket is `destroyed`, the count is 0), a fresh connection while
 suspended is refused, and `resume` re-allows it.
 

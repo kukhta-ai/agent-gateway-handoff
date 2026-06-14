@@ -232,7 +232,7 @@ steps:
    to `enrollComplete`. **This is shared with the gateway callback page** (`§4`, `§8`): GLA-070 must either
    (a) consume the shared callback for the `register` case, or (b) if sequenced before it, test the
    service-layer binding directly against the adapter (the adapter's `beginEnrollment`/`finishEnrollment` +
-   the `fake-authentik` test seam, `see adapters/auth-authentik/src/fake-authentik.ts`) and leave the
+   the `fake-authentik` test seam, `see adapters/auth-authentik/test/fixtures/fake-authentik.ts`) and leave the
    browser-callback wiring to the callback story. **Recommended:** build/test the *service* slice now (deterministic,
    no browser), and make the *browser* enrollment path land with 072's callback — coordinated, not duplicated.
 4. **Record the binding atomically.** Ensure the success path writes `subjects[userId]={sub}` (adapter) and
@@ -376,7 +376,7 @@ identity/auth model + enrollment invariants) · `docs/components/access-gateway.
 Phase-E enrollment role) · `docs/architecture/kernel-contracts.md §7` (recipient-identity & enrollment types) ·
 `adapters/auth-authentik/src/index.ts` (`beginEnrollment`/`finishEnrollment`, `isEnrolled`/`getBoundSubject`) ·
 `adapters/auth-authentik/src/stores.ts` (`BoundSubject`, the `subjects`/`attempts` stores) ·
-`adapters/auth-authentik/src/fake-authentik.ts` (the deterministic test seam GLA-070 uses) ·
+`adapters/auth-authentik/test/fixtures/fake-authentik.ts` (the deterministic test seam GLA-070 uses) ·
 `packages/identity/src/index.ts` (`enrollmentOptions`/`enrollComplete`/`isEnrolled`/`EnrollmentRecord`) ·
 `packages/gateway/src/index.ts` + `enroll-page.ts` (the `/enroll` routes, the operator-discharge gate, the
 in-page ceremony the OIDC path replaces with a redirect).

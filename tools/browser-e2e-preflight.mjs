@@ -30,18 +30,9 @@ const requiredFixtureGroups = [
   ],
   ["packages/app/src/provision.test.ts", "packages/app/test/integration/provision.test.ts"],
   ["packages/app/src/daemon.test.ts", "packages/app/test/integration/daemon.test.ts"],
-  [
-    "packages/gateway/src/handoff-client-browser.test.ts",
-    "packages/gateway/test/e2e/handoff-client-browser.test.ts",
-  ],
-  [
-    "adapters/detector-url/src/detector-url.test.ts",
-    "adapters/detector-url/test/contract/detector-url.test.ts",
-  ],
-  [
-    "adapters/launcher-process/src/launcher-process.test.ts",
-    "adapters/launcher-process/test/contract/launcher-process.test.ts",
-  ],
+  ["packages/gateway/test/e2e/handoff-client-browser.test.ts"],
+  ["adapters/detector-url/test/contract/detector-url.test.ts"],
+  ["adapters/launcher-process/test/contract/launcher-process.test.ts"],
 ];
 const requiredFullHumanViewBinaries = ["Xvfb", "x11vnc", "websockify"];
 
