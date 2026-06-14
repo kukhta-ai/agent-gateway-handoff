@@ -65,6 +65,7 @@ describe("browser E2E preflight", () => {
 
     expect(pkg.scripts.gate).toContain("pnpm run test:e2e:preflight");
     expect(pkg.scripts.gate).toContain("GLA_BROWSER_E2E_MODE=required");
+    expect(pkg.scripts.typecheck).toContain("check:source-layout");
     expect(pkg.scripts["gate:without-browser-e2e"]).toContain("GLA_BROWSER_E2E_MODE=optional");
     expect(pkg.scripts["gate:without-browser-e2e"]).toContain("test:e2e:preflight:optional");
     expect(pkg.scripts["gate:browser-canary"]).toContain("browser-e2e-canary");
@@ -77,7 +78,9 @@ describe("browser E2E preflight", () => {
     expect(contributing).toContain("xvfb x11vnc websockify");
     expect(contributing).toContain("pnpm run gate:without-browser-e2e");
     expect(contributing).toContain("pnpm run gate:browser-canary");
+    expect(contributing).toContain("check:source-layout");
     expect(contributing).toContain("must not be used to close a backlog task");
+    expect(testStrategy).toContain("source-layout check");
     expect(testStrategy).toContain("test:e2e:preflight");
     expect(testStrategy).toContain("Xvfb");
     expect(testStrategy).toContain("websockify");
