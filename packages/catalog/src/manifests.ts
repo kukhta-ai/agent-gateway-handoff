@@ -213,6 +213,11 @@ export interface ProviderManifest {
     config_schema?: ConfigSchema;
     /** Static host dependency requirements. Dynamic binding evidence is supplied by WPM receipts. */
     requires?: DependencyRequirement[];
+    /**
+     * Provider construction config. When absent, Provider Host uses `config_schema`; detector manifests can keep
+     * `config_schema` as per-session params while exposing construction-only knobs here.
+     */
+    factory_config_schema?: ConfigSchema;
     /** The probe name resolved against the Index's probe registry (system-derived availability). */
     probe?: string;
     skills?: SkillManifest[];
@@ -316,7 +321,29 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     metadata: { name: "entrypoint-novnc", version: "0.1.0" },
     spec: {
       family: "entrypoint",
-      capability: { summary: "noVNC live-view human entrypoint (agent-blind input path)" },
+      capability: {
+        summary: "noVNC live-view human entrypoint (agent-blind input path)",
+        client: {
+          kind: "rfb-web-client",
+          ref: "novnc",
+          bootstrap: {
+            module: "core/rfb.js",
+            scaleViewport: true,
+            resizeSession: false,
+            viewOnly: false,
+          },
+        },
+        clientAssets: [
+          {
+            ref: "novnc",
+            source: "package",
+            package: "@novnc/novnc",
+            env: "GLA_NOVNC_WEB_ROOT",
+            cacheControl: "no-cache",
+          },
+        ],
+        transport: { kind: "reverse-proxy", protocols: ["websocket"] },
+      },
       requires: [
         {
           dependency: "human-view",
@@ -340,7 +367,14 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     metadata: { name: "connector-cdp", version: "0.1.0" },
     spec: {
       family: "connector",
-      capability: { summary: "Chrome DevTools Protocol agent connector (agent-blind)" },
+      capability: {
+        summary: "Chrome DevTools Protocol agent connector (agent-blind)",
+        dto: {
+          type: "cdp",
+          providerOwnedFields: ["cdp_url"],
+          lifecycleKey: "resourceId",
+        },
+      },
       requires: [
         {
           dependency: "browser-runtime",
@@ -383,12 +417,27 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     metadata: { name: "url-watcher", version: "0.1.0" },
     spec: {
       family: "detector",
-      capability: { summary: "url-watcher completion detector (fires on a configured URL)" },
+      capability: {
+        summary: "url-watcher completion detector (fires on a configured URL)",
+        completion: {
+          statuses: {
+            "url-intermediate": { status: "submitted", next: "email-verification" },
+            "url-complete": { status: "verified" },
+          },
+          resultSchema: {
+            url: { type: "string", required: true },
+            match: { type: "string", required: false },
+          },
+        },
+      },
       config_schema: {
         complete_on: { type: "string", required: true, pattern: "^/" },
         // An optional INTERMEDIATE URL (e.g. `/verify`) — the watcher emits an intermediate signal on its first
         // match before the terminal `complete_on` (scenario-01 Phase 8: `/verify` → submitted, next email-verification).
         intermediate: { type: "string", required: false, pattern: "^/" },
+      },
+      factory_config_schema: {
+        pollMs: { type: "number", required: false, min: 1 },
       },
       probe: "url-watcher",
     },
@@ -401,7 +450,14 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     metadata: { name: "user-done", version: "0.1.0" },
     spec: {
       family: "detector",
-      capability: { summary: "user-done completion detector (the human signals completion)" },
+      capability: {
+        summary: "user-done completion detector (the human signals completion)",
+        completion: {
+          statuses: {
+            done: { status: "verified" },
+          },
+        },
+      },
       probe: "user-done",
     },
   },

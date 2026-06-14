@@ -73,24 +73,32 @@ export default class FailingRFB extends EventTarget {
 }
 
 async function serveClientPage(
-  opts: { module?: string; bootstrapModule?: string } = {},
-): Promise<{ origin: string; close: () => Promise<void> }> {
+  opts: { module?: string; bootstrapModule?: string; clientRef?: string | null } = {},
+): Promise<{ origin: string; requests: string[]; close: () => Promise<void> }> {
+  const requests: string[] = [];
   const server = createServer((req, res) => {
+    if (req.url) requests.push(req.url);
     if (req.url === "/handoff") {
+      const client: {
+        kind: string;
+        ref?: string;
+        bootstrap: { module: string; scaleViewport: boolean; resizeSession: boolean };
+      } = {
+        kind: "rfb-web-client",
+        bootstrap: {
+          module: opts.bootstrapModule ?? "core/rfb.js",
+          scaleViewport: true,
+          resizeSession: false,
+        },
+      };
+      const ref = opts.clientRef === null ? undefined : (opts.clientRef ?? "fake-rfb");
+      if (ref) client.ref = ref;
       const html = handoffReusedPageHtml(
         "grant-token",
         "/handoff/sess_browser",
         "recipient",
         "/handoff/sess_browser",
-        {
-          kind: "rfb-web-client",
-          ref: "fake-rfb",
-          bootstrap: {
-            module: opts.bootstrapModule ?? "core/rfb.js",
-            scaleViewport: true,
-            resizeSession: false,
-          },
-        },
+        client,
         "/handoff/client-assets",
       );
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -109,6 +117,7 @@ async function serveClientPage(
   const port = (server.address() as AddressInfo).port;
   return {
     origin: `http://127.0.0.1:${port}`,
+    requests,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -175,6 +184,24 @@ describe("handoff page RFB browser client", () => {
         await page.goto(`${server.origin}/handoff`);
         await expect.poll(() => page.locator("#status").textContent()).toMatch(/unavailable/i);
         await expect.poll(() => page.locator("#status").textContent()).not.toMatch(/Connected/i);
+        expect(await page.evaluate("window.__glaRfb")).toBeUndefined();
+      });
+    },
+    60_000,
+  );
+
+  it.runIf(HAVE_CHROMIUM)(
+    "does not fall back to noVNC assets when the provider omits its browser-client asset ref",
+    async () => {
+      const server = await serveClientPage({ clientRef: null });
+      await withBrowserPage(server, async (page) => {
+        await page.goto(`${server.origin}/handoff`);
+        await expect
+          .poll(() => page.locator("#status").textContent())
+          .toMatch(/assets are not configured/i);
+        await expect
+          .poll(() => server.requests)
+          .not.toContain("/handoff/client-assets/novnc/core/rfb.js");
         expect(await page.evaluate("window.__glaRfb")).toBeUndefined();
       });
     },

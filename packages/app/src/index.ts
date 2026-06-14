@@ -30,38 +30,50 @@ import {
   deliveryToStdout,
 } from "@gla/channel-cli";
 import { CompletionService, type DetectorContract } from "@gla/completion";
-import { CONNECTOR_CDP_MODULE, ConnectorCdpAdapter } from "@gla/connector-cdp";
-import { DETECTOR_URL_MODULE, DETECTOR_URL_NAME, DetectorUrlAdapter } from "@gla/detector-url";
-import { EntrypointNovncAdapter, novncClientAssetMounts } from "@gla/entrypoint-novnc";
 import { AccessGateway } from "@gla/gateway";
 import { type EnrollmentRecord, IdentityService } from "@gla/identity";
 // Core / core-adjacent ports (the inward side of the seam):
 import {
+  type AgentConnector,
+  type AgentConnectorPort,
   type AuthAssuranceProfile,
   type AuthProviderPort,
   type CapabilityId,
+  type CompletionDetectorPort,
+  type ConfigSchema,
   HmacCapabilitySigner,
+  type HumanEntrypointPort,
   KERNEL_MODULE,
   type OpaqueToken,
   type RecipientRef,
+  type Ref,
+  type ResolvedAssemblySpec,
+  type RuntimeHandle,
+  type SessionId,
   authAssurancePolicyFromProfile,
   authAssurancePolicyFromRequiredAuthStrength,
+  glaError,
   redactOperatorText,
 } from "@gla/kernel";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
-import type {
-  ProviderHost,
-  ProviderId,
-  ProviderKvStore,
-  ProviderStateRoot,
+import {
+  type ProviderHost,
+  type ProviderId,
+  type ProviderKvStore,
+  type ProviderStateRoot,
+  providerServices,
 } from "@gla/provider-host";
 import {
   AUTH_WEBAUTHN_PROVIDER_ID,
+  CONNECTOR_CDP_PROVIDER_ID,
+  DETECTOR_URL_PROVIDER_ID,
+  ENTRYPOINT_NOVNC_PROVIDER_ID,
   LAUNCHER_PROCESS_PROVIDER_ID,
   WORKSPACE_PROFILE_PROVIDER_ID,
   createReferenceAuthProvider,
   createReferenceProviderHost,
   referenceAuthModuleForProviderId,
+  referenceEntrypointClientAssetMounts,
   referenceProviderModuleForProviderId,
   referenceProviderStoreContent,
 } from "@gla/provider-set-reference";
@@ -117,9 +129,9 @@ export function createApp(): App {
     policy: POLICY_CEDAR_MODULE,
     auth: referenceAuthModuleForProviderId(AUTH_WEBAUTHN_PROVIDER_ID),
     launcher: referenceProviderModuleForProviderId(LAUNCHER_PROCESS_PROVIDER_ID),
-    connector: CONNECTOR_CDP_MODULE,
+    connector: referenceProviderModuleForProviderId(CONNECTOR_CDP_PROVIDER_ID),
     workspace: referenceProviderModuleForProviderId(WORKSPACE_PROFILE_PROVIDER_ID),
-    detector: DETECTOR_URL_MODULE,
+    detector: referenceProviderModuleForProviderId(DETECTOR_URL_PROVIDER_ID),
     channel: CHANNEL_CLI_MODULE,
   };
   return {
@@ -220,17 +232,75 @@ function stateSlot<T>(
   };
 }
 
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
+}
+
 function referenceCatalogOptions(
   dependencyBindings: DependencyBinding[] | undefined,
   providerHost?: ProviderHost,
+  providerDefaults: ReferenceTemplateProviderDefaults = {},
 ): CatalogServiceOptions {
+  const host = providerHost ?? createReferenceProviderHost();
+  const content = referenceProviderStoreContent(host);
+  const template = content.templates.find(
+    (candidate) => candidate.metadata.name === "browser-handoff",
+  );
+  if (template !== undefined) {
+    const compatible = template.spec.compatibleProviders ?? {};
+    template.spec.compatibleProviders = {
+      ...compatible,
+      entrypoint: uniqueStrings([
+        ...(compatible.entrypoint ?? []),
+        ...content.providers
+          .filter((provider) => provider.spec.family === "entrypoint")
+          .map((provider) => provider.metadata.name),
+      ]),
+      connector: uniqueStrings([
+        ...(compatible.connector ?? []),
+        ...content.providers
+          .filter((provider) => provider.spec.family === "connector")
+          .map((provider) => provider.metadata.name),
+      ]),
+      detector: uniqueStrings([
+        ...(compatible.detector ?? []),
+        ...content.providers
+          .filter((provider) => provider.spec.family === "detector")
+          .map((provider) => provider.metadata.name),
+      ]),
+    };
+    const required = template.spec.requiredParts;
+    if (providerDefaults.launcher !== undefined) {
+      required.launcher = providerDefaults.launcher;
+    }
+    if (providerDefaults.entrypoint !== undefined) {
+      required.entrypoint = providerDefaults.entrypoint;
+    }
+    if (providerDefaults.connector !== undefined) {
+      required.connector = providerDefaults.connector;
+    }
+    if (providerDefaults.workspace !== undefined) {
+      required.workspace = providerDefaults.workspace;
+    }
+    if (providerDefaults.detector !== undefined) {
+      required.detector = providerDefaults.detector;
+    }
+  }
   const options: CatalogServiceOptions = {
-    content: referenceProviderStoreContent(providerHost ?? createReferenceProviderHost()),
+    content,
   };
   if (dependencyBindings !== undefined) {
     options.dependencyBindings = dependencyBindings;
   }
   return options;
+}
+
+interface ReferenceTemplateProviderDefaults {
+  launcher?: ProviderId;
+  entrypoint?: ProviderId;
+  connector?: ProviderId;
+  workspace?: ProviderId;
+  detector?: ProviderId;
 }
 
 function providerDependencyEvidence(
@@ -242,6 +312,197 @@ function providerDependencyEvidence(
     referenceCatalogOptions(dependencyBindings, providerHost),
   ).show(providerId)?.requires;
   return requires !== undefined && requires.length > 0 ? requires : undefined;
+}
+
+interface ConnectorLifecycleMethods {
+  bindSecretRef?(resourceId: string, secretRef: Ref<"secret-ref">): void;
+  unbindSecretRef?(resourceId: string): void;
+  suspendByResourceId?(resourceId: string): void;
+  resumeByResourceId?(resourceId: string): void;
+  isSuspended?(resourceIdOrProviderHandle: string): boolean;
+  liveSocketCount?(resourceIdOrProviderHandle: string): number;
+  hasBinding?(resourceId: string): boolean;
+  close?(): Promise<void> | void;
+}
+
+function connectorLifecycle(port: AgentConnectorPort): ConnectorLifecycleMethods {
+  return port as AgentConnectorPort & ConnectorLifecycleMethods;
+}
+
+function managedAgentConnectorPort(port: AgentConnectorPort): ManagedAgentConnectorPort {
+  const lifecycle = connectorLifecycle(port);
+  const controlsAgentChannel =
+    typeof lifecycle.suspendByResourceId === "function" &&
+    typeof lifecycle.resumeByResourceId === "function";
+  const bound = new Map<string, Ref<"secret-ref">>();
+  const suspended = new Set<string>();
+  return {
+    controlsAgentChannel,
+    async attach(runtime) {
+      const connector = { ...(await port.attach(runtime)) };
+      const secretRef = bound.get(connector.resourceId);
+      if (secretRef !== undefined && connector.secret_ref === undefined) {
+        connector.secret_ref = secretRef;
+      }
+      return connector;
+    },
+    bindSecretRef(resourceId, secretRef) {
+      bound.set(resourceId, secretRef);
+      lifecycle.bindSecretRef?.(resourceId, secretRef);
+    },
+    unbindSecretRef(resourceId) {
+      bound.delete(resourceId);
+      suspended.delete(resourceId);
+      lifecycle.unbindSecretRef?.(resourceId);
+    },
+    suspendByResourceId(resourceId) {
+      suspended.add(resourceId);
+      lifecycle.suspendByResourceId?.(resourceId);
+    },
+    resumeByResourceId(resourceId) {
+      suspended.delete(resourceId);
+      lifecycle.resumeByResourceId?.(resourceId);
+    },
+    isSuspended(resourceIdOrProviderHandle) {
+      return (
+        lifecycle.isSuspended?.(resourceIdOrProviderHandle) ??
+        suspended.has(resourceIdOrProviderHandle)
+      );
+    },
+    liveSocketCount(resourceIdOrProviderHandle) {
+      return lifecycle.liveSocketCount?.(resourceIdOrProviderHandle) ?? 0;
+    },
+    hasBinding(resourceId) {
+      return lifecycle.hasBinding?.(resourceId) ?? bound.has(resourceId);
+    },
+    async close() {
+      await lifecycle.close?.();
+    },
+  };
+}
+
+function connectorProviderIdForSpec(spec: ResolvedAssemblySpec, fallback: ProviderId): ProviderId {
+  return spec.spec.connector?.use ?? fallback;
+}
+
+function entrypointProviderIdForSpec(spec: ResolvedAssemblySpec, fallback: ProviderId): ProviderId {
+  return spec.spec.entrypoints?.[0]?.use ?? fallback;
+}
+
+function detectorProviderIdForSpec(spec: ResolvedAssemblySpec, fallback: ProviderId): ProviderId {
+  const detectors = spec.spec.detectors ?? [];
+  const explicitDefault = detectors.find((detector) => detector.use === fallback);
+  if (explicitDefault !== undefined) {
+    return explicitDefault.use;
+  }
+  const urlWatcher = detectors.find((detector) => detector.use === DETECTOR_URL_PROVIDER_ID);
+  return urlWatcher?.use ?? detectors[0]?.use ?? fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function statusRulesFrom(value: unknown): DetectorContract["statuses"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const out: DetectorContract["statuses"] = {};
+  for (const [status, rule] of Object.entries(value)) {
+    if (!isRecord(rule) || typeof rule.status !== "string" || rule.status.length === 0) {
+      return undefined;
+    }
+    out[status] =
+      typeof rule.next === "string" && rule.next.length > 0
+        ? { status: rule.status, next: rule.next }
+        : { status: rule.status };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function completionCapability(
+  providerHost: ProviderHost,
+  providerId: ProviderId,
+): Record<string, unknown> {
+  const completion = providerHost.providerManifest(providerId)?.spec.capability.completion;
+  if (!isRecord(completion)) {
+    throw glaError(
+      "catalog.unknown",
+      `detector provider "${providerId}" has no completion contract metadata`,
+      {
+        detail: { providerId },
+      },
+    );
+  }
+  return completion;
+}
+
+function detectorParams(
+  session: SessionService | undefined,
+  sessionId: import("@gla/kernel").SessionId,
+  detectorProviderId: ProviderId,
+): Record<string, unknown> {
+  return declaredDetectorPart(session, sessionId, detectorProviderId)?.params ?? {};
+}
+
+function declaredDetectorPart(
+  session: SessionService | undefined,
+  sessionId: import("@gla/kernel").SessionId,
+  detectorProviderId: ProviderId,
+): { params?: Record<string, unknown> } | undefined {
+  if (session === undefined) {
+    return undefined;
+  }
+  try {
+    const spec = session.get(sessionId).spec;
+    return spec.spec.detectors?.find((d) => d.use === detectorProviderId) as
+      | { params?: Record<string, unknown> }
+      | undefined;
+  } catch {
+    // Unknown session (shouldn't happen on a live window) -> no declared detector.
+    return undefined;
+  }
+}
+
+function buildDetectorContract(
+  session: SessionService | undefined,
+  sessionId: import("@gla/kernel").SessionId,
+  providerHost: ProviderHost,
+  detectorProviderId: ProviderId,
+  statusMap:
+    | {
+        intermediate?: { status: string; next?: string };
+        complete: { status: string; next?: string };
+      }
+    | undefined,
+): DetectorContract {
+  if (declaredDetectorPart(session, sessionId, detectorProviderId) === undefined) {
+    return { detector: detectorProviderId, statuses: {} };
+  }
+  const completion = completionCapability(providerHost, detectorProviderId);
+  let statuses = statusRulesFrom(completion.statuses);
+  if (detectorProviderId === DETECTOR_URL_PROVIDER_ID && statusMap !== undefined) {
+    statuses = {
+      "url-complete": statusMap.complete,
+      ...(statusMap.intermediate !== undefined
+        ? { "url-intermediate": statusMap.intermediate }
+        : {}),
+    };
+  }
+  if (statuses === undefined) {
+    throw glaError(
+      "catalog.unknown",
+      `detector provider "${detectorProviderId}" has no completion status rules`,
+      {
+        detail: { providerId: detectorProviderId },
+      },
+    );
+  }
+  const contract: DetectorContract = { detector: detectorProviderId, statuses };
+  if (isRecord(completion.resultSchema)) {
+    contract.resultSchema = completion.resultSchema as ConfigSchema;
+  }
+  return contract;
 }
 
 /** Options for {@link createBridge}: an override Cedar policy set (defaults to the MVP set). */
@@ -260,15 +521,14 @@ export interface CreateBridgeOptions {
  * `session create` dispatches a Session in `issued` — NO spawn (provisioning is `createProvisioningBridge`).
  */
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
-  const catalog = new CatalogService(
-    referenceCatalogOptions(opts.dependencyBindings, opts.providerHost),
-  );
+  const catalogOptions = referenceCatalogOptions(opts.dependencyBindings, opts.providerHost);
+  const catalog = new CatalogService(catalogOptions);
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );
   const admission = new AdmissionService({
     policy,
-    catalog: toAdmissionCatalog(catalog),
+    catalog: toAdmissionCatalog(catalog, catalogOptions.content),
   });
   return new AgentBridge({ catalog, admission });
 }
@@ -285,6 +545,18 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
   workspaceProvider?: ProviderId;
   /** Provider-owned workspace config. Defaults preserve the legacy workspaceRoot option for workspace-profile. */
   workspaceProviderConfig?: Record<string, unknown>;
+  /** Opaque agent-connector provider id. Default `"connector-cdp"`. */
+  connectorProvider?: ProviderId;
+  /** Provider-owned agent-connector config. */
+  connectorProviderConfig?: Record<string, unknown>;
+  /** Opaque human-entrypoint provider id. Default `"entrypoint-novnc"` when handoff is wired. */
+  entrypointProvider?: ProviderId;
+  /** Provider-owned human-entrypoint config. */
+  entrypointProviderConfig?: Record<string, unknown>;
+  /** Opaque completion-detector provider id. Default `"url-watcher"` when completion is wired. */
+  detectorProvider?: ProviderId;
+  /** Provider-owned completion-detector config. */
+  detectorProviderConfig?: Record<string, unknown>;
   /** Override the workspace root (tests pass a scratch dir under which profile dirs are created). */
   workspaceRoot?: string;
   /**
@@ -387,6 +659,20 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
   };
 }
 
+/** Agent-connector shape the app/session need after provider selection, with optional test observability. */
+export interface ManagedAgentConnectorPort {
+  readonly controlsAgentChannel: boolean;
+  attach(runtime: RuntimeHandle): Promise<AgentConnector>;
+  bindSecretRef(resourceId: string, secretRef: Ref<"secret-ref">): void;
+  unbindSecretRef(resourceId: string): void;
+  suspendByResourceId(resourceId: string): void;
+  resumeByResourceId(resourceId: string): void;
+  isSuspended(resourceIdOrProviderHandle: string): boolean;
+  liveSocketCount(resourceIdOrProviderHandle: string): number;
+  hasBinding(resourceId: string): boolean;
+  close(): Promise<void>;
+}
+
 /** A provisioning bridge plus the worker handles a caller can use to reconcile/teardown (tests, shutdown). */
 export interface ProvisioningStack {
   /** Resolves after restart recovery has converged; public listeners must not bind before this is settled. */
@@ -400,16 +686,18 @@ export interface ProvisioningStack {
   reconciler: CleanupReconciler;
   /** The spawner registry (so a test can register a second launcher — the pluggability proof). */
   registry: SpawnerRegistry;
-  /** The default human-entrypoint adapter. */
-  entrypoint: EntrypointNovncAdapter;
+  /** The selected human-entrypoint provider, present when handoff composition requires one. */
+  entrypoint?: HumanEntrypointPort;
   /** The SHARED capability service (one signer for the anchor + task + connector caps). */
   capability: CapabilityService;
   /** The SHARED task service (so a caller can resolve a task's cap id / drive teardown). */
   task: TaskService;
   /** The provision-capable session service (so a caller can observe connector lineage / teardown). */
   session: SessionService;
-  /** The default agent connector adapter. */
-  connector: ConnectorCdpAdapter;
+  /** The selected agent-connector provider, normalized to the app/session connector lifecycle contract. */
+  connector: ManagedAgentConnectorPort;
+  /** The selected completion-detector provider, present when completion watching is wired. */
+  detector?: CompletionDetectorPort;
   /** The Access Gateway (Slice 4b: the sole public entry; serves the handoff step-up + proxies the WS). Present only when handoff is wired. */
   gateway?: AccessGateway;
   /** The Route controller (Slice 4b: programs grant-bound routes on the gateway). Present only when handoff is wired. */
@@ -463,16 +751,28 @@ export function createProvisioningBridge(
       : undefined;
   let stateOwnedByStack = false;
   try {
-    const catalog = new CatalogService(
-      referenceCatalogOptions(opts.dependencyBindings, providerHost),
-    );
+    const launcherProviderId = opts.launcherProvider ?? LAUNCHER_PROCESS_PROVIDER_ID;
+    const workspaceProviderId = opts.workspaceProvider ?? WORKSPACE_PROFILE_PROVIDER_ID;
+    const connectorProviderId = opts.connectorProvider ?? CONNECTOR_CDP_PROVIDER_ID;
+    const entrypointProviderId = opts.entrypointProvider ?? ENTRYPOINT_NOVNC_PROVIDER_ID;
+    const detectorProviderId = opts.detectorProvider ?? DETECTOR_URL_PROVIDER_ID;
+    const catalogOptions = referenceCatalogOptions(opts.dependencyBindings, providerHost, {
+      ...(opts.launcherProvider !== undefined ? { launcher: opts.launcherProvider } : {}),
+      ...(opts.workspaceProvider !== undefined ? { workspace: opts.workspaceProvider } : {}),
+      ...(opts.connectorProvider !== undefined ? { connector: opts.connectorProvider } : {}),
+      ...(opts.entrypointProvider !== undefined ? { entrypoint: opts.entrypointProvider } : {}),
+      ...(opts.detectorProvider !== undefined ? { detector: opts.detectorProvider } : {}),
+    });
+    const catalog = new CatalogService(catalogOptions);
     const policy = new CedarPolicyAdapter(
       opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
     );
-    const admission = new AdmissionService({ policy, catalog: toAdmissionCatalog(catalog) });
+    const admission = new AdmissionService({
+      policy,
+      catalog: toAdmissionCatalog(catalog, catalogOptions.content),
+    });
 
     // ── Worker plane: Provider Host creates launcher/workspace ports, then worker core receives only ports.
-    const launcherProviderId = opts.launcherProvider ?? LAUNCHER_PROCESS_PROVIDER_ID;
     const launcherProviderConfig =
       opts.launcherProviderConfig ??
       (launcherProviderId === LAUNCHER_PROCESS_PROVIDER_ID
@@ -496,7 +796,6 @@ export function createProvisioningBridge(
     const registry = new SpawnerRegistry();
     registry.register(launcherProviderId, launcher, { default: true });
 
-    const workspaceProviderId = opts.workspaceProvider ?? WORKSPACE_PROFILE_PROVIDER_ID;
     const workspaceProviderConfig =
       opts.workspaceProviderConfig ??
       (workspaceProviderId === WORKSPACE_PROFILE_PROVIDER_ID
@@ -537,11 +836,41 @@ export function createProvisioningBridge(
         ? { spentNonces: state.stringSet("capability.spent-enrollment-nonces") }
         : {},
     );
-    const connector = new ConnectorCdpAdapter();
+    const connectorPorts = new Map<ProviderId, ManagedAgentConnectorPort>();
+    const connectorForProvider = (providerId: ProviderId): ManagedAgentConnectorPort => {
+      let port = connectorPorts.get(providerId);
+      if (port !== undefined) {
+        return port;
+      }
+      const connectorDependencyEvidence = providerDependencyEvidence(
+        providerId,
+        opts.dependencyBindings,
+        providerHost,
+      );
+      port = managedAgentConnectorPort(
+        providerHost.createProviderSync("connector", providerId, {
+          config: providerId === connectorProviderId ? (opts.connectorProviderConfig ?? {}) : {},
+          ...(connectorDependencyEvidence !== undefined
+            ? { dependencyBindings: connectorDependencyEvidence }
+            : {}),
+        }),
+      );
+      connectorPorts.set(providerId, port);
+      return port;
+    };
+    const connector = connectorForProvider(connectorProviderId);
     // A holder so the Task service's TEARDOWN dep (Slice 7) can call the SessionService's terminal
     // `teardownSession` — the SessionService is constructed later (it needs the handoff/completion deps),
     // so the closure reads it from `.svc` (assigned once built). Avoids a forward `let` / construction cycle.
     const sessionRef: { svc?: SessionService } = {};
+    const connectorProviderIdForSession = (sessionId: SessionId): ProviderId => {
+      const spec = sessionRef.svc?.get(sessionId).spec;
+      return spec !== undefined
+        ? connectorProviderIdForSpec(spec, connectorProviderId)
+        : connectorProviderId;
+    };
+    const connectorForSession = (sessionId: SessionId): ManagedAgentConnectorPort =>
+      connectorForProvider(connectorProviderIdForSession(sessionId));
     // ── Slice 7 — the Task service is built with its TERMINAL-teardown wiring: `task complete`/`task revoke`
     //    tear down every session under the task (via the SessionService's `teardownSession`) and revoke the
     //    task capability (which, by lineage, stops every descendant cap — the session grants + the connector —
@@ -563,10 +892,6 @@ export function createProvisioningBridge(
     }
     const task = new TaskService(taskOptions);
 
-    // The noVNC human entrypoint (full mode: the ws endpoint the gateway proxies in Slice 4b; headless: reports
-    // unavailable). Stood up here so the full-mode test can read it AND so the handoff saga can resolve it.
-    const entrypoint = new EntrypointNovncAdapter();
-
     // ── Slice 4b — the HANDOFF pipeline (the Access Gateway + Route controller + identity step-up + channel),
     //    wired into the SessionService's open-window saga when `opts.handoff` is present. The gateway is the sole
     //    public entry (it serves the step-up + proxies the WS); the route controller programs grant-bound routes ON
@@ -575,6 +900,8 @@ export function createProvisioningBridge(
     let gateway: AccessGateway | undefined;
     let route: RouteController | undefined;
     let identity: IdentityService | undefined;
+    let entrypoint: HumanEntrypointPort | undefined;
+    let detector: CompletionDetectorPort | undefined;
     let handoffDeps: HandoffDeps | undefined;
     let completionDeps: CompletionDeps | undefined;
     /** The auth module actually wired behind the AuthProviderPort (doc §7 wiring record). Default the in-tree WebAuthn. */
@@ -625,6 +952,30 @@ export function createProvisioningBridge(
           : h.requiredAuthStrength !== undefined
             ? authAssurancePolicyFromRequiredAuthStrength(h.requiredAuthStrength)
             : undefined;
+      const entrypointPorts = new Map<ProviderId, HumanEntrypointPort>();
+      const entrypointForProvider = (providerId: ProviderId): HumanEntrypointPort => {
+        if (h.entrypoint !== undefined && providerId === entrypointProviderId) {
+          return h.entrypoint;
+        }
+        let port = entrypointPorts.get(providerId);
+        if (port !== undefined) {
+          return port;
+        }
+        const entrypointDependencyEvidence = providerDependencyEvidence(
+          providerId,
+          opts.dependencyBindings,
+          providerHost,
+        );
+        port = providerHost.createProviderSync("entrypoint", providerId, {
+          config: providerId === entrypointProviderId ? (opts.entrypointProviderConfig ?? {}) : {},
+          ...(entrypointDependencyEvidence !== undefined
+            ? { dependencyBindings: entrypointDependencyEvidence }
+            : {}),
+        });
+        entrypointPorts.set(providerId, port);
+        return port;
+      };
+      entrypoint = entrypointForProvider(entrypointProviderId);
       // The gateway is the Route controller's abstract edge AND the public step-up/WS-proxy entry. It verifies the
       // recipient-bound grant statelessly + requires the bound identity (step-up) before forwarding to the capsule.
       gateway = new AccessGateway({
@@ -648,9 +999,8 @@ export function createProvisioningBridge(
         // Provider-neutral assurance profile (default phishing-resistant): app translates deployment policy to the
         // gateway's common contract; gateway code never names provider method claims.
         ...(authAssurancePolicy !== undefined ? { authAssurancePolicy } : {}),
-        // The noVNC provider owns its browser client assets; the gateway only serves them through a generic static
-        // mount so session/capability/auth/core never learn noVNC details.
-        entrypointClientAssets: novncClientAssetMounts(),
+        // Entrypoint providers own browser-client assets; the gateway only sees generic static mounts.
+        entrypointClientAssets: referenceEntrypointClientAssetMounts(providerHost),
       });
       route = new RouteController({ gateway });
       handoffDeps = {
@@ -674,9 +1024,9 @@ export function createProvisioningBridge(
           },
           unmount: (windowId) => (route ? route.unmount(windowId) : Promise.resolve()),
         },
-        // The human entrypoint the route proxies to — the real noVNC adapter, or a test-injected stub (headless dev
-        // has no X stack; the REAL noVNC proxy is gated for hermes-1).
-        entrypoint: h.entrypoint ?? entrypoint,
+        entrypoint,
+        entrypointFor: (spec) =>
+          entrypointForProvider(entrypointProviderIdForSpec(spec, entrypointProviderId)),
         channel,
         // Build the recipient-bound handoff link from the route path + the grant token (the gateway's helper).
         buildLink: (path, token) => AccessGateway.handoffLink(h.publicBaseUrl, path, token),
@@ -705,10 +1055,45 @@ export function createProvisioningBridge(
       if (h.completion !== undefined) {
         const c = h.completion;
         const completionSvc = new CompletionService();
-        const urlDetector = new DetectorUrlAdapter({
-          ...(c.readUrl !== undefined ? { readUrl: c.readUrl } : {}),
-          ...(c.pollMs !== undefined ? { pollMs: c.pollMs } : {}),
-        });
+        const detectorPorts = new Map<ProviderId, CompletionDetectorPort>();
+        const detectorForProvider = (providerId: ProviderId): CompletionDetectorPort => {
+          let port = detectorPorts.get(providerId);
+          if (port !== undefined) {
+            return port;
+          }
+          const detectorConfig =
+            providerId === detectorProviderId
+              ? (opts.detectorProviderConfig ??
+                (providerId === DETECTOR_URL_PROVIDER_ID && c.pollMs !== undefined
+                  ? { pollMs: c.pollMs }
+                  : {}))
+              : {};
+          const detectorServices =
+            providerId === DETECTOR_URL_PROVIDER_ID && c.readUrl !== undefined
+              ? providerServices({ "detectorUrl.readUrl": c.readUrl })
+              : undefined;
+          const detectorDependencyEvidence = providerDependencyEvidence(
+            providerId,
+            opts.dependencyBindings,
+            providerHost,
+          );
+          port = providerHost.createProviderSync("detector", providerId, {
+            config: detectorConfig,
+            ...(detectorDependencyEvidence !== undefined
+              ? { dependencyBindings: detectorDependencyEvidence }
+              : {}),
+            ...(detectorServices !== undefined ? { services: detectorServices } : {}),
+          });
+          detectorPorts.set(providerId, port);
+          return port;
+        };
+        const detectorProviderIdForSession = (sessionId: SessionId): ProviderId => {
+          const spec = sessionRef.svc?.get(sessionId).spec;
+          return spec !== undefined
+            ? detectorProviderIdForSpec(spec, detectorProviderId)
+            : detectorProviderId;
+        };
+        detector = detectorForProvider(detectorProviderId);
         // The url-watcher → envelope status map (the detector/template author's declaration). Default: the
         // scenario-01 mapping (intermediate `/verify` → submitted+next; complete `/dashboard` → verified).
         const statusMap = c.statusMap ?? {
@@ -717,30 +1102,59 @@ export function createProvisioningBridge(
         };
         completionDeps = {
           completion: completionSvc,
-          // Build the DECLARED detector contract for a session's window from its assembly's url-watcher params: the
-          // admitted raw statuses → their normalization. The CONTRACT is what an out-of-contract signal is rejected
-          // against (S-8). Its `resultSchema` reuses the url-watcher's own typed contract so a malformed result is
-          // also rejected.
+          // Build the DECLARED detector contract from provider metadata: admitted raw statuses -> normalization.
           // These closures run only when a window opens/closes — AFTER `sessionRef.svc` is assigned below.
-          contractFor: (sessionId) => buildUrlWatcherContract(sessionRef.svc, sessionId, statusMap),
-          detector: urlDetector,
-          // The params the url-watcher watches with — the session's declared `complete_on`/`intermediate`.
-          detectorParamsFor: (sessionId) => urlWatcherParams(sessionRef.svc, sessionId),
+          contractFor: (sessionId) =>
+            buildDetectorContract(
+              sessionRef.svc,
+              sessionId,
+              providerHost,
+              detectorProviderIdForSession(sessionId),
+              statusMap,
+            ),
+          detector,
+          detectorFor: (spec) =>
+            detectorForProvider(detectorProviderIdForSpec(spec, detectorProviderId)),
+          // The params the selected detector watches with — the session's declared detector part.
+          detectorParamsFor: (sessionId) =>
+            detectorParams(sessionRef.svc, sessionId, detectorProviderIdForSession(sessionId)),
           // S-2 agent-blind: SEVER/resume the agent connector by the session's connector resource id. The provider
           // adapter owns how that id maps to live sockets, so session/app do not key lifecycle to a transport URL.
           connectorControl: {
+            assertControllable: (sessionId) => {
+              const providerId = connectorProviderIdForSession(sessionId);
+              if (!connectorForProvider(providerId).controlsAgentChannel) {
+                throw glaError(
+                  "dependency.unavailable",
+                  `connector provider "${providerId}" cannot enforce agent-blind channel control`,
+                  {
+                    detail: {
+                      diagnostics: [
+                        {
+                          code: "provider.service_missing",
+                          providerId,
+                          family: "connector",
+                          message:
+                            "connector provider must expose suspend/resume by resource id for handoff completion",
+                        },
+                      ],
+                    },
+                  },
+                );
+              }
+            },
             suspend: (sessionId) => {
               const resourceId =
                 sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
               if (resourceId !== undefined && resourceId.length > 0) {
-                connector.suspendByResourceId(resourceId);
+                connectorForSession(sessionId).suspendByResourceId(resourceId);
               }
             },
             resume: (sessionId) => {
               const resourceId =
                 sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
               if (resourceId !== undefined && resourceId.length > 0) {
-                connector.resumeByResourceId(resourceId);
+                connectorForSession(sessionId).resumeByResourceId(resourceId);
               }
             },
           },
@@ -772,6 +1186,8 @@ export function createProvisioningBridge(
           revoke: (capId) => capability.revoke(capId),
         },
         connector,
+        connectorFor: (spec) =>
+          connectorForProvider(connectorProviderIdForSpec(spec, connectorProviderId)),
         parentCapabilityRefFor: (_sessionId, taskId) => {
           // Resolve the session's task → its minted task-capability id (the connector's lineage parent).
           const t = task.tryGet(taskId);
@@ -813,7 +1229,7 @@ export function createProvisioningBridge(
           return; // never provisioned / already cleaned — idempotent no-op.
         }
         // Drop the agent-blind resource binding (no residual) and revoke the connector cap.
-        connector.unbindSecretRef(info.connectorResourceId);
+        connectorForSession(sessionId as never).unbindSecretRef(info.connectorResourceId);
         await capability.revoke(info.connectorCapId);
         // Forget the provision bookkeeping so a second teardown is a clean no-op (idempotent).
         session.clearProvisioned(sessionId as never);
@@ -848,7 +1264,9 @@ export function createProvisioningBridge(
         for (const sessionId of lifecycle.liveSessions()) {
           await reconciler.reconcile(sessionId).catch(() => {});
         }
-        await connector.close().catch(() => {});
+        for (const port of connectorPorts.values()) {
+          await port.close().catch(() => {});
+        }
         await gateway?.close().catch(() => {});
       } finally {
         state?.close();
@@ -861,13 +1279,18 @@ export function createProvisioningBridge(
       lifecycle,
       reconciler,
       registry,
-      entrypoint,
       capability,
       task,
       session,
       connector,
       authModule,
     };
+    if (entrypoint !== undefined) {
+      stack.entrypoint = entrypoint;
+    }
+    if (detector !== undefined) {
+      stack.detector = detector;
+    }
     // Slice 4b: expose the handoff pipeline handles when wired (so a test/caller can drive the gateway/route/identity).
     if (gateway !== undefined) {
       stack.gateway = gateway;
@@ -1076,60 +1499,6 @@ function redactedEnrollmentInvite(
     link: redactOperatorText(link),
     grant: "<redacted>" as OpaqueToken,
     nonce: "<redacted>",
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Slice 5 — url-watcher contract + params helpers (derive them from the session's assembly)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** The `{use:"url-watcher", params:{…}}` detector params a session's assembly declared, or `{}` if none. */
-function urlWatcherParams(
-  session: SessionService | undefined,
-  sessionId: import("@gla/kernel").SessionId,
-): Record<string, unknown> {
-  if (session === undefined) {
-    return {};
-  }
-  try {
-    const spec = session.get(sessionId).spec;
-    const detector = spec.spec.detectors?.find((d) => d.use === DETECTOR_URL_NAME);
-    return (detector?.params as Record<string, unknown> | undefined) ?? {};
-  } catch {
-    // Unknown session (shouldn't happen on a live window) → no params (the watch then emits nothing).
-    return {};
-  }
-}
-
-/**
- * Build the DECLARED url-watcher detector contract for a session's window (what the Completion service validates a
- * raw signal against — S-8). It admits exactly the two mechanical statuses the url-watcher emits — `url-intermediate`
- * and `url-complete` — and maps each to its caller-facing envelope status (the `statusMap`). The `resultSchema`
- * reuses the url-watcher's own typed contract (`{url, match}`), so a malformed result is also rejected. Any OTHER
- * raw status (a spoofed "done") is out-of-contract → rejected (the window does not complete).
- */
-function buildUrlWatcherContract(
-  _session: SessionService | undefined,
-  _sessionId: import("@gla/kernel").SessionId,
-  statusMap: {
-    intermediate?: { status: string; next?: string };
-    complete: { status: string; next?: string };
-  },
-): DetectorContract {
-  const statuses: DetectorContract["statuses"] = {
-    "url-complete": statusMap.complete,
-  };
-  if (statusMap.intermediate !== undefined) {
-    statuses["url-intermediate"] = statusMap.intermediate;
-  }
-  // The url-watcher's `result` shape is `{url, match}` — validate against a permissive subset of its own contract.
-  return {
-    detector: DETECTOR_URL_NAME,
-    statuses,
-    resultSchema: {
-      url: { type: "string", required: true },
-      match: { type: "string", required: false },
-    },
   };
 }
 

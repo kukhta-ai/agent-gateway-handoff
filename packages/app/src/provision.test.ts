@@ -15,10 +15,16 @@ import { join } from "node:path";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import type {
+  AgentConnector,
+  AgentConnectorPort,
+  CompletionDetectorPort,
+  HumanEntrypointBinding,
+  HumanEntrypointPort,
   LauncherPort,
   MountCapability,
   MountSpec,
   PartRef,
+  RawCompletionSignal,
   ResolvedAssemblySpec,
   RuntimeHandle,
   WorkspaceHandle,
@@ -93,9 +99,28 @@ const HAVE_CHROMIUM = chromiumAvailable();
 
 interface FakeRuntimeRecords {
   spawned: string[];
+  attached: string[];
+  suspended: string[];
+  resumed: string[];
   stopped: RuntimeHandle[];
   realized: string[];
   reaped: WorkspaceHandle[];
+  entrypoints: RuntimeHandle[];
+  detectorSignals: string[];
+}
+
+function fakeRuntimeRecords(): FakeRuntimeRecords {
+  return {
+    spawned: [],
+    attached: [],
+    suspended: [],
+    resumed: [],
+    stopped: [],
+    realized: [],
+    reaped: [],
+    entrypoints: [],
+    detectorSignals: [],
+  };
 }
 
 const FAKE_MOUNT_CAPABILITY: MountCapability = {
@@ -153,6 +178,56 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
     }
   }
 
+  class FakeConnector implements AgentConnectorPort {
+    async attach(_handle: RuntimeHandle): Promise<AgentConnector> {
+      records.attached.push("connector-fake");
+      return {
+        type: "fake-connector",
+        resourceId: "connector:fake",
+        provider: "connector-fake",
+        fake_url: "memory://connector-fake",
+      };
+    }
+
+    suspendByResourceId(resourceId: string): void {
+      records.suspended.push(resourceId);
+    }
+
+    resumeByResourceId(resourceId: string): void {
+      records.resumed.push(resourceId);
+    }
+  }
+
+  class FakeEntrypoint implements HumanEntrypointPort {
+    async open(handle: RuntimeHandle): Promise<HumanEntrypointBinding> {
+      records.entrypoints.push(handle);
+      return {
+        resourceId: "entrypoint:fake",
+        provider: "entrypoint-fake",
+        client: { kind: "fake-client" },
+        transport: {
+          kind: "reverse-proxy",
+          protocol: "websocket",
+          upstream: "ws://127.0.0.1:1/fake-entrypoint",
+        },
+      };
+    }
+  }
+
+  class FakeDetector implements CompletionDetectorPort {
+    readonly contract = {};
+
+    async *watch(_handle: RuntimeHandle): AsyncIterable<RawCompletionSignal> {
+      records.detectorSignals.push("fake-complete");
+      yield {
+        detector: "detector-fake",
+        status: "fake-complete",
+        at: new Date(0).toISOString() as never,
+        result: { provider: "detector-fake" },
+      };
+    }
+  }
+
   return [
     {
       manifest: {
@@ -189,6 +264,65 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
         ctx.registerProbe("workspace-fake", () => "available");
       },
     },
+    {
+      manifest: {
+        apiVersion: "gla.dev/v1",
+        kind: "AgentConnector",
+        metadata: { name: "connector-fake", version: "0.1.0" },
+        spec: {
+          family: "connector",
+          capability: { summary: "fake connector selected through Provider Host" },
+          probe: "connector-fake",
+        },
+      },
+      register(ctx) {
+        ctx.registerAgentConnector("connector-fake", { create: () => new FakeConnector() });
+        ctx.registerProbe("connector-fake", () => "available");
+      },
+    },
+    {
+      manifest: {
+        apiVersion: "gla.dev/v1",
+        kind: "HumanEntrypoint",
+        metadata: { name: "entrypoint-fake", version: "0.1.0" },
+        spec: {
+          family: "entrypoint",
+          capability: {
+            summary: "fake entrypoint selected through Provider Host",
+            client: { kind: "fake-client" },
+            transport: { kind: "reverse-proxy", protocols: ["websocket"] },
+          },
+          probe: "entrypoint-fake",
+        },
+      },
+      register(ctx) {
+        ctx.registerHumanEntrypoint("entrypoint-fake", { create: () => new FakeEntrypoint() });
+        ctx.registerProbe("entrypoint-fake", () => "available");
+      },
+    },
+    {
+      manifest: {
+        apiVersion: "gla.dev/v1",
+        kind: "CompletionDetector",
+        metadata: { name: "detector-fake", version: "0.1.0" },
+        spec: {
+          family: "detector",
+          capability: {
+            summary: "fake detector selected through Provider Host",
+            completion: {
+              statuses: {
+                "fake-complete": { status: "verified" },
+              },
+            },
+          },
+          probe: "detector-fake",
+        },
+      },
+      register(ctx) {
+        ctx.registerCompletionDetector("detector-fake", { create: () => new FakeDetector() });
+        ctx.registerProbe("detector-fake", () => "available");
+      },
+    },
   ];
 }
 
@@ -214,8 +348,122 @@ describe("provisioning composition root — real `session create` + `session con
     await stack.close();
   });
 
+  it("fails closed when the selected connector lacks required dependency evidence", () => {
+    const records = fakeRuntimeRecords();
+    const providerHost = createReferenceProviderHost();
+    for (const module of fakeProviderModules(records)) {
+      providerHost.registerModule(module);
+    }
+
+    expect(() =>
+      createProvisioningBridge({
+        providerHost,
+        launcherProvider: "launcher-fake",
+        workspaceProvider: "workspace-fake",
+      }),
+    ).toThrow(/connector-cdp.*unavailable dependencies|browser-runtime/i);
+  });
+
+  it("fails closed when the selected entrypoint lacks required dependency evidence", () => {
+    const records = fakeRuntimeRecords();
+    const providerHost = createReferenceProviderHost();
+    for (const module of fakeProviderModules(records)) {
+      providerHost.registerModule(module);
+    }
+
+    expect(() =>
+      createProvisioningBridge({
+        providerHost,
+        launcherProvider: "launcher-fake",
+        workspaceProvider: "workspace-fake",
+        connectorProvider: "connector-fake",
+        handoff: {
+          expectedOrigin: "http://localhost:3000",
+          publicBaseUrl: "http://localhost:3000",
+          host: "127.0.0.1",
+          port: 0,
+        },
+      }),
+    ).toThrow(/entrypoint-novnc.*unavailable dependencies|human-view/i);
+  });
+
+  it("fails closed before opening a handoff when the admitted connector cannot enforce agent-blind channel control", async () => {
+    const records = fakeRuntimeRecords();
+    const providerHost = createReferenceProviderHost();
+    for (const module of fakeProviderModules(records)) {
+      providerHost.registerModule(module);
+    }
+    providerHost.registerModule({
+      manifest: {
+        apiVersion: "gla.dev/v1",
+        kind: "AgentConnector",
+        metadata: { name: "connector-no-control", version: "0.1.0" },
+        spec: {
+          family: "connector",
+          capability: { summary: "connector without suspend/resume support" },
+          probe: "connector-no-control",
+        },
+      },
+      register(ctx) {
+        ctx.registerAgentConnector("connector-no-control", {
+          create: () => ({
+            async attach(): Promise<AgentConnector> {
+              return {
+                type: "no-control",
+                resourceId: "connector:no-control",
+                provider: "connector-no-control",
+              };
+            },
+          }),
+        });
+        ctx.registerProbe("connector-no-control", () => "available");
+      },
+    });
+
+    const stack = createProvisioningBridge({
+      providerHost,
+      launcherProvider: "launcher-fake",
+      workspaceProvider: "workspace-fake",
+      connectorProvider: "connector-no-control",
+      entrypointProvider: "entrypoint-fake",
+      detectorProvider: "detector-fake",
+      handoff: {
+        expectedOrigin: "http://localhost:3000",
+        publicBaseUrl: "http://localhost:3000",
+        host: "127.0.0.1",
+        port: 0,
+        deliverySink: { write: () => {} },
+        completion: {},
+      },
+    });
+    try {
+      const created = await stack.bridge.sessionCreate({
+        proposal: {
+          intent: "reg",
+          template: "browser-handoff",
+          recipient: "tg:user:1",
+          connector: { use: "connector-no-control" },
+          entrypoints: [{ use: "entrypoint-fake" }],
+          detectors: [{ use: "detector-fake" }],
+        },
+      });
+      const sessionId = (created as { session_id: string }).session_id;
+      expect(created).toMatchObject({ connector: { provider: "connector-no-control" } });
+      expect(stack.session.get(sessionId as never).spec.spec.connector?.use).toBe(
+        "connector-no-control",
+      );
+      expect(stack.connector.controlsAgentChannel).toBe(false);
+      await expect(stack.session.openHandoff(sessionId as never)).rejects.toThrow(
+        /agent-blind channel control/i,
+      );
+      expect(stack.session.handoffList({ session: sessionId as never })).toEqual([]);
+    } finally {
+      await stack.close();
+    }
+  });
+
   it("selects fake launcher and workspace providers through Provider Host without worker/core changes", async () => {
-    const records: FakeRuntimeRecords = { spawned: [], stopped: [], realized: [], reaped: [] };
+    const records = fakeRuntimeRecords();
     const providerHost = createReferenceProviderHost();
     for (const module of fakeProviderModules(records)) {
       providerHost.registerModule(module);
@@ -225,9 +473,10 @@ describe("provisioning composition root — real `session create` + `session con
       providerHost,
       launcherProvider: "launcher-fake",
       workspaceProvider: "workspace-fake",
+      connectorProvider: "connector-fake",
     });
     expect(stack.bridge.catalogList().map((entity) => entity.name)).toEqual(
-      expect.arrayContaining(["launcher-fake", "workspace-fake"]),
+      expect.arrayContaining(["launcher-fake", "workspace-fake", "connector-fake"]),
     );
 
     const spawned = await stack.lifecycle.spawn("sess_fake", fakeRuntimeSpec());
@@ -238,6 +487,128 @@ describe("provisioning composition root — real `session create` + `session con
     await stack.lifecycle.teardown("sess_fake");
     expect(records.stopped).toHaveLength(1);
     expect(records.reaped).toHaveLength(1);
+  });
+
+  it("selects fake entrypoint connector and detector providers from the admitted session assembly without core package changes", async () => {
+    const records = fakeRuntimeRecords();
+    const providerHost = createReferenceProviderHost();
+    for (const module of fakeProviderModules(records)) {
+      providerHost.registerModule(module);
+    }
+
+    const stack = createProvisioningBridge({
+      providerHost,
+      launcherProvider: "launcher-fake",
+      workspaceProvider: "workspace-fake",
+      workspaceRoot: workspaceRoot(),
+      connectorProvider: "connector-fake",
+      entrypointProvider: "entrypoint-fake",
+      detectorProvider: "detector-fake",
+      handoff: {
+        expectedOrigin: "http://localhost:3000",
+        publicBaseUrl: "http://localhost:3000",
+        host: "127.0.0.1",
+        port: 0,
+        deliverySink: { write: () => {} },
+        completion: {},
+      },
+    });
+    try {
+      const created = await stack.bridge.sessionCreate({
+        proposal: {
+          intent: "reg",
+          template: "browser-handoff",
+          recipient: "tg:user:1",
+          connector: { use: "connector-fake" },
+          entrypoints: [{ use: "entrypoint-fake" }],
+          detectors: [{ use: "detector-fake" }],
+        },
+      });
+      const sessionId = (created as { session_id: string }).session_id;
+      expect(created).toMatchObject({
+        state: "active",
+        connector: {
+          type: "fake-connector",
+          resourceId: "connector:fake",
+          provider: "connector-fake",
+          fake_url: "memory://connector-fake",
+          secret_ref: expect.stringMatching(/^cap_/),
+        },
+      });
+      const session = stack.session.get(sessionId as never);
+      expect(session.spec.spec.connector?.use).toBe("connector-fake");
+      expect(session.spec.spec.entrypoints?.[0]?.use).toBe("entrypoint-fake");
+      expect(session.spec.spec.detectors?.[0]?.use).toBe("detector-fake");
+
+      const handoff = await stack.session.openHandoff(sessionId as never);
+      await expect
+        .poll(() => stack.session.handoffGet(handoff.handoff_id as never).state)
+        .toBe("completed");
+      expect(stack.session.handoffGet(handoff.handoff_id as never).completion).toMatchObject({
+        status: "verified",
+        result: { provider: "detector-fake" },
+      });
+      expect(records.attached).toEqual(["connector-fake", "connector-fake"]);
+      expect(records.entrypoints).toHaveLength(1);
+      expect(records.detectorSignals).toEqual(["fake-complete"]);
+      expect(records.suspended).toEqual(["connector:fake"]);
+      expect(records.resumed).toEqual(["connector:fake"]);
+    } finally {
+      await stack.close();
+    }
+  });
+
+  it("does not complete a handoff from a selected detector that the session assembly did not declare", async () => {
+    const records = fakeRuntimeRecords();
+    const providerHost = createReferenceProviderHost();
+    for (const module of fakeProviderModules(records)) {
+      providerHost.registerModule(module);
+    }
+    const stack = createProvisioningBridge({
+      providerHost,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      launcherMode: "headless",
+      workspaceRoot: workspaceRoot(),
+      connectorProvider: "connector-fake",
+      entrypointProvider: "entrypoint-fake",
+      detectorProvider: "detector-fake",
+      handoff: {
+        expectedOrigin: "http://localhost:3000",
+        publicBaseUrl: "http://localhost:3000",
+        host: "127.0.0.1",
+        port: 0,
+        deliverySink: { write: () => {} },
+        completion: {},
+      },
+    });
+    try {
+      const created = await stack.bridge.sessionCreate({
+        proposal: {
+          intent: "reg",
+          template: "browser-handoff",
+          recipient: "tg:user:1",
+          detectors: [{ use: "user-done" }],
+        },
+      });
+      const sessionId = (created as { session_id: string }).session_id;
+      expect(stack.session.get(sessionId as never).spec.spec.detectors).toEqual([
+        { use: "user-done" },
+      ]);
+      const handoff = await stack.session.openHandoff(sessionId as never);
+
+      const rejected = await stack.session.deliverCompletion(handoff.handoff_id as never, {
+        detector: "detector-fake",
+        status: "fake-complete",
+        at: new Date(0).toISOString() as never,
+        result: { provider: "detector-fake" },
+      });
+
+      expect(rejected).toMatchObject({ ok: false });
+      expect(records.detectorSignals).toEqual([]);
+      expect(stack.session.handoffGet(handoff.handoff_id as never).state).toBe("open");
+    } finally {
+      await stack.close();
+    }
   });
 
   it.runIf(HAVE_CHROMIUM)(

@@ -158,6 +158,42 @@ describe("ProviderHost", () => {
     expect(JSON.stringify(host.diagnostics())).not.toContain("super-secret-token");
   });
 
+  it("uses factory_config_schema for runtime creation while preserving agent-facing config_schema metadata", async () => {
+    const host = new ProviderHost().registerModule(
+      module({
+        config_schema: {
+          complete_on: { type: "string", required: true, pattern: "^/" },
+        },
+        factory_config_schema: {
+          mode: { type: "enum", enum: ["safe"], required: true },
+        },
+      }),
+    );
+
+    expect(host.providerManifest("fake-launcher")?.spec.config_schema).toEqual({
+      complete_on: { type: "string", required: true, pattern: "^/" },
+    });
+    await expect(
+      host.createProvider("launcher", "fake-launcher", {
+        config: { mode: "safe" },
+      }),
+    ).resolves.toBe(fakeLauncher);
+    await expect(
+      host.createProvider("launcher", "fake-launcher", {
+        config: { complete_on: "/dashboard" },
+      }),
+    ).rejects.toMatchObject({
+      code: "policy.denied",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.config_invalid",
+          }),
+        ],
+      },
+    });
+  });
+
   it("fails closed when host-touching dependency evidence is missing", async () => {
     const host = new ProviderHost().registerModule(
       module({
