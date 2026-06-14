@@ -3,17 +3,17 @@
 # Re-read on every resume; update at every phase boundary.
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
-phase: 6
-phase_name: "Epic gate — GLA-077..GLA-094 complete"
-branch: feature/authentik
-epic: authentik-hardening-077-094
+phase: 5
+phase_name: "Autonomous build — GLA-095..GLA-105 provider-host and test-layout migration"
+branch: feature/provider-host
+epic: provider-host-and-test-layout-095-105
 active_story: null
 review_cycle: 0
 follow_on_scope:
-  tasks: "GLA-077..GLA-094"
-  branch_base: "feature/authentik"
-  next_ready_sequence: "none"
-  note: "2026-06-12 user goal: implement backlog 077-094 according to project SDLC, architecture, and vision; GLA-077..GLA-094 are Done and merged to feature/authentik. Phase 6 noVNC readiness fix merged on 2026-06-14; root cause concluded in _bmad-output/implementation-artifacts/investigations/novnc-readiness-investigation.md; final gate passed on feature/authentik (64 files, 726 passed, 15 skipped)."
+  tasks: "GLA-095..GLA-105"
+  branch_base: "feature/provider-host"
+  next_ready_sequence: "GLA-095, GLA-102"
+  note: "2026-06-14 user goal: implement backlog 095-105 according to the project SDLC, architecture, and vision. New epic branch feature/provider-host was created from feature/authentik because GLA-095..105 build on the completed authentik hardening branch while it is still awaiting handoff to dev."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
 # (Redis-free path; postgres+server+worker); GLA's REAL adapter did a REAL OIDC round-trip -> finishEnrollment+verifyAssertion ->
@@ -86,6 +86,13 @@ specialists:
   investigator: {spawned: true, id: "019ebe2c-d1e4-7c80-958e-dcab9457d9e4", open: true, resumable: true, role: "systematic debugging at the epic gate", last_skill: "bmad-investigate noVNC readiness case concluded; x11vnc MIT-SHM startup failure + gateway post-upgrade error path identified"}
   retro:        {spawned: true, id: "019ebe2c-d23e-7520-85b7-3e08ad373179", open: true, resumable: true, role: "epic retrospective", last_skill: "bmad-retrospective loaded and workflow resolved; init only"}
 specialist_runtime_note: "Collaboration limit allows six open agents. Analyst/PM/UX/architect were initialized, then closed to free capacity; their IDs remain resumable."
+provider_host_095_105_specialists:
+  architect: {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "provider-host architecture and layer-boundary review", last_skill: "bmad-create-architecture loaded; full workflow is interactive/doc-initialization gated; initialized for GLA-095..105"}
+  tea: {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test architecture and security evidence review", last_skill: "bmad-testarch-test-design loaded; initialized for GLA-095..105"}
+  sm: {spawned: true, id: "019ec65a-d9fe-7da2-b590-b24693c2f8f9", open: true, resumable: true, role: "story sequencing and create-story evidence", last_skill: "bmad-create-story loaded; sprint-status.yaml missing for auto-discovery, explicit task target required"}
+  worker: {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation and E2E generation", last_skill: "bmad-create-story and bmad-dev-story loaded; initialized for GLA-095"}
+  reviewer: {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "independent story review", last_skill: "bmad-story-automator-review loaded; initialized for GLA-095..105"}
+  investigator: {spawned: true, id: "019ec65a-da4c-7861-b190-a29f872d42e0", open: true, resumable: true, role: "root-cause analysis for failed gates/regressions", last_skill: "bmad-investigate loaded; initialized for GLA-095..105"}
 
 gates_pending: []
 
