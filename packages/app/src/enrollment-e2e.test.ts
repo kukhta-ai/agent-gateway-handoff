@@ -14,6 +14,7 @@
 // Browser-side ceremonies that touch the DOM/WebAuthn API are passed to page.evaluate as STRINGS (Playwright
 // supports string page-functions), so this test compiles under the repo's ES2023 lib (no DOM lib needed).
 
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { RecipientRef } from "@gla/kernel";
@@ -23,9 +24,12 @@ import { type EnrollmentStack, createEnrollmentStack } from "./index.js";
 
 /** Is a usable Chromium available (the cached browser)? Skip the REAL test if not. */
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
