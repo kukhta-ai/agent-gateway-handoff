@@ -24,6 +24,12 @@ export const PROVIDER_ADAPTER_PACKAGES = Object.freeze([
   "@gla/workspace-profile",
 ]);
 
+/** Provider-set distributions that are allowed only at explicit distribution/default entrypoints. */
+export const REFERENCE_PROVIDER_SET_PACKAGES = Object.freeze(["@gla/provider-set-reference"]);
+
+/** Runtime source files that intentionally select a provider-set distribution at boot. */
+export const PROVIDER_SET_ENTRYPOINT_FILES = Object.freeze(["packages/app/src/index.ts"]);
+
 /** Runtime packages whose production source must not know concrete provider adapters. */
 export const PROTECTED_RUNTIME_PACKAGES = Object.freeze([
   "packages/app",
@@ -44,6 +50,38 @@ function isProviderAdapterSpecifier(specifier) {
   return PROVIDER_ADAPTER_PACKAGES.some(
     (providerPackage) =>
       specifier === providerPackage || specifier.startsWith(`${providerPackage}/`),
+  );
+}
+
+function isReferenceProviderSetSpecifier(specifier) {
+  return REFERENCE_PROVIDER_SET_PACKAGES.some(
+    (providerSetPackage) =>
+      specifier === providerSetPackage || specifier.startsWith(`${providerSetPackage}/`),
+  );
+}
+
+function isProviderSetEntrypoint(file) {
+  return PROVIDER_SET_ENTRYPOINT_FILES.includes(file.replaceAll("\\", "/"));
+}
+
+function relativeImportTargets(file, specifier) {
+  if (!specifier.startsWith(".")) {
+    return [];
+  }
+  const target = resolve("/", dirname(file), specifier).slice(1).replaceAll("\\", "/");
+  const candidates = [target];
+  if (/\.[cm]?js$/i.test(target)) {
+    candidates.push(target.replace(/\.[cm]?js$/i, ".ts"));
+  }
+  if (!/\.[cm]?[jt]sx?$/i.test(target)) {
+    candidates.push(`${target}.ts`, `${target}/index.ts`);
+  }
+  return candidates;
+}
+
+function isProviderSetEntrypointRelativeImport(file, specifier) {
+  return relativeImportTargets(file, specifier).some((target) =>
+    PROVIDER_SET_ENTRYPOINT_FILES.includes(target),
   );
 }
 
@@ -87,15 +125,42 @@ function importSpecifiers(source) {
 }
 
 function sourceViolations(file, source) {
-  return importSpecifiers(source)
-    .filter(({ specifier }) => isProviderAdapterSpecifier(specifier))
-    .map(({ specifier, line }) => ({
-      kind: "runtime-import",
-      file,
-      line,
-      specifier,
-      message: `${file}:${line} imports concrete provider adapter "${specifier}". Runtime packages must use provider ids, kernel ports, ProviderHost, or a selected provider set.`,
-    }));
+  return importSpecifiers(source).flatMap(({ specifier, line }) => {
+    if (isProviderAdapterSpecifier(specifier)) {
+      return [
+        {
+          kind: "runtime-import",
+          file,
+          line,
+          specifier,
+          message: `${file}:${line} imports concrete provider adapter "${specifier}". Runtime packages must use provider ids, kernel ports, ProviderHost, or a selected provider set.`,
+        },
+      ];
+    }
+    if (isReferenceProviderSetSpecifier(specifier) && !isProviderSetEntrypoint(file)) {
+      return [
+        {
+          kind: "runtime-reference-set-import",
+          file,
+          line,
+          specifier,
+          message: `${file}:${line} imports reference provider set "${specifier}". Generic runtime packages must receive provider-set/profile data; only explicit distribution/default entrypoints may select a concrete provider set.`,
+        },
+      ];
+    }
+    if (isProviderSetEntrypointRelativeImport(file, specifier) && !isProviderSetEntrypoint(file)) {
+      return [
+        {
+          kind: "runtime-provider-set-entrypoint-import",
+          file,
+          line,
+          specifier,
+          message: `${file}:${line} imports the provider-set distribution entrypoint "${specifier}". Generic runtime files must import provider-set-agnostic modules such as composition.ts, not the reference/default entrypoint.`,
+        },
+      ];
+    }
+    return [];
+  });
 }
 
 function packageDependencyViolations(packagePath, packageJson) {

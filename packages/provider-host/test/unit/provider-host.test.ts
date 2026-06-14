@@ -6,6 +6,7 @@ import {
   InMemoryProviderStateRoot,
   ProviderHost,
   type ProviderHostDiagnostic,
+  type ProviderStateRoot,
 } from "../../src/index.js";
 
 const fakeLauncher: LauncherPort = {
@@ -41,6 +42,7 @@ function manifest(overrides: Partial<ProviderManifest["spec"]> = {}): ProviderMa
 
 function module(overrides: Partial<ProviderManifest["spec"]> = {}): GlaProviderModule {
   return {
+    moduleId: "@gla/fake-launcher-provider",
     manifest: manifest(overrides),
     register(ctx) {
       ctx.registerLauncher("fake-launcher", {
@@ -75,6 +77,15 @@ describe("ProviderHost", () => {
     expect(host.providerStateSchema("fake-launcher")).toEqual({
       slots: { runtime: { summary: "fake runtime state" } },
     });
+    expect(host.providerDescriptor("fake-launcher")).toMatchObject({
+      providerId: "fake-launcher",
+      moduleId: "@gla/fake-launcher-provider",
+      manifest: { metadata: { name: "fake-launcher" } },
+      stateSchema: { slots: { runtime: { summary: "fake runtime state" } } },
+    });
+    expect(host.providerDescriptors().map((descriptor) => descriptor.moduleId)).toEqual([
+      "@gla/fake-launcher-provider",
+    ]);
 
     const created = await host.createProvider("launcher", "fake-launcher", {
       config: { mode: "safe" },
@@ -115,6 +126,27 @@ describe("ProviderHost", () => {
     });
   });
 
+  it("fails closed when a registered provider is requested through the wrong family", async () => {
+    const host = new ProviderHost().registerModule(module());
+
+    await expect(
+      host.createProvider("connector", "fake-launcher", {
+        config: { mode: "safe" },
+      }),
+    ).rejects.toMatchObject({
+      code: "state.conflict",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.family_mismatch",
+            providerId: "fake-launcher",
+            family: "connector",
+          }),
+        ],
+      },
+    });
+  });
+
   it("does not expose partial runtime registry entries after failed registration", () => {
     const badModule: GlaProviderModule = {
       manifest: manifest(),
@@ -130,6 +162,34 @@ describe("ProviderHost", () => {
     expect(host.providerIds("launcher")).toEqual([]);
     expect(host.providerManifest("fake-launcher")).toBeUndefined();
     expect(host.providerStateSchema("fake-launcher")).toBeUndefined();
+  });
+
+  it("fails closed with redacted diagnostics when provider-owned state namespace is unavailable", async () => {
+    const stateRoot: ProviderStateRoot = {
+      namespace() {
+        throw new Error("state backend leaked super-secret-token");
+      },
+    };
+    const host = new ProviderHost({ stateRoot }).registerModule(module());
+
+    await expect(
+      host.createProvider("launcher", "fake-launcher", {
+        config: { mode: "safe" },
+      }),
+    ).rejects.toMatchObject({
+      code: "dependency.unavailable",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.state_unavailable",
+            providerId: "fake-launcher",
+            family: "launcher",
+            detail: { errorName: "Error" },
+          }),
+        ],
+      },
+    });
+    expect(JSON.stringify(host.diagnostics())).not.toContain("super-secret-token");
   });
 
   it("rejects invalid provider config before creating a runtime port", async () => {

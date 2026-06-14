@@ -49,13 +49,14 @@ import {
   parseAuthEnrollmentPolicyJson,
   withRecipientBindingDiagnostic,
 } from "./auth-enrollment-policy.js";
-import { redactDaemonState } from "./daemon-state.js";
 import {
   type AuthProviderConfig,
   type AuthProviderKind,
   type DeliverySink,
+  type ProviderCompositionOptions,
   createProvisioningBridge,
-} from "./index.js";
+} from "./composition.js";
+import { redactDaemonState } from "./daemon-state.js";
 
 const BRIDGE_SOCKET_MODE = 0o600;
 const BRIDGE_RUNTIME_DIR_MODE = 0o700;
@@ -65,7 +66,7 @@ const deliveryToStdout: DeliverySink = {
 };
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
-export interface ServeOptions {
+export interface ServeOptions extends ProviderCompositionOptions {
   /** The Access Gateway bind host — the PUBLIC entry. Default `0.0.0.0` (hermes-1, behind Caddy). */
   host?: string;
   /** The Access Gateway bind port. Default `3000` (the deploy target); tests pass `0` for an ephemeral port. */
@@ -264,6 +265,10 @@ export function authAssuranceProviderDiagnostic(opts: {
   return `${d.summary}; satisfies the selected policy`;
 }
 
+function selectedServeAuthProvider(opts: ServeOptions): AuthProviderKind | undefined {
+  return opts.authProvider ?? opts.providerProfile?.auth ?? opts.providerSet?.profile.auth;
+}
+
 function authDiagnosticsForRequest(
   base: AuthDiagnostics,
   identity: { getCredential(recipient: RecipientRef): unknown } | undefined,
@@ -376,7 +381,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     (opts.authEnrollmentPolicyJson !== undefined
       ? parseAuthEnrollmentPolicyJson(
           opts.authEnrollmentPolicyJson,
-          opts.authProvider ?? "webauthn",
+          selectedServeAuthProvider(opts) ?? "webauthn",
         )
       : undefined);
   const authDeploymentRoles =
@@ -386,7 +391,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       : undefined);
   const authDiagnostics = authEnrollmentDiagnostics(
     authDiagnosticsInput({
-      authProvider: opts.authProvider,
+      authProvider: selectedServeAuthProvider(opts),
       authAssuranceProfile: opts.authAssuranceProfile,
       authEnrollmentPolicy,
       authDeploymentRoles,
@@ -396,6 +401,9 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
   const stack = createProvisioningBridge({
+    ...(opts.providerSet !== undefined ? { providerSet: opts.providerSet } : {}),
+    ...(opts.providerHost !== undefined ? { providerHost: opts.providerHost } : {}),
+    ...(opts.providerProfile !== undefined ? { providerProfile: opts.providerProfile } : {}),
     ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
@@ -1113,6 +1121,7 @@ function validateServeOptions(opts: ServeOptions): void {
 export async function runServe(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
+  compositionDefaults: ProviderCompositionOptions = {},
 ): Promise<number> {
   const log = (line: string): void => void process.stderr.write(`${line}\n`);
   let parsed: { help: true } | { help: false; options: ServeOptions };
@@ -1130,7 +1139,7 @@ export async function runServe(
 
   let handle: DaemonHandle;
   try {
-    handle = await serve({ ...parsed.options, log });
+    handle = await serve({ ...compositionDefaults, ...parsed.options, log });
   } catch (e) {
     log(
       `error: failed to start gla serve: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`,

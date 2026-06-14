@@ -3,17 +3,17 @@
 # Re-read on every resume; update at every phase boundary.
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
-phase: 6
-phase_name: "Epic gate complete — GLA-095..GLA-105 provider-host and test-layout migration"
-branch: feature/provider-host
-epic: provider-host-and-test-layout-095-105
-active_story: null
-review_cycle: 0
+phase: 5
+phase_name: "Autonomous build — GLA-106 provider-set-agnostic app composition"
+branch: feature/provider-host-task-106
+epic: provider-host-composition-106
+active_story: GLA-106
+review_cycle: 2
 follow_on_scope:
-  tasks: "GLA-095..GLA-105"
+  tasks: "GLA-106"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "GLA-095..GLA-105 Done; final pnpm gate passed on feature/provider-host; ready for handoff user gate"
-  note: "2026-06-14 user goal: implement backlog 095-105 according to the project SDLC, architecture, and vision. New epic branch feature/provider-host was created from feature/authentik because GLA-095..105 build on the completed authentik hardening branch while it is still awaiting handoff to dev."
+  next_ready_sequence: "GLA-106 is In Progress on feature/provider-host-task-106; dependencies GLA-100, GLA-101, GLA-105 are Done"
+  note: "2026-06-14 user goal: implement backlog task GLA-106 according to the project SDLC, architecture, and vision. Persistent specialists were initialized first: architect Mill, SM Hilbert, worker Dirac, reviewer Wegener, TEA/security Helmholtz, investigator Tesla."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
 # (Redis-free path; postgres+server+worker); GLA's REAL adapter did a REAL OIDC round-trip -> finishEnrollment+verifyAssertion ->
@@ -93,6 +93,13 @@ provider_host_095_105_specialists:
   worker: {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation and E2E generation", last_skill: "GLA-105 bmad-create-story/dev-story/qa-generate-e2e-tests loaded/resolved via docs/backlog fallback; source-layout enforcement added; pnpm gate passed"}
   reviewer: {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "independent story review", last_skill: "GLA-105 story-automator-review APPROVE after manifest and fake-provider bypass fixes"}
   investigator: {spawned: true, id: "019ec65a-da4c-7861-b190-a29f872d42e0", open: true, resumable: true, role: "root-cause analysis for failed gates/regressions", last_skill: "bmad-investigate loaded; initialized for GLA-095..105"}
+provider_set_106_specialists:
+  architect: {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "provider-set architecture and layer-boundary approval", last_skill: "GLA-106 docs-driven bmad-create-architecture review APPROVE after daemon-to-index transitive reference-set leak was fixed"}
+  tea: {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test architecture, NFR, and security evidence review", last_skill: "GLA-106 bmad-testarch-test-review/NFR PASS after strict provider lookup, redacted state diagnostics, focused checks, and full pnpm gate"}
+  sm: {spawned: true, id: "019ec65a-d9fe-7da2-b590-b24693c2f8f9", open: true, resumable: true, role: "story sequencing and create-story evidence", last_skill: "GLA-106 bmad-create-story loaded; sprint-status.yaml absent, explicit Backlog.md/docs fallback initialized"}
+  worker: {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation and E2E/contract test generation", last_skill: "GLA-106 bmad-create-story/dev-story/qa-generate-e2e-tests docs-driven fallback executed; provider-set composition implemented; pnpm gate passed with 790 tests"}
+  reviewer: {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "independent story review", last_skill: "GLA-106 story-automator-review APPROVE after final architecture import-graph fix and focused verification"}
+  investigator: {spawned: true, id: "019ec65a-da4c-7861-b190-a29f872d42e0", open: true, resumable: true, role: "root-cause analysis for failed gates/regressions", last_skill: "GLA-106 bmad-investigate loaded; gate-failure readiness initialized"}
 
 gates_pending: []
 
@@ -122,4 +129,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-14"
+last_updated: "2026-06-14T21:41:00Z"

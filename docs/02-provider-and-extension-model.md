@@ -31,6 +31,14 @@ Adding a capability is therefore adding a *package*, not changing core code. Dis
 
 So **"self-registration" means a package describes itself so the operator's install is turnkey** (drop it in → it manifests → it's usable) — *not* an open endpoint that anything pushes code to at runtime. This is the existing GLA↔`wpm` split: `wpm` (the agent-native installer) stands the dependency up on the operator's host and writes its `DependencyBinding`; GLA reads it. Extensibility is an operator power; the runtime agent only ever consumes what's already registered. This is the line that lets GLA be maximally extensible *and* keep providers trusted — which matters most for launchers, since they run code and own security-bearing configuration (§7).
 
+In the current runtime implementation this line is enforced by **Provider Host** plus a boot-time **provider set**.
+A provider set is trusted distribution/install-time code: it imports concrete provider packages, registers their
+modules, and names the selected provider profile. Generic app composition consumes that provider set/profile and
+derives wiring and catalog views from Provider Host metadata. Runtime requests may select among already-registered
+provider ids where a surface allows it, but they cannot register executable provider code or load a new provider
+package after daemon boot. See `architecture/provider-host-extension-architecture.md` and
+`architecture/provider-author-workflow.md`.
+
 ---
 
 ## 3. The uniform provider contract

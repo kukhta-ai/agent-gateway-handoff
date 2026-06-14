@@ -6,7 +6,7 @@ import {
   isRedactionOrTemplatePlaceholder,
   redactOperatorText,
 } from "@gla/kernel";
-import type { AuthProviderKind } from "./index.js";
+import type { AuthProviderKind } from "./composition.js";
 
 /** A provider-owned credential/setup method declared by deployment or installer verification. */
 export interface EnrollmentCredentialSetup {
