@@ -37,7 +37,7 @@ import type { GlaProviderModule } from "@gla/provider-host";
 import { createReferenceProviderHost } from "@gla/provider-set-reference";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import { createBridge, createProvisioningBridge } from "./index.js";
+import { createBridge, createProvisioningBridge } from "../../src/index.js";
 
 function capture(): { out: Output; stdout: () => string; stderr: () => string } {
   const o: string[] = [];

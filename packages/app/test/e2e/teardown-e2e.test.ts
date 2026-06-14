@@ -34,8 +34,8 @@ import {
 } from "@gla/kernel";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import type { ProvisioningStack } from "./index.js";
-import { createProvisioningBridge } from "./index.js";
+import type { ProvisioningStack } from "../../src/index.js";
+import { createProvisioningBridge } from "../../src/index.js";
 
 function capture(): { out: Output; stdout: () => string; stderr: () => string } {
   const o: string[] = [];

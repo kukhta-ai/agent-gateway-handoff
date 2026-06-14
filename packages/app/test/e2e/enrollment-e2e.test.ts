@@ -20,7 +20,7 @@ import type { AddressInfo } from "node:net";
 import type { RecipientRef } from "@gla/kernel";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import { type EnrollmentStack, createEnrollmentStack } from "./index.js";
+import { type EnrollmentStack, createEnrollmentStack } from "../../src/index.js";
 
 /** Is a usable Chromium available (the cached browser)? Skip the REAL test if not. */
 function chromiumAvailable(): boolean {

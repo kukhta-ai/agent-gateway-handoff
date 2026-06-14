@@ -30,8 +30,8 @@ import { Output, type OutputStreams, run } from "@gla/cli";
 import { type SessionId, decodeRuntimeHandle } from "@gla/kernel";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import type { ProvisioningStack } from "./index.js";
-import { createProvisioningBridge } from "./index.js";
+import type { ProvisioningStack } from "../../src/index.js";
+import { createProvisioningBridge } from "../../src/index.js";
 
 /** The KNOWN SECRET the "human" types via the human path — it must appear in ZERO agent-readable outputs. */
 const KNOWN_SECRET = "S3cr3t-Passw0rd-Zx9Q-AGENTMUSTNOTSEE";

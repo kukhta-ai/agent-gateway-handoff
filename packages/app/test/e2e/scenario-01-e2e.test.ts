@@ -53,9 +53,9 @@ import { createReferenceChannelProvider } from "@gla/provider-set-reference";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
 // @ts-expect-error — plain ESM helper shared with the gate:selftest (no .d.ts; runtime-only). AC#5.
-import { checkBoundary } from "../../../tools/boundary-check/check-boundary.mjs";
-import type { DeliverySink, ProvisioningStack } from "./index.js";
-import { createProvisioningBridge } from "./index.js";
+import { checkBoundary } from "../../../../tools/boundary-check/check-boundary.mjs";
+import type { DeliverySink, ProvisioningStack } from "../../src/index.js";
+import { createProvisioningBridge } from "../../src/index.js";
 
 // ── The KNOWN secrets the "human" types via the human path. Each MUST appear in ZERO agent-readable
 //    outputs (S-2 agent-blind). The marker text makes a leak impossible to miss in a scan.

@@ -88,6 +88,8 @@ describe("browser E2E preflight", () => {
     const preflight = readProjectFile("tools/browser-e2e-preflight.mjs");
     expect(preflight).toContain("packages/app/test/e2e/scenario-01-e2e.test.ts");
     expect(preflight).toContain("packages/app/test/integration/provision.test.ts");
+    expect(preflight).not.toContain("packages/app/src/scenario-01-e2e.test.ts");
+    expect(preflight).not.toContain("packages/app/src/provision.test.ts");
     expect(preflight).toContain("adapters/launcher-process/test/contract/launcher-process.test.ts");
   });
 });

@@ -10,26 +10,17 @@ const allowSkip = process.argv.includes("--allow-skip");
 const forceMissing = process.env.GLA_BROWSER_E2E_PREFLIGHT_FORCE_MISSING === "1";
 
 const requiredFixtureGroups = [
-  ["packages/app/src/scenario-01-e2e.test.ts", "packages/app/test/e2e/scenario-01-e2e.test.ts"],
-  [
-    "packages/app/src/authentik-scenario-e2e.test.ts",
-    "packages/app/test/e2e/authentik-scenario-e2e.test.ts",
-  ],
-  ["packages/app/src/enrollment-e2e.test.ts", "packages/app/test/e2e/enrollment-e2e.test.ts"],
-  ["packages/app/src/handoff-e2e.test.ts", "packages/app/test/e2e/handoff-e2e.test.ts"],
-  ["packages/app/src/completion-e2e.test.ts", "packages/app/test/e2e/completion-e2e.test.ts"],
-  ["packages/app/src/two-handoff-e2e.test.ts", "packages/app/test/e2e/two-handoff-e2e.test.ts"],
-  ["packages/app/src/teardown-e2e.test.ts", "packages/app/test/e2e/teardown-e2e.test.ts"],
-  [
-    "packages/app/src/gateway-grant-canary-e2e.test.ts",
-    "packages/app/test/e2e/gateway-grant-canary-e2e.test.ts",
-  ],
-  [
-    "packages/app/src/novnc-handoff-client-e2e.test.ts",
-    "packages/app/test/e2e/novnc-handoff-client-e2e.test.ts",
-  ],
-  ["packages/app/src/provision.test.ts", "packages/app/test/integration/provision.test.ts"],
-  ["packages/app/src/daemon.test.ts", "packages/app/test/integration/daemon.test.ts"],
+  ["packages/app/test/e2e/scenario-01-e2e.test.ts"],
+  ["packages/app/test/e2e/authentik-scenario-e2e.test.ts"],
+  ["packages/app/test/e2e/enrollment-e2e.test.ts"],
+  ["packages/app/test/e2e/handoff-e2e.test.ts"],
+  ["packages/app/test/e2e/completion-e2e.test.ts"],
+  ["packages/app/test/e2e/two-handoff-e2e.test.ts"],
+  ["packages/app/test/e2e/teardown-e2e.test.ts"],
+  ["packages/app/test/e2e/gateway-grant-canary-e2e.test.ts"],
+  ["packages/app/test/e2e/novnc-handoff-client-e2e.test.ts"],
+  ["packages/app/test/integration/provision.test.ts"],
+  ["packages/app/test/integration/daemon.test.ts"],
   ["packages/gateway/test/e2e/handoff-client-browser.test.ts"],
   ["adapters/detector-url/test/contract/detector-url.test.ts"],
   ["adapters/launcher-process/test/contract/launcher-process.test.ts"],

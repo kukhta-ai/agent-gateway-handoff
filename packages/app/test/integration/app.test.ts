@@ -11,7 +11,7 @@ import { run } from "@gla/cli";
 import { Output, type OutputStreams } from "@gla/cli";
 import { MVP_POLICY_SET, denyTemplatePolicy } from "@gla/policy-cedar";
 import { describe, expect, it } from "vitest";
-import { createBridge } from "./index.js";
+import { createBridge } from "../../src/index.js";
 
 function readyBridge(opts: Parameters<typeof createBridge>[0] = {}) {
   return createBridge({ dependencyBindings: referenceWpmDependencyBindings(), ...opts });
@@ -132,7 +132,7 @@ describe("composition root — real Cedar admission through the CLI (Slice 2)", 
   it("createApp() records the Cedar policy adapter in the wiring", () => {
     // (Sanity: the wiring still names policy-cedar — the adapter app injects behind the PolicyPort.)
     // Imported lazily to keep this test focused; createApp is the wiring record.
-    return import("./index.js").then(({ createApp }) => {
+    return import("../../src/index.js").then(({ createApp }) => {
       expect(createApp().wiring.policy).toBe("@gla/policy-cedar");
     });
   });

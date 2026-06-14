@@ -94,7 +94,7 @@ agent's brokered CDP resumes onto the **same** live capsule. Suspend/resume are 
 ### Build / observation plan — the LIVE-SOCKET severance made observable
 
 The headline S-2 proof exercises the **real threat**: a live, already-open agent CDP socket is **cut** during the
-window. In `packages/app/src/completion-e2e.test.ts` (REAL, gated on Chromium): provision a real capsule → **the agent
+window. In `packages/app/test/e2e/completion-e2e.test.ts` (REAL, gated on Chromium): provision a real capsule → **the agent
 opens a CDP client over the brokered `cdp_url` BEFORE the window (Phase 4) and reads the page** → open a window → the
 agent's already-open socket is **severed** (the broker's live-socket count for the capsule drops to **0**, and a read
 over **that same connection** — `apage.evaluate("document.title")` — **FAILS**) → the **"human" reaches the browser over

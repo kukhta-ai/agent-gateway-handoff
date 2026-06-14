@@ -43,8 +43,8 @@ import {
 } from "@gla/kernel";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import type { ProvisioningStack } from "./index.js";
-import { createProvisioningBridge } from "./index.js";
+import type { ProvisioningStack } from "../../src/index.js";
+import { createProvisioningBridge } from "../../src/index.js";
 
 /** The KNOWN secrets the "human" types via the human path — each must appear in ZERO agent-readable outputs. */
 const KNOWN_PASSWORD = "S3cr3t-Passw0rd-Zx9Q-AGENTMUSTNOTSEE";

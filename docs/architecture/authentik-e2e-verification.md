@@ -18,9 +18,9 @@
 Same established reality as the master/sibling docs and the existing capstone: the BMAD E2E/test-design
 workflows (`bmad-qa-generate-e2e-tests`, `bmad-testarch-test-design`) are hard-gated interactive (they greet
 the user and **block on a mandatory scope/mode selection** — the same blocker recorded in
-`test-strategy.md` and `packages/app/src/scenario-01-e2e.test.ts`) and **cannot run unattended** here. Per
+`test-strategy.md` and `packages/app/test/e2e/scenario-01-e2e.test.ts`) and **cannot run unattended** here. Per
 `AGENTS.md` Rule 3's explicit allowance, that path was **stopped, the blocker named**, and this artifact was
-driven **docs-first** plus a direct read of the real capstone (`packages/app/src/scenario-01-e2e.test.ts`,
+driven **docs-first** plus a direct read of the real capstone (`packages/app/test/e2e/scenario-01-e2e.test.ts`,
 GLA-066) and the test double (`adapters/auth-authentik/test/fixtures/fake-authentik.ts`).
 
 ---
@@ -41,7 +41,7 @@ GLA-076 asserts in dev vs the live confirmation deferred to hermes-1); **§7** i
 
 ## §1 · The harness model — the GLA-066 capstone, with the authentik provider
 
-The model is the existing **`packages/app/src/scenario-01-e2e.test.ts`** (GLA-066) — the **cold** scenario-01
+The model is the existing **`packages/app/test/e2e/scenario-01-e2e.test.ts`** (GLA-066) — the **cold** scenario-01
 capstone driving Phases E, 0–15 (`see docs/scenario-01-unified.html`, `test-strategy.md §2`) through **real**
 modules (real `gla` CLI thread, real `channel-cli`, real `launcher-process` capsule, real headless Chromium,
 real gateway) with the **in-tree WebAuthn provider** via a Playwright **virtual authenticator**. **GLA-076
@@ -201,7 +201,7 @@ reach the capsule.** Fail-closed is preserved under delegation, end to end.
 
 **The full thread against `FakeAuthentik` is fully testable IN DEV** — no real authentik is needed, exactly as
 the MVP proved the WebAuthn path with a virtual authenticator + a stub site (`see test-strategy.md §2.3`,
-`packages/app/src/scenario-01-e2e.test.ts`). `FakeAuthentik` doubles the only external leg (the IdP's
+`packages/app/test/e2e/scenario-01-e2e.test.ts`). `FakeAuthentik` doubles the only external leg (the IdP's
 token/JWKS + the human-at-authentik step); **everything GLA owns is real** (the gateway, the adapter's full
 OIDC validation pipeline, the capsule, the strength gate, the recipient binding). So the **substance is an
 in-dev proof**, and a **live real-authentik round-trip is a deploy-time confirmation**.
@@ -249,9 +249,9 @@ GLA-093 tightens how the proof is reported and tested. The evidence labels are:
 
 | Evidence class | What it proves | Current owner |
 |---|---|---|
-| **Synthetic OIDC proof** | `FakeAuthentik` signs deterministic id_tokens, stages token/JWKS behavior, and lets the GLA adapter/gateway/session/capsule thread prove strength mapping, recipient binding, failure reasons, and replay behavior without a live IdP. | `adapters/auth-authentik/test/contract/auth-authentik.test.ts` and synthetic branches of `packages/app/src/authentik-scenario-e2e.test.ts` |
-| **Browser-level GLA proof** | A real Chromium page opens the GLA handoff page, receives the delegated redirect challenge, is redirected back to the **GLA-served** `/auth/callback` URL, and the callback page posts `{code,state}` to the unchanged verify route before the grant can reach the capsule. | `packages/app/src/authentik-scenario-e2e.test.ts` |
-| **Gateway/capsule no-leak proof** | Refused flows assert explicit upstream connection and byte counters, not only absence of a marker string. Positive flows assert the counters increase. Wrong-recipient and upstream-leak canaries intentionally fail the suite when enabled. | `packages/app/src/authentik-scenario-e2e.test.ts` and `pnpm run gate:e2e-proof-canaries` |
+| **Synthetic OIDC proof** | `FakeAuthentik` signs deterministic id_tokens, stages token/JWKS behavior, and lets the GLA adapter/gateway/session/capsule thread prove strength mapping, recipient binding, failure reasons, and replay behavior without a live IdP. | `adapters/auth-authentik/test/contract/auth-authentik.test.ts` and synthetic branches of `packages/app/test/e2e/authentik-scenario-e2e.test.ts` |
+| **Browser-level GLA proof** | A real Chromium page opens the GLA handoff page, receives the delegated redirect challenge, is redirected back to the **GLA-served** `/auth/callback` URL, and the callback page posts `{code,state}` to the unchanged verify route before the grant can reach the capsule. | `packages/app/test/e2e/authentik-scenario-e2e.test.ts` |
+| **Gateway/capsule no-leak proof** | Refused flows assert explicit upstream connection and byte counters, not only absence of a marker string. Positive flows assert the counters increase. Wrong-recipient and upstream-leak canaries intentionally fail the suite when enabled. | `packages/app/test/e2e/authentik-scenario-e2e.test.ts` and `pnpm run gate:e2e-proof-canaries` |
 | **Deployed-provider proof** | Real authentik login flows, real emitted `amr`/`acr`/`gla_uv`, real sources, and same-origin Caddy routing are verified in the WPM/deployment layer and recorded as redacted `loginMethodProofs[]`. | GLA-074 installer/deployment verification and GLA-086 diagnostics |
 
 These labels prevent over-claiming. A green in-repo gate proves the GLA-side contract and browser callback
@@ -327,7 +327,7 @@ the host-level standup + the live-proof the deploy confirms) · `docs/architectu
 scenario-01 E2E harness, `§3` S-1/S-2/S-10, `§4.2` the GLA-066 capstone) · `docs/scenario-01-unified.html`
 (Phase 6, the handoff step-up) · `docs/01-architecture-overview.md §6`/`§7` (the security model + horizontal
 extension) · `docs/components/identity-and-auth.md` (the identity/auth model) ·
-`packages/app/src/scenario-01-e2e.test.ts` (GLA-066 — the capstone GLA-076 mirrors) ·
+`packages/app/test/e2e/scenario-01-e2e.test.ts` (GLA-066 — the capstone GLA-076 mirrors) ·
 `adapters/auth-authentik/test/fixtures/fake-authentik.ts` (the controllable OIDC double GLA-076 drives) ·
 `adapters/auth-authentik/src/index.ts` (`challenge`/`verifyAssertion`, the `subject_mismatch` check) ·
 `packages/gateway/src/index.ts` (`AuthAssurancePolicy`/`strengthSufficient`, the unchanged `/handoff/auth/verify`).

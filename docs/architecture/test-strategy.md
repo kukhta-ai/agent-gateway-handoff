@@ -57,11 +57,10 @@ The gate enforces two separate TypeScript contracts:
   `src` roots and inherits `tsconfig.base.json` exclusions for tests, fixtures, `dist`, and dependency folders.
   `tools/check-dist-layout.mjs` fails the gate if a test or fixture artifact appears in production output.
 - `tsc -p tsconfig.tests.json --noEmit` typechecks all test locations above with the same strict compiler
-  options, including the current `src`-co-located tests until GLA-103/104 migrate them.
+  options. Runtime `src` directories are not test roots; package-local and app-local `test/` trees are.
 
-Vitest discovers both historical `src/**/*.test.ts` files and the documented outside-`src` locations. The
-browser-E2E preflight and Provider Host boundary checks remain part of `pnpm gate`; moving a test changes its
-path, not its proof strength.
+Vitest discovers the documented outside-`src` test locations. The browser-E2E preflight and Provider Host
+boundary checks remain part of `pnpm gate`; moving a test changes its path, not its proof strength.
 
 ### 1.2 Package-to-level map
 
@@ -80,7 +79,7 @@ packages/worker        → CONTRACT (LauncherPort × process-tier adapter; Works
 packages/gateway       → INTEGRATION (stateless verify against real CapabilityPort; browser-client asset host; WS upgrade path; route proxy)
 packages/bridge        → INTEGRATION (CLI + MCP surface parity; thin transport test)
 packages/assembly      → UNIT (AssemblySpec schema, template resolution, offline dry-run)
-packages/app           → E2E only (the composition root; not unit-tested in isolation)
+packages/app           → INTEGRATION + E2E (the composition root; not unit-tested in isolation)
 adapters/policy-cedar  → CONTRACT (PolicyPort guarantee: pure, total, forbid-wins)
 adapters/auth-webauthn → CONTRACT (AuthProviderPort: enrollment + assertion round-trip with a virtual authenticator)
 adapters/launcher-process → CONTRACT (LauncherPort: spawn + health + stop on T2 process tier)
@@ -295,7 +294,7 @@ delta chain 047–063). It is the **final test gate** that proves the whole syst
 ```
 pnpm gate = clean dist && tsc -b && test typecheck && dist-layout check && biome ci . && preflight && vitest
                                       ↑                ↑                         ↑             ↑
-         package/app/top-level tests typechecked       production dist has       browser/full   includes unit,
+         package/app-local tests typechecked          production dist has       browser/full   includes unit,
          outside src with strict compiler options      no tests or fixtures      human-view     contract, boundary,
                                                                               preflight      and browser E2E tests
 ```

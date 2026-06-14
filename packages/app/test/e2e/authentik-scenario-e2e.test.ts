@@ -2,7 +2,7 @@
 // GLA-076 — THE AUTHENTIK CAPSTONE: the delegated provider covers passkey AND password, end to end, COLD.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// The authentik analogue of the GLA-066 scenario-01 capstone (packages/app/src/scenario-01-e2e.test.ts). It
+// The authentik analogue of the GLA-066 scenario-01 capstone (packages/app/test/e2e/scenario-01-e2e.test.ts). It
 // drives the REAL handoff thread — real `createProvisioningBridge`, real gateway, real `launcher-process`
 // headless-Chromium capsule, real `entrypoint-novnc` (a stub noVNC upstream, as the MVP gates), the local
 // `acme.example` stub — to a REAL capsule, but with the DELEGATED authentik provider (`AuthAuthentikProvider`)
@@ -57,9 +57,9 @@ import { IdentityService } from "@gla/identity";
 import type { CapabilityId, OpaqueToken, RecipientRef, SessionId, TaskId } from "@gla/kernel";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import { FakeAuthentik } from "../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
-import type { DeliverySink, ProvisioningStack } from "./index.js";
-import { createProvisioningBridge } from "./index.js";
+import { FakeAuthentik } from "../../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
+import type { DeliverySink, ProvisioningStack } from "../../src/index.js";
+import { createProvisioningBridge } from "../../src/index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
 const wrongRecipient = "tg:user:999" as RecipientRef;
@@ -882,10 +882,10 @@ describe("GLA-076 AUTHENTIK CAPSTONE — delegated provider covers passkey AND p
 // AC#5 — the seam invariant (composition-only swap), provable WITHOUT a real capsule (no Chromium gate).
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 describe("GLA-076 AC#5 — the auth seam is full-capability: provider swap is composition-only (no gateway/core change)", () => {
-  /** The repo root, derived from this test's location (works under both src/ and dist/). */
+  /** The repo root, derived from this test's location (works under src/, test/, or dist/). */
   function repoRoot(): string {
     const here = fileURLToPath(import.meta.url);
-    return here.replace(/\/packages\/app\/(dist|src)\/.*$/, "");
+    return here.replace(/\/packages\/app\/(?:dist|src|test)\/.*$/, "");
   }
 
   it("the SAME composition root records webauthn by default and authentik on the switch — swap = composition only", () => {
