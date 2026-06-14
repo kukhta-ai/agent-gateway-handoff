@@ -381,12 +381,14 @@ The provider-authoring flow for adding a provider is:
 3. **Declare dependencies** in the manifest. If a dependency touches the host, provide or reference a WPM bundle.
 4. **Validate locally** with provider contract tests, manifest/schema validation, redaction checks, and fake-host
    dependency tests.
-5. **Stage for operator install/update** by adding the package to a trusted provider set and selecting it through a
-   profile or overlay.
-6. **Run WPM** for host-touching dependencies: detect, setup/adopt, verify, and record `DependencyBinding`
-   evidence.
-7. **Boot/doctor** the daemon so Provider Host registers the package, Catalog derives availability, and current
-   probes pass.
+5. **Produce a readiness handoff** for operator install/update: package id/version/family, manifest/schema/probe
+   summary, skills/docs, test evidence, dependency requirements, optional WPM bundle refs, and provider-set/profile
+   staging notes.
+
+The operator install/update flow starts from that readiness handoff. It adds the package to a trusted provider set,
+selects it through a profile or overlay, runs WPM for host-touching dependencies, records `DependencyBinding`
+evidence, restarts or boots the daemon, and runs doctor so Provider Host registration, Catalog availability, and
+current probes are verified.
 
 The runtime-consumption flow starts only after boot/doctor succeeds: the runtime agent reads `catalog`, `schema`,
 `template`, and skills, performs dry-run admission, and then submits a real session proposal. It may choose among
@@ -495,6 +497,7 @@ The direction is implemented when:
 `docs/02-provider-and-extension-model.md` (uniform provider contract and registry model) ·
 `docs/architecture/provider-host-extension-architecture.md` (runtime registration and provider set boundary) ·
 `docs/architecture/provider-author-workflow.md` (provider contribution rules) ·
+`docs/architecture/provider-authoring-ux.md` (provider-authoring UX flow) ·
 `docs/architecture/catalog-dependency-bindings.md` (WPM receipt availability) ·
 `docs/03-software-candidates.md` (layer inventory and alternatives) ·
 `docs/04-capsule-assembly.md` (templates and session assembly).
