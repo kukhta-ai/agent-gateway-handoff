@@ -5,14 +5,14 @@
 
 phase: 5
 phase_name: "Autonomous build — provider graph defaults and horizontal extension epic"
-branch: feature/provider-graph
+branch: feature/provider-graph-task-GLA-107.12
 epic: provider-graph-107
-active_story: null
-review_cycle: 0
+active_story: GLA-107.12
+review_cycle: 1
 follow_on_scope:
   tasks: "GLA-107..GLA-107.13"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "GLA-107.01 and GLA-107.11 are done; run backlog sequence list before selecting the next provider-graph work item"
+  next_ready_sequence: "GLA-107.12 is ready to integrate; peer-ready tasks are GLA-107.02 and GLA-107.13"
   note: "2026-06-14 user goal: implement backlog tasks GLA-107 through GLA-107.13 according to project SDLC, architecture, and vision. Persistent specialists initialized first for provider-graph epic: architect James, UX Arendt, SM Lagrange, worker Avicenna, TEA/reviewer Planck, investigator Ampere."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
@@ -103,9 +103,9 @@ provider_set_106_specialists:
 provider_graph_107_specialists:
   architect: {spawned: true, id: "019ec85a-db50-7152-b34c-2847ef3d4c66", open: true, resumable: true, role: "provider-graph solution architecture and boundary review", last_skill: "bmad-agent-architect activated; bmad-create-architecture read for later workflow use; initialized for GLA-107..GLA-107.13"}
   ux: {spawned: true, id: "019ec85a-fd4e-7622-a4c0-490465c56dda", open: true, resumable: true, role: "provider authoring, operator install/update, and runtime consumption UX design", last_skill: "bmad-agent-ux-designer and bmad-ux loaded; initialized for GLA-107.11..GLA-107.13"}
-  sm: {spawned: true, id: "019ec85b-24d5-7270-ad2a-3e4f1e50b613", open: true, resumable: true, role: "story sequencing and create-story evidence for provider graph epic", last_skill: "GLA-107.11 bmad-create-story docs/backlog fallback brief completed; UX doc artifact and non-goals confirmed"}
-  worker: {spawned: true, id: "019ec85b-487b-7911-aef6-63cb08246ba2", open: true, resumable: true, role: "dev-story implementation and E2E/contract test generation for provider graph epic", last_skill: "GLA-107.11 bmad-dev-story + bmad-qa-generate-e2e-tests lane completed; doc test and gate evidence checked"}
-  reviewer: {spawned: true, id: "019ec85b-6cde-7691-b01d-a58ee3f0d133", open: true, resumable: true, role: "TEA/test/security and independent story review for provider graph epic", last_skill: "GLA-107.11 bmad-story-automator-review/TEA completed; graph-plan handoff separation and test placement fixed; final no blockers"}
+  sm: {spawned: true, id: "019ec85b-24d5-7270-ad2a-3e4f1e50b613", open: true, resumable: true, role: "story sequencing and create-story evidence for provider graph epic", last_skill: "GLA-107.12 bmad-create-story docs/backlog fallback brief completed; install/update UX artifact and non-goals confirmed"}
+  worker: {spawned: true, id: "019ec85b-487b-7911-aef6-63cb08246ba2", open: true, resumable: true, role: "dev-story implementation and E2E/contract test generation for provider graph epic", last_skill: "GLA-107.12 bmad-dev-story + bmad-qa-generate-e2e-tests lane completed; doc test and gate evidence checked"}
+  reviewer: {spawned: true, id: "019ec85b-6cde-7691-b01d-a58ee3f0d133", open: true, resumable: true, role: "TEA/test/security and independent story review for provider graph epic", last_skill: "GLA-107.12 bmad-story-automator-review/TEA completed; no blockers"}
   investigator: {spawned: true, id: "019ec85b-8959-70c0-be10-b8df6540447b", open: true, resumable: true, role: "root-cause analysis for graph validation, availability, diagnostics, and boundary regressions", last_skill: "bmad-investigate loaded/resolved; initialized for GLA-107..GLA-107.13"}
 
 gates_pending: []
@@ -136,4 +136,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-14T23:39:00Z"
+last_updated: "2026-06-14T23:45:00Z"

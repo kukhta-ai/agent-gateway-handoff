@@ -21,6 +21,7 @@ This folder is the documentation for that system. Read it in order; each documen
 | — | `architecture/provider-graph-defaults-and-extension-plan.md` | Canonical provider graph direction: default-provider packaging, provider profiles, graph validation, and the horizontal extension workflow for user-facing layers. |
 | — | `architecture/provider-author-workflow.md` | Concrete workflow and boundary rules for adding a provider package without editing runtime narrow-waist packages. |
 | — | `architecture/provider-authoring-ux.md` | Provider-authoring UX spec: protagonist, entry points, package inputs, diagnostics, guarded operations, and handoff to operator install/update. |
+| — | `architecture/provider-install-update-ux.md` | Operator install/update UX spec: named profiles, overlays, WPM evidence, doctor checks, rollback, and handoff to runtime consumption. |
 | — | `components/` | One document per architecture component (start with `components/README.md`). Each maps to a lane in the diagram and to a zone in doc 01. |
 | — | `scenario-01-unified.html` | The reference scenario end to end in one diagram: the internal protocol between services, the agent's concrete `gla` commands, and the concrete provider per pluggable layer — including the one-time enrollment that precedes any handoff. |
 

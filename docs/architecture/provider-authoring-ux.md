@@ -162,5 +162,6 @@ that a skill, probe, schema, dependency requirement, redaction check, or contrac
 ## Related
 
 `provider-graph-defaults-and-extension-plan.md` defines the three separate UX flows and provider graph direction.
-`provider-author-workflow.md` defines the package boundary rules. `../02-provider-and-extension-model.md` defines the
-uniform provider contract and install-time/runtime split.
+`provider-author-workflow.md` defines the package boundary rules. `provider-install-update-ux.md` defines the next
+operator flow. `../02-provider-and-extension-model.md` defines the uniform provider contract and install-time/runtime
+split.
