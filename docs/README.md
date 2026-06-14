@@ -18,6 +18,7 @@ This folder is the documentation for that system. Read it in order; each documen
 | 04 | `04-capsule-assembly.md` | How the agent authors a session: the `AssemblySpec` as a *delta over a trusted template*, the five-move authoring flow, the typed/provider-declared option set, and the host-mount model. |
 | 05 | `05-cli-and-entities.md` | The agent-facing surface: the entity model, the command tree, output/error shapes, the exit-code taxonomy, and scenario-01 mapped to the CLI. |
 | — | `architecture/provider-host-extension-architecture.md` | Migration architecture for turning static manifests plus app-level adapter wiring into a generic internal Provider Host, without introducing a public plugin ABI or dynamic hot-loading. |
+| — | `architecture/provider-graph-defaults-and-extension-plan.md` | Canonical provider graph direction: default-provider packaging, provider profiles, graph validation, and the horizontal extension workflow for user-facing layers. |
 | — | `architecture/provider-author-workflow.md` | Concrete workflow and boundary rules for adding a provider package without editing runtime narrow-waist packages. |
 | — | `components/` | One document per architecture component (start with `components/README.md`). Each maps to a lane in the diagram and to a zone in doc 01. |
 | — | `scenario-01-unified.html` | The reference scenario end to end in one diagram: the internal protocol between services, the agent's concrete `gla` commands, and the concrete provider per pluggable layer — including the one-time enrollment that precedes any handoff. |

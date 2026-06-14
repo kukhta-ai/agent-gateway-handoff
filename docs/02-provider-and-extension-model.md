@@ -4,6 +4,13 @@
 
 This is the spine for every point where GLA leans on a third party to cover a capability — the capsule runtime, channels, auth, secret stores, document editors, completion detection. They are all the same kind of thing, extended the same way, and the goal is that an operator can add a capability by *dropping in a package*, never by editing the core.
 
+The canonical realization of this model is now the **provider graph**: every runtime pluggable layer is a
+`ProviderFamily`, every runtime implementation including the default is a `ProviderPackage`, capsule templates are
+catalog `TemplatePackage`s, defaults are selected by a trusted `ProviderProfile`, and templates/session assemblies
+resolve to available compatible provider subgraphs. See
+`architecture/provider-graph-defaults-and-extension-plan.md` for the default-provider rule and horizontal extension
+plan.
+
 ---
 
 ## 1. The principle: inversion of control
@@ -37,7 +44,8 @@ modules, and names the selected provider profile. Generic app composition consum
 derives wiring and catalog views from Provider Host metadata. Runtime requests may select among already-registered
 provider ids where a surface allows it, but they cannot register executable provider code or load a new provider
 package after daemon boot. See `architecture/provider-host-extension-architecture.md` and
-`architecture/provider-author-workflow.md`.
+`architecture/provider-author-workflow.md`, and
+`architecture/provider-graph-defaults-and-extension-plan.md`.
 
 ---
 

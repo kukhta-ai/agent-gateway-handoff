@@ -4,6 +4,12 @@ This is the concrete contribution path for adding a new GLA provider under the i
 architecture. It is intentionally not a public plugin ABI or dynamic hot-loading contract. Providers are trusted
 install-time code selected by the operator, usually as part of a provider set.
 
+The default and custom provider path is intentionally the same for runtime layers: every user-facing runtime layer
+is a provider family, every implementation is a provider package, and selected defaults live in provider profiles.
+Capsule templates follow the same package/test discipline as catalog `TemplatePackage`s rather than Provider Host
+factories. The provider graph plan in `provider-graph-defaults-and-extension-plan.md` is the architecture source for
+that direction.
+
 ## Where Provider Code Lives
 
 A provider package owns its adapter code and tests. Today the reference distribution keeps concrete adapters under

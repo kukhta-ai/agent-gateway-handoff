@@ -5,6 +5,8 @@
 > generic app composition consumes a trusted provider set/profile at boot, Provider Host owns registered provider
 > metadata and runtime creation, and the reference build is only one explicit distribution entrypoint. This document
 > does not create a public plugin ABI, dynamic hot-loading, marketplace resolution, or a new auth gateway.
+> The graph/default-package direction for making this horizontally extensible is recorded in
+> `docs/architecture/provider-graph-defaults-and-extension-plan.md`.
 
 ## How this was produced
 
@@ -259,4 +261,5 @@ The architecture is in place when these are true:
 `docs/architecture/catalog-dependency-bindings.md` (WPM receipt evidence) ·
 `docs/architecture/authentik-integration.md` (current auth adapter realization) ·
 `docs/architecture/kernel-contracts.md` (ports and narrow-waist contracts) ·
+`docs/architecture/provider-graph-defaults-and-extension-plan.md` (default-provider graph and extension plan) ·
 `docs/architecture/provider-author-workflow.md` (concrete provider contribution and boundary rules).
