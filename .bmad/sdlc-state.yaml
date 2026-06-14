@@ -5,14 +5,14 @@
 
 phase: 5
 phase_name: "Autonomous build — GLA-095..GLA-105 provider-host and test-layout migration"
-branch: feature/provider-host-task-102
+branch: feature/provider-host
 epic: provider-host-and-test-layout-095-105
-active_story: GLA-102
-review_cycle: 1
+active_story: null
+review_cycle: 0
 follow_on_scope:
   tasks: "GLA-095..GLA-105"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "GLA-102"
+  next_ready_sequence: "GLA-103, GLA-104"
   note: "2026-06-14 user goal: implement backlog 095-105 according to the project SDLC, architecture, and vision. New epic branch feature/provider-host was created from feature/authentik because GLA-095..105 build on the completed authentik hardening branch while it is still awaiting handoff to dev."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
