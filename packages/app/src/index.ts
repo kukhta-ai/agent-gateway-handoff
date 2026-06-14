@@ -11,7 +11,8 @@
 // session create` (no --dry-run) provisions a live capsule and returns `{capsule, connector}`, and `gla
 // session connector` re-emits it.
 
-// Concrete adapters (the outward side) — importable ONLY from this composition root:
+// Concrete adapters (the outward side) — importable ONLY from this composition root until their provider
+// families migrate behind Provider Host:
 import { AdmissionService } from "@gla/admission";
 import { AgentBridge } from "@gla/bridge";
 import { CapabilityService } from "@gla/capability";
@@ -47,13 +48,21 @@ import {
   authAssurancePolicyFromRequiredAuthStrength,
   redactOperatorText,
 } from "@gla/kernel";
-import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
-import type { ProviderId, ProviderKvStore, ProviderStateRoot } from "@gla/provider-host";
+import type {
+  ProviderHost,
+  ProviderId,
+  ProviderKvStore,
+  ProviderStateRoot,
+} from "@gla/provider-host";
 import {
   AUTH_WEBAUTHN_PROVIDER_ID,
+  LAUNCHER_PROCESS_PROVIDER_ID,
+  WORKSPACE_PROFILE_PROVIDER_ID,
   createReferenceAuthProvider,
+  createReferenceProviderHost,
   referenceAuthModuleForProviderId,
+  referenceProviderModuleForProviderId,
   referenceProviderStoreContent,
 } from "@gla/provider-set-reference";
 import { RouteController } from "@gla/route";
@@ -73,7 +82,6 @@ import {
   WorkspaceManager,
   attachConnector,
 } from "@gla/worker";
-import { WORKSPACE_PROFILE_MODULE, WorkspaceProfileAdapter } from "@gla/workspace-profile";
 import { DaemonStateRoot } from "./daemon-state.js";
 import { type DaemonHandle, runServe, serve } from "./daemon.js";
 
@@ -108,9 +116,9 @@ export function createApp(): App {
     kernel: KERNEL_MODULE,
     policy: POLICY_CEDAR_MODULE,
     auth: referenceAuthModuleForProviderId(AUTH_WEBAUTHN_PROVIDER_ID),
-    launcher: LAUNCHER_PROCESS_MODULE,
+    launcher: referenceProviderModuleForProviderId(LAUNCHER_PROCESS_PROVIDER_ID),
     connector: CONNECTOR_CDP_MODULE,
-    workspace: WORKSPACE_PROFILE_MODULE,
+    workspace: referenceProviderModuleForProviderId(WORKSPACE_PROFILE_PROVIDER_ID),
     detector: DETECTOR_URL_MODULE,
     channel: CHANNEL_CLI_MODULE,
   };
@@ -214,19 +222,26 @@ function stateSlot<T>(
 
 function referenceCatalogOptions(
   dependencyBindings: DependencyBinding[] | undefined,
+  providerHost?: ProviderHost,
 ): CatalogServiceOptions {
-  const options: CatalogServiceOptions = { content: referenceProviderStoreContent() };
+  const options: CatalogServiceOptions = {
+    content: referenceProviderStoreContent(providerHost ?? createReferenceProviderHost()),
+  };
   if (dependencyBindings !== undefined) {
     options.dependencyBindings = dependencyBindings;
   }
   return options;
 }
 
-function authDependencyEvidence(
+function providerDependencyEvidence(
   providerId: ProviderId,
   dependencyBindings: DependencyBinding[] | undefined,
+  providerHost?: ProviderHost,
 ): IndexedDependencyBinding[] | undefined {
-  return new CatalogService(referenceCatalogOptions(dependencyBindings)).show(providerId)?.requires;
+  const requires = new CatalogService(
+    referenceCatalogOptions(dependencyBindings, providerHost),
+  ).show(providerId)?.requires;
+  return requires !== undefined && requires.length > 0 ? requires : undefined;
 }
 
 /** Options for {@link createBridge}: an override Cedar policy set (defaults to the MVP set). */
@@ -235,6 +250,8 @@ export interface CreateBridgeOptions {
   policySet?: string;
   /** Structured WPM dependency binding receipts. Absent means host-touching catalog providers are unavailable. */
   dependencyBindings?: DependencyBinding[];
+  /** Trusted provider-host registry for catalog/runtime selection. Defaults to the reference provider set. */
+  providerHost?: ProviderHost;
 }
 
 /**
@@ -243,7 +260,9 @@ export interface CreateBridgeOptions {
  * `session create` dispatches a Session in `issued` — NO spawn (provisioning is `createProvisioningBridge`).
  */
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
-  const catalog = new CatalogService(referenceCatalogOptions(opts.dependencyBindings));
+  const catalog = new CatalogService(
+    referenceCatalogOptions(opts.dependencyBindings, opts.providerHost),
+  );
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );
@@ -256,8 +275,16 @@ export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
 
 /** Options for {@link createProvisioningBridge}. */
 export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
+  /** Opaque launcher provider id. Default `"launcher-process"`. */
+  launcherProvider?: ProviderId;
+  /** Provider-owned launcher config. Defaults preserve the legacy launcher options for launcher-process. */
+  launcherProviderConfig?: Record<string, unknown>;
   /** Force the launcher mode (tests / hermes-1): default `"auto"` (full if Xvfb/x11vnc/websockify, else headless). */
   launcherMode?: "auto" | "full" | "headless";
+  /** Opaque workspace provider id. Default `"workspace-profile"`. */
+  workspaceProvider?: ProviderId;
+  /** Provider-owned workspace config. Defaults preserve the legacy workspaceRoot option for workspace-profile. */
+  workspaceProviderConfig?: Record<string, unknown>;
   /** Override the workspace root (tests pass a scratch dir under which profile dirs are created). */
   workspaceRoot?: string;
   /**
@@ -426,6 +453,7 @@ export interface ProvisioningStack {
 export function createProvisioningBridge(
   opts: CreateProvisioningBridgeOptions = {},
 ): ProvisioningStack {
+  const providerHost = opts.providerHost ?? createReferenceProviderHost();
   const state =
     opts.stateRoot !== undefined
       ? DaemonStateRoot.open({
@@ -433,384 +461,437 @@ export function createProvisioningBridge(
           unsafeRoots: opts.workspaceRoot !== undefined ? [opts.workspaceRoot] : [],
         })
       : undefined;
-  const catalog = new CatalogService(referenceCatalogOptions(opts.dependencyBindings));
-  const policy = new CedarPolicyAdapter(
-    opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
-  );
-  const admission = new AdmissionService({ policy, catalog: toAdmissionCatalog(catalog) });
-
-  // ── Worker plane: the spawner registry + lifecycle + workspace + reconciler (over kernel ports).
-  const launcher = new LauncherProcessAdapter({
-    mode: opts.launcherMode ?? "auto",
-    ...(opts.chromiumPath !== undefined ? { chromiumPath: opts.chromiumPath } : {}),
-    ...(opts.startTimeoutMs !== undefined ? { startTimeoutMs: opts.startTimeoutMs } : {}),
-  });
-  const registry = new SpawnerRegistry();
-  registry.register("launcher-process", launcher, { default: true });
-
-  const workspaceAdapter = new WorkspaceProfileAdapter(
-    opts.workspaceRoot !== undefined ? { root: opts.workspaceRoot } : {},
-  );
-  const workspace = new WorkspaceManager(workspaceAdapter);
-  const lifecycleStore = stateSlot<CapsuleRecord[]>(state, "worker.lifecycle", []);
-  const lifecycle = new CapsuleLifecycleManager({
-    registry,
-    workspace,
-    ...(lifecycleStore !== undefined ? { store: lifecycleStore } : {}),
-  });
-
-  // ── ONE shared capability signer underpins the agent-authority anchor, the TASK capability, AND the
-  //    agent-connector capability — so the connector genuinely DESCENDS from the task cap (same key) and
-  //    a revocation of the task cap CASCADES to the connector by lineage (capability-service.md). Using
-  //    separate signers would break both the lineage tag and the shared revocation snapshot.
-  const signer = new HmacCapabilitySigner(
-    state?.secretBytes("capability.signing-key", 32),
-    state?.revocations("capability.revocations"),
-  );
-  const capability = new CapabilityService(
-    signer,
-    state !== undefined
-      ? { spentNonces: state.stringSet("capability.spent-enrollment-nonces") }
-      : {},
-  );
-  const connector = new ConnectorCdpAdapter();
-  // A holder so the Task service's TEARDOWN dep (Slice 7) can call the SessionService's terminal
-  // `teardownSession` — the SessionService is constructed later (it needs the handoff/completion deps),
-  // so the closure reads it from `.svc` (assigned once built). Avoids a forward `let` / construction cycle.
-  const sessionRef: { svc?: SessionService } = {};
-  // ── Slice 7 — the Task service is built with its TERMINAL-teardown wiring: `task complete`/`task revoke`
-  //    tear down every session under the task (via the SessionService's `teardownSession`) and revoke the
-  //    task capability (which, by lineage, stops every descendant cap — the session grants + the connector —
-  //    verifying; kernel-contracts.md §2). The session teardown is delegated; the cap revoke is the Task
-  //    service's own job via the shared signer it already holds.
-  const taskStore = stateSlot<TaskServiceSnapshot>(state, "task.state", {
-    tasks: [],
-    tokens: [],
-  });
-  const taskOptions: ConstructorParameters<typeof TaskService>[0] = {
-    capability: signer,
-    teardown: {
-      teardownSession: (sessionId, disposition) =>
-        sessionRef.svc?.teardownSession(sessionId, disposition) ?? Promise.resolve(),
-    },
-  };
-  if (taskStore !== undefined) {
-    taskOptions.store = taskStore;
-  }
-  const task = new TaskService(taskOptions);
-
-  // The noVNC human entrypoint (full mode: the ws endpoint the gateway proxies in Slice 4b; headless: reports
-  // unavailable). Stood up here so the full-mode test can read it AND so the handoff saga can resolve it.
-  const entrypoint = new EntrypointNovncAdapter();
-
-  // ── Slice 4b — the HANDOFF pipeline (the Access Gateway + Route controller + identity step-up + channel),
-  //    wired into the SessionService's open-window saga when `opts.handoff` is present. The gateway is the sole
-  //    public entry (it serves the step-up + proxies the WS); the route controller programs grant-bound routes ON
-  //    the gateway; the saga mints a recipient-bound grant (attenuated from the task cap), programs the route, and
-  //    delivers the recipient-bound link.
-  let gateway: AccessGateway | undefined;
-  let route: RouteController | undefined;
-  let identity: IdentityService | undefined;
-  let handoffDeps: HandoffDeps | undefined;
-  let completionDeps: CompletionDeps | undefined;
-  /** The auth module actually wired behind the AuthProviderPort (doc §7 wiring record). Default the in-tree WebAuthn. */
-  let authModule: string = referenceAuthModuleForProviderId(AUTH_WEBAUTHN_PROVIDER_ID);
-  /** The operator enrollment action (wired when handoff is, since the same gateway then fronts enrollment). */
-  let enrollInvite:
-    | ((recipient: RecipientRef) => Promise<{ link: string; grant: OpaqueToken; nonce: string }>)
-    | undefined;
-  let publicBaseUrl: string | undefined;
-  // (`sessionRef` is declared above with the Task-service teardown wiring — the completion deps' closures
-  //  resolved only when a window opens/closes read the SessionService back from `.svc` once it is built.)
-  if (opts.handoff !== undefined) {
-    const h = opts.handoff;
-    // Provider selection (doc §1/§7): default → the in-tree WebAuthn provider (unchanged); `authentik` → the
-    // delegated OIDC adapter. Both implement `AuthProviderPort`, so the IdentityService injection is identical.
-    const selected = buildAuthProvider(
-      {
-        ...(h.authProvider !== undefined ? { authProvider: h.authProvider } : {}),
-        ...(h.authProviderConfig !== undefined ? { authProviderConfig: h.authProviderConfig } : {}),
-      },
-      { rpID: h.rpID ?? "localhost", rpName: h.rpName ?? "GLA", expectedOrigin: h.expectedOrigin },
-      providerStateRoot(state),
-      authDependencyEvidence(h.authProvider ?? AUTH_WEBAUTHN_PROVIDER_ID, opts.dependencyBindings),
+  let stateOwnedByStack = false;
+  try {
+    const catalog = new CatalogService(
+      referenceCatalogOptions(opts.dependencyBindings, providerHost),
     );
-    authModule = selected.module;
-    identity =
-      h.identity ??
-      new IdentityService({
-        authProvider: selected.provider,
-        ...(state !== undefined
-          ? { enrollments: state.kv<EnrollmentRecord>("identity.enrollments") }
-          : {}),
-      });
-    const channel = new ChannelCli({ identity, sink: h.deliverySink ?? deliveryToStdout });
-    const authAssurancePolicy =
-      h.authAssuranceProfile !== undefined
-        ? authAssurancePolicyFromProfile(h.authAssuranceProfile)
-        : h.requiredAuthStrength !== undefined
-          ? authAssurancePolicyFromRequiredAuthStrength(h.requiredAuthStrength)
-          : undefined;
-    // The gateway is the Route controller's abstract edge AND the public step-up/WS-proxy entry. It verifies the
-    // recipient-bound grant statelessly + requires the bound identity (step-up) before forwarding to the capsule.
-    gateway = new AccessGateway({
-      // ONE gateway fronts BOTH enrollment (Phase E) AND the handoff (Phases 6/12) — the sole public entry on
-      // hermes-1. The enrollment seams (the capability grant verifier + the identity enroll surface) let the SAME
-      // gateway serve the grant-verified enrollment flow against the SAME enrolled-credential store the step-up
-      // verifies against, so a real two-handoff scenario (enroll → handoff → re-open) runs through one edge.
-      grants: capability,
-      identity,
-      sessionGrants: capability,
-      stepUp: identity,
-      host: h.host ?? "0.0.0.0",
-      port: h.port ?? 3000,
-      publicBaseUrl: h.publicBaseUrl,
-      ...(h.trustForwardedPrefix !== undefined
-        ? { trustForwardedPrefix: h.trustForwardedPrefix }
-        : {}),
-      // The auth-reuse TTL (GLA-050/051): a recipient's step-up stays valid for a later window for THIS recipient,
-      // so scenario-01 Phase 12's second window opens with no re-prompt. Defaults to the gateway default (~15m).
-      ...(h.authReuseTtlMs !== undefined ? { authReuseTtlMs: h.authReuseTtlMs } : {}),
-      // Provider-neutral assurance profile (default phishing-resistant): app translates deployment policy to the
-      // gateway's common contract; gateway code never names provider method claims.
-      ...(authAssurancePolicy !== undefined ? { authAssurancePolicy } : {}),
-      // The noVNC provider owns its browser client assets; the gateway only serves them through a generic static
-      // mount so session/capability/auth/core never learn noVNC details.
-      entrypointClientAssets: novncClientAssetMounts(),
-    });
-    route = new RouteController({ gateway });
-    handoffDeps = {
-      capability: {
-        // Thread the session-computed `scopePath` (nested under the task scope `/task/<taskId>/…` when the grant
-        // attenuates from the task cap) straight through, so the grant's scope is ⊆ the parent task scope.
-        mintSessionGrant: (req) =>
-          capability
-            .mintSessionGrant(req)
-            .then((m) => ({ grantId: m.capability.id, token: m.token, scopePath: m.scopePath })),
-        revoke: (id) => capability.revoke(id),
-        // Force-close the live WS at the edge so a revoked/expired grant's surface is unreachable (GLA-039 AC#3).
-        forceCloseGrant: (grantId) => gateway?.forceCloseGrant(grantId),
-      },
-      route: {
-        program: (window, grantId, entrypointBinding, path) => {
-          if (route === undefined) {
-            throw new Error("route controller not wired");
+    const policy = new CedarPolicyAdapter(
+      opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
+    );
+    const admission = new AdmissionService({ policy, catalog: toAdmissionCatalog(catalog) });
+
+    // ── Worker plane: Provider Host creates launcher/workspace ports, then worker core receives only ports.
+    const launcherProviderId = opts.launcherProvider ?? LAUNCHER_PROCESS_PROVIDER_ID;
+    const launcherProviderConfig =
+      opts.launcherProviderConfig ??
+      (launcherProviderId === LAUNCHER_PROCESS_PROVIDER_ID
+        ? {
+            mode: opts.launcherMode ?? "auto",
+            ...(opts.chromiumPath !== undefined ? { chromiumPath: opts.chromiumPath } : {}),
+            ...(opts.startTimeoutMs !== undefined ? { startTimeoutMs: opts.startTimeoutMs } : {}),
           }
-          return route.program(window, grantId, entrypointBinding, path);
-        },
-        unmount: (windowId) => (route ? route.unmount(windowId) : Promise.resolve()),
+        : {});
+    const launcherDependencyEvidence = providerDependencyEvidence(
+      launcherProviderId,
+      opts.dependencyBindings,
+      providerHost,
+    );
+    const launcher = providerHost.createProviderSync("launcher", launcherProviderId, {
+      config: launcherProviderConfig,
+      ...(launcherDependencyEvidence !== undefined
+        ? { dependencyBindings: launcherDependencyEvidence }
+        : {}),
+    });
+    const registry = new SpawnerRegistry();
+    registry.register(launcherProviderId, launcher, { default: true });
+
+    const workspaceProviderId = opts.workspaceProvider ?? WORKSPACE_PROFILE_PROVIDER_ID;
+    const workspaceProviderConfig =
+      opts.workspaceProviderConfig ??
+      (workspaceProviderId === WORKSPACE_PROFILE_PROVIDER_ID
+        ? {
+            ...(opts.workspaceRoot !== undefined ? { root: opts.workspaceRoot } : {}),
+          }
+        : {});
+    const workspaceDependencyEvidence = providerDependencyEvidence(
+      workspaceProviderId,
+      opts.dependencyBindings,
+      providerHost,
+    );
+    const workspacePort = providerHost.createProviderSync("workspace", workspaceProviderId, {
+      config: workspaceProviderConfig,
+      ...(workspaceDependencyEvidence !== undefined
+        ? { dependencyBindings: workspaceDependencyEvidence }
+        : {}),
+    });
+    const workspace = new WorkspaceManager(workspacePort);
+    const lifecycleStore = stateSlot<CapsuleRecord[]>(state, "worker.lifecycle", []);
+    const lifecycle = new CapsuleLifecycleManager({
+      registry,
+      workspace,
+      ...(lifecycleStore !== undefined ? { store: lifecycleStore } : {}),
+    });
+
+    // ── ONE shared capability signer underpins the agent-authority anchor, the TASK capability, AND the
+    //    agent-connector capability — so the connector genuinely DESCENDS from the task cap (same key) and
+    //    a revocation of the task cap CASCADES to the connector by lineage (capability-service.md). Using
+    //    separate signers would break both the lineage tag and the shared revocation snapshot.
+    const signer = new HmacCapabilitySigner(
+      state?.secretBytes("capability.signing-key", 32),
+      state?.revocations("capability.revocations"),
+    );
+    const capability = new CapabilityService(
+      signer,
+      state !== undefined
+        ? { spentNonces: state.stringSet("capability.spent-enrollment-nonces") }
+        : {},
+    );
+    const connector = new ConnectorCdpAdapter();
+    // A holder so the Task service's TEARDOWN dep (Slice 7) can call the SessionService's terminal
+    // `teardownSession` — the SessionService is constructed later (it needs the handoff/completion deps),
+    // so the closure reads it from `.svc` (assigned once built). Avoids a forward `let` / construction cycle.
+    const sessionRef: { svc?: SessionService } = {};
+    // ── Slice 7 — the Task service is built with its TERMINAL-teardown wiring: `task complete`/`task revoke`
+    //    tear down every session under the task (via the SessionService's `teardownSession`) and revoke the
+    //    task capability (which, by lineage, stops every descendant cap — the session grants + the connector —
+    //    verifying; kernel-contracts.md §2). The session teardown is delegated; the cap revoke is the Task
+    //    service's own job via the shared signer it already holds.
+    const taskStore = stateSlot<TaskServiceSnapshot>(state, "task.state", {
+      tasks: [],
+      tokens: [],
+    });
+    const taskOptions: ConstructorParameters<typeof TaskService>[0] = {
+      capability: signer,
+      teardown: {
+        teardownSession: (sessionId, disposition) =>
+          sessionRef.svc?.teardownSession(sessionId, disposition) ?? Promise.resolve(),
       },
-      // The human entrypoint the route proxies to — the real noVNC adapter, or a test-injected stub (headless dev
-      // has no X stack; the REAL noVNC proxy is gated for hermes-1).
-      entrypoint: h.entrypoint ?? entrypoint,
-      channel,
-      // Build the recipient-bound handoff link from the route path + the grant token (the gateway's helper).
-      buildLink: (path, token) => AccessGateway.handoffLink(h.publicBaseUrl, path, token),
-      // The grant attenuates FROM the session's TASK capability TOKEN (so it cannot widen recipient/scope/ttl and
-      // cascades on the task cap's revoke). Resolve the task → its minted task-capability bearer token.
-      parentTokenFor: (_sessionId, taskId) => task.capabilityToken(taskId),
     };
+    if (taskStore !== undefined) {
+      taskOptions.store = taskStore;
+    }
+    const task = new TaskService(taskOptions);
 
-    // The operator enrollment action (Phase E) on the SAME gateway + credential store the step-up verifies against —
-    // mint a single-use operator-discharge grant bound to the recipient + deliver the invite link. The precondition
-    // for any handoff (the recipient must be enrolled before window 1).
-    publicBaseUrl = h.publicBaseUrl;
-    enrollInvite = async (recipient: RecipientRef) => {
-      const minted = await capability.mintEnrollmentGrant(recipient);
-      const link = AccessGateway.enrollLink(h.publicBaseUrl, minted.token);
-      await channel.deliver(recipient, link, minted.token);
-      return redactedEnrollmentInvite(link, minted.token, minted.nonce);
-    };
+    // The noVNC human entrypoint (full mode: the ws endpoint the gateway proxies in Slice 4b; headless: reports
+    // unavailable). Stood up here so the full-mode test can read it AND so the handoff saga can resolve it.
+    const entrypoint = new EntrypointNovncAdapter();
 
-    // ── Slice 5 — the COMPLETION-CLOSE pipeline (the Completion service + the url-watcher detector + the
-    //    connector severance), wired into the SessionService when `opts.handoff.completion` is present. The
-    //    url-watcher watches each open window's live URL over CDP; a match is validated by the Completion service
-    //    against the declared detector contract + normalized to an envelope; the session closes the window
-    //    (reverse-of-open) and returns to `active` with the capsule running. The agent's brokered CDP socket is
-    //    SEVERED while a window is open (S-2 agent-blind — its live connection is destroyed) and re-allowed on close.
-    if (h.completion !== undefined) {
-      const c = h.completion;
-      const completionSvc = new CompletionService();
-      const urlDetector = new DetectorUrlAdapter({
-        ...(c.readUrl !== undefined ? { readUrl: c.readUrl } : {}),
-        ...(c.pollMs !== undefined ? { pollMs: c.pollMs } : {}),
+    // ── Slice 4b — the HANDOFF pipeline (the Access Gateway + Route controller + identity step-up + channel),
+    //    wired into the SessionService's open-window saga when `opts.handoff` is present. The gateway is the sole
+    //    public entry (it serves the step-up + proxies the WS); the route controller programs grant-bound routes ON
+    //    the gateway; the saga mints a recipient-bound grant (attenuated from the task cap), programs the route, and
+    //    delivers the recipient-bound link.
+    let gateway: AccessGateway | undefined;
+    let route: RouteController | undefined;
+    let identity: IdentityService | undefined;
+    let handoffDeps: HandoffDeps | undefined;
+    let completionDeps: CompletionDeps | undefined;
+    /** The auth module actually wired behind the AuthProviderPort (doc §7 wiring record). Default the in-tree WebAuthn. */
+    let authModule: string = referenceAuthModuleForProviderId(AUTH_WEBAUTHN_PROVIDER_ID);
+    /** The operator enrollment action (wired when handoff is, since the same gateway then fronts enrollment). */
+    let enrollInvite:
+      | ((recipient: RecipientRef) => Promise<{ link: string; grant: OpaqueToken; nonce: string }>)
+      | undefined;
+    let publicBaseUrl: string | undefined;
+    // (`sessionRef` is declared above with the Task-service teardown wiring — the completion deps' closures
+    //  resolved only when a window opens/closes read the SessionService back from `.svc` once it is built.)
+    if (opts.handoff !== undefined) {
+      const h = opts.handoff;
+      // Provider selection (doc §1/§7): default → the in-tree WebAuthn provider (unchanged); `authentik` → the
+      // delegated OIDC adapter. Both implement `AuthProviderPort`, so the IdentityService injection is identical.
+      const selected = buildAuthProvider(
+        {
+          ...(h.authProvider !== undefined ? { authProvider: h.authProvider } : {}),
+          ...(h.authProviderConfig !== undefined
+            ? { authProviderConfig: h.authProviderConfig }
+            : {}),
+        },
+        {
+          rpID: h.rpID ?? "localhost",
+          rpName: h.rpName ?? "GLA",
+          expectedOrigin: h.expectedOrigin,
+        },
+        providerStateRoot(state),
+        providerDependencyEvidence(
+          h.authProvider ?? AUTH_WEBAUTHN_PROVIDER_ID,
+          opts.dependencyBindings,
+          providerHost,
+        ),
+      );
+      authModule = selected.module;
+      identity =
+        h.identity ??
+        new IdentityService({
+          authProvider: selected.provider,
+          ...(state !== undefined
+            ? { enrollments: state.kv<EnrollmentRecord>("identity.enrollments") }
+            : {}),
+        });
+      const channel = new ChannelCli({ identity, sink: h.deliverySink ?? deliveryToStdout });
+      const authAssurancePolicy =
+        h.authAssuranceProfile !== undefined
+          ? authAssurancePolicyFromProfile(h.authAssuranceProfile)
+          : h.requiredAuthStrength !== undefined
+            ? authAssurancePolicyFromRequiredAuthStrength(h.requiredAuthStrength)
+            : undefined;
+      // The gateway is the Route controller's abstract edge AND the public step-up/WS-proxy entry. It verifies the
+      // recipient-bound grant statelessly + requires the bound identity (step-up) before forwarding to the capsule.
+      gateway = new AccessGateway({
+        // ONE gateway fronts BOTH enrollment (Phase E) AND the handoff (Phases 6/12) — the sole public entry on
+        // hermes-1. The enrollment seams (the capability grant verifier + the identity enroll surface) let the SAME
+        // gateway serve the grant-verified enrollment flow against the SAME enrolled-credential store the step-up
+        // verifies against, so a real two-handoff scenario (enroll → handoff → re-open) runs through one edge.
+        grants: capability,
+        identity,
+        sessionGrants: capability,
+        stepUp: identity,
+        host: h.host ?? "0.0.0.0",
+        port: h.port ?? 3000,
+        publicBaseUrl: h.publicBaseUrl,
+        ...(h.trustForwardedPrefix !== undefined
+          ? { trustForwardedPrefix: h.trustForwardedPrefix }
+          : {}),
+        // The auth-reuse TTL (GLA-050/051): a recipient's step-up stays valid for a later window for THIS recipient,
+        // so scenario-01 Phase 12's second window opens with no re-prompt. Defaults to the gateway default (~15m).
+        ...(h.authReuseTtlMs !== undefined ? { authReuseTtlMs: h.authReuseTtlMs } : {}),
+        // Provider-neutral assurance profile (default phishing-resistant): app translates deployment policy to the
+        // gateway's common contract; gateway code never names provider method claims.
+        ...(authAssurancePolicy !== undefined ? { authAssurancePolicy } : {}),
+        // The noVNC provider owns its browser client assets; the gateway only serves them through a generic static
+        // mount so session/capability/auth/core never learn noVNC details.
+        entrypointClientAssets: novncClientAssetMounts(),
       });
-      // The url-watcher → envelope status map (the detector/template author's declaration). Default: the
-      // scenario-01 mapping (intermediate `/verify` → submitted+next; complete `/dashboard` → verified).
-      const statusMap = c.statusMap ?? {
-        intermediate: { status: "submitted", next: "email-verification" },
-        complete: { status: "verified" },
-      };
-      completionDeps = {
-        completion: completionSvc,
-        // Build the DECLARED detector contract for a session's window from its assembly's url-watcher params: the
-        // admitted raw statuses → their normalization. The CONTRACT is what an out-of-contract signal is rejected
-        // against (S-8). Its `resultSchema` reuses the url-watcher's own typed contract so a malformed result is
-        // also rejected.
-        // These closures run only when a window opens/closes — AFTER `sessionRef.svc` is assigned below.
-        contractFor: (sessionId) => buildUrlWatcherContract(sessionRef.svc, sessionId, statusMap),
-        detector: urlDetector,
-        // The params the url-watcher watches with — the session's declared `complete_on`/`intermediate`.
-        detectorParamsFor: (sessionId) => urlWatcherParams(sessionRef.svc, sessionId),
-        // S-2 agent-blind: SEVER/resume the agent connector by the session's connector resource id. The provider
-        // adapter owns how that id maps to live sockets, so session/app do not key lifecycle to a transport URL.
-        connectorControl: {
-          suspend: (sessionId) => {
-            const resourceId =
-              sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
-            if (resourceId !== undefined && resourceId.length > 0) {
-              connector.suspendByResourceId(resourceId);
-            }
-          },
-          resume: (sessionId) => {
-            const resourceId =
-              sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
-            if (resourceId !== undefined && resourceId.length > 0) {
-              connector.resumeByResourceId(resourceId);
-            }
-          },
+      route = new RouteController({ gateway });
+      handoffDeps = {
+        capability: {
+          // Thread the session-computed `scopePath` (nested under the task scope `/task/<taskId>/…` when the grant
+          // attenuates from the task cap) straight through, so the grant's scope is ⊆ the parent task scope.
+          mintSessionGrant: (req) =>
+            capability
+              .mintSessionGrant(req)
+              .then((m) => ({ grantId: m.capability.id, token: m.token, scopePath: m.scopePath })),
+          revoke: (id) => capability.revoke(id),
+          // Force-close the live WS at the edge so a revoked/expired grant's surface is unreachable (GLA-039 AC#3).
+          forceCloseGrant: (grantId) => gateway?.forceCloseGrant(grantId),
         },
+        route: {
+          program: (window, grantId, entrypointBinding, path) => {
+            if (route === undefined) {
+              throw new Error("route controller not wired");
+            }
+            return route.program(window, grantId, entrypointBinding, path);
+          },
+          unmount: (windowId) => (route ? route.unmount(windowId) : Promise.resolve()),
+        },
+        // The human entrypoint the route proxies to — the real noVNC adapter, or a test-injected stub (headless dev
+        // has no X stack; the REAL noVNC proxy is gated for hermes-1).
+        entrypoint: h.entrypoint ?? entrypoint,
+        channel,
+        // Build the recipient-bound handoff link from the route path + the grant token (the gateway's helper).
+        buildLink: (path, token) => AccessGateway.handoffLink(h.publicBaseUrl, path, token),
+        // The grant attenuates FROM the session's TASK capability TOKEN (so it cannot widen recipient/scope/ttl and
+        // cascades on the task cap's revoke). Resolve the task → its minted task-capability bearer token.
+        parentTokenFor: (_sessionId, taskId) => task.capabilityToken(taskId),
       };
-    }
-  }
 
-  // ── The provision-capable SessionService: inject the worker/capability/connector seams (+ handoff when wired).
-  //    `parentCapabilityRefFor` threads the session's TASK capability id down as the connector's parent
-  //    (Finding #1) — so `mintConnector` produces a CHILD of the task cap, not a fresh root.
-  const sessionStore = stateSlot<SessionServiceSnapshot>(state, "session.state", {
-    sessions: [],
-    provisioned: [],
-    handoffs: [],
-    completions: [],
-  });
-  const sessionOpts: SessionServiceOptions = {
-    provision: {
-      worker: lifecycle,
-      capability: {
-        async mintConnector(sessionId, parentRef) {
-          const minted = await capability.mintConnector(sessionId, parentRef);
-          // Surface the lineage parent (the task cap id) so the session records the connector
-          // genuinely descends from the task cap (Finding #1; the revoke-the-parent cascade applies).
-          return parentRef !== undefined
-            ? { capabilityId: minted.capability.id, secretRef: minted.secretRef, parentRef }
-            : { capabilityId: minted.capability.id, secretRef: minted.secretRef };
+      // The operator enrollment action (Phase E) on the SAME gateway + credential store the step-up verifies against —
+      // mint a single-use operator-discharge grant bound to the recipient + deliver the invite link. The precondition
+      // for any handoff (the recipient must be enrolled before window 1).
+      publicBaseUrl = h.publicBaseUrl;
+      enrollInvite = async (recipient: RecipientRef) => {
+        const minted = await capability.mintEnrollmentGrant(recipient);
+        const link = AccessGateway.enrollLink(h.publicBaseUrl, minted.token);
+        await channel.deliver(recipient, link, minted.token);
+        return redactedEnrollmentInvite(link, minted.token, minted.nonce);
+      };
+
+      // ── Slice 5 — the COMPLETION-CLOSE pipeline (the Completion service + the url-watcher detector + the
+      //    connector severance), wired into the SessionService when `opts.handoff.completion` is present. The
+      //    url-watcher watches each open window's live URL over CDP; a match is validated by the Completion service
+      //    against the declared detector contract + normalized to an envelope; the session closes the window
+      //    (reverse-of-open) and returns to `active` with the capsule running. The agent's brokered CDP socket is
+      //    SEVERED while a window is open (S-2 agent-blind — its live connection is destroyed) and re-allowed on close.
+      if (h.completion !== undefined) {
+        const c = h.completion;
+        const completionSvc = new CompletionService();
+        const urlDetector = new DetectorUrlAdapter({
+          ...(c.readUrl !== undefined ? { readUrl: c.readUrl } : {}),
+          ...(c.pollMs !== undefined ? { pollMs: c.pollMs } : {}),
+        });
+        // The url-watcher → envelope status map (the detector/template author's declaration). Default: the
+        // scenario-01 mapping (intermediate `/verify` → submitted+next; complete `/dashboard` → verified).
+        const statusMap = c.statusMap ?? {
+          intermediate: { status: "submitted", next: "email-verification" },
+          complete: { status: "verified" },
+        };
+        completionDeps = {
+          completion: completionSvc,
+          // Build the DECLARED detector contract for a session's window from its assembly's url-watcher params: the
+          // admitted raw statuses → their normalization. The CONTRACT is what an out-of-contract signal is rejected
+          // against (S-8). Its `resultSchema` reuses the url-watcher's own typed contract so a malformed result is
+          // also rejected.
+          // These closures run only when a window opens/closes — AFTER `sessionRef.svc` is assigned below.
+          contractFor: (sessionId) => buildUrlWatcherContract(sessionRef.svc, sessionId, statusMap),
+          detector: urlDetector,
+          // The params the url-watcher watches with — the session's declared `complete_on`/`intermediate`.
+          detectorParamsFor: (sessionId) => urlWatcherParams(sessionRef.svc, sessionId),
+          // S-2 agent-blind: SEVER/resume the agent connector by the session's connector resource id. The provider
+          // adapter owns how that id maps to live sockets, so session/app do not key lifecycle to a transport URL.
+          connectorControl: {
+            suspend: (sessionId) => {
+              const resourceId =
+                sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
+              if (resourceId !== undefined && resourceId.length > 0) {
+                connector.suspendByResourceId(resourceId);
+              }
+            },
+            resume: (sessionId) => {
+              const resourceId =
+                sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
+              if (resourceId !== undefined && resourceId.length > 0) {
+                connector.resumeByResourceId(resourceId);
+              }
+            },
+          },
+        };
+      }
+    }
+
+    // ── The provision-capable SessionService: inject the worker/capability/connector seams (+ handoff when wired).
+    //    `parentCapabilityRefFor` threads the session's TASK capability id down as the connector's parent
+    //    (Finding #1) — so `mintConnector` produces a CHILD of the task cap, not a fresh root.
+    const sessionStore = stateSlot<SessionServiceSnapshot>(state, "session.state", {
+      sessions: [],
+      provisioned: [],
+      handoffs: [],
+      completions: [],
+    });
+    const sessionOpts: SessionServiceOptions = {
+      provision: {
+        worker: lifecycle,
+        capability: {
+          async mintConnector(sessionId, parentRef) {
+            const minted = await capability.mintConnector(sessionId, parentRef);
+            // Surface the lineage parent (the task cap id) so the session records the connector
+            // genuinely descends from the task cap (Finding #1; the revoke-the-parent cascade applies).
+            return parentRef !== undefined
+              ? { capabilityId: minted.capability.id, secretRef: minted.secretRef, parentRef }
+              : { capabilityId: minted.capability.id, secretRef: minted.secretRef };
+          },
+          revoke: (capId) => capability.revoke(capId),
         },
-        revoke: (capId) => capability.revoke(capId),
+        connector,
+        parentCapabilityRefFor: (_sessionId, taskId) => {
+          // Resolve the session's task → its minted task-capability id (the connector's lineage parent).
+          const t = task.tryGet(taskId);
+          return t !== undefined ? (t.taskCapabilityRef as unknown as CapabilityId) : undefined;
+        },
       },
+    };
+    if (sessionStore !== undefined) {
+      sessionOpts.store = sessionStore;
+    }
+    if (handoffDeps !== undefined) {
+      sessionOpts.handoff = handoffDeps;
+    }
+    if (completionDeps !== undefined) {
+      sessionOpts.completion = completionDeps;
+    }
+    // ── Slice 7 — the SessionService's TERMINAL-teardown seam (`teardownSession`'s STOP-the-capsule step):
+    //    `reconcile(sessionId)` is the worker's Cleanup Reconciler (built just below), which stops the capsule
+    //    (kills the process group), reaps the workspace (wipes the ephemeral temp profile — host mounts
+    //    survive), revokes the connector cap, and forgets the bookkeeping — idempotent + restart-safe, and
+    //    reconciling by STATE regardless of launcher. The reconciler is constructed after the session (it
+    //    reads the session for the connector-teardown info), so the seam reads it from the holder.
+    const reconcilerRef: { rec?: CleanupReconciler } = {};
+    sessionOpts.teardown = {
+      reconcile: (sessionId) => reconcilerRef.rec?.reconcile(sessionId) ?? Promise.resolve(),
+    };
+    const session = new SessionService(sessionOpts);
+    // Publish the session into the holder the completion deps' closures read (they run only on a later open/close).
+    sessionRef.svc = session;
+
+    // ── The Cleanup Reconciler's TERMINAL teardown now revokes the connector cap AND unbinds its
+    //    secret_ref (Finding #2) — symmetric with the saga's failure compensation, so a session that
+    //    provisions successfully and is later reaped leaves NO live connector cap and NO residual binding.
+    const reconciler = new CleanupReconciler({
+      lifecycle,
+      revokeConnector: async (sessionId) => {
+        const info = session.connectorTeardownInfo(sessionId as never);
+        if (info === undefined) {
+          return; // never provisioned / already cleaned — idempotent no-op.
+        }
+        // Drop the agent-blind resource binding (no residual) and revoke the connector cap.
+        connector.unbindSecretRef(info.connectorResourceId);
+        await capability.revoke(info.connectorCapId);
+        // Forget the provision bookkeeping so a second teardown is a clean no-op (idempotent).
+        session.clearProvisioned(sessionId as never);
+      },
+    });
+    // Publish the reconciler into the holder the SessionService's teardown seam reads (Slice 7) — so
+    // `teardownSession`/`task complete` stop+reap the capsule via the SAME idempotent reconciler.
+    reconcilerRef.rec = reconciler;
+
+    // Inject the SHARED signer + capability service + task service into the bridge so the agent anchor,
+    // the task cap, and the connector cap are all minted/verified/revoked by the ONE signer (the lineage
+    // cascade across anchor→task→connector holds, and the bridge verifies with the minting key).
+    const bridge = new AgentBridge({
+      catalog,
+      admission,
+      session,
+      task,
+      capability,
+      signer,
+      provisioning: true,
+    });
+    // `attachConnector` is the worker's connector helper; the session uses the connector port directly,
+    // but exposing the reference keeps the wired surface explicit (and tree-shake-safe).
+    void attachConnector;
+    let stackClosed = false;
+    const close = async (): Promise<void> => {
+      if (stackClosed) {
+        return;
+      }
+      stackClosed = true;
+      try {
+        for (const sessionId of lifecycle.liveSessions()) {
+          await reconciler.reconcile(sessionId).catch(() => {});
+        }
+        await connector.close().catch(() => {});
+        await gateway?.close().catch(() => {});
+      } finally {
+        state?.close();
+      }
+    };
+    const stack: ProvisioningStack = {
+      ready: session.recoveryComplete(),
+      close,
+      bridge,
+      lifecycle,
+      reconciler,
+      registry,
+      entrypoint,
+      capability,
+      task,
+      session,
       connector,
-      parentCapabilityRefFor: (_sessionId, taskId) => {
-        // Resolve the session's task → its minted task-capability id (the connector's lineage parent).
-        const t = task.tryGet(taskId);
-        return t !== undefined ? (t.taskCapabilityRef as unknown as CapabilityId) : undefined;
-      },
-    },
-  };
-  if (sessionStore !== undefined) {
-    sessionOpts.store = sessionStore;
-  }
-  if (handoffDeps !== undefined) {
-    sessionOpts.handoff = handoffDeps;
-  }
-  if (completionDeps !== undefined) {
-    sessionOpts.completion = completionDeps;
-  }
-  // ── Slice 7 — the SessionService's TERMINAL-teardown seam (`teardownSession`'s STOP-the-capsule step):
-  //    `reconcile(sessionId)` is the worker's Cleanup Reconciler (built just below), which stops the capsule
-  //    (kills the process group), reaps the workspace (wipes the ephemeral temp profile — host mounts
-  //    survive), revokes the connector cap, and forgets the bookkeeping — idempotent + restart-safe, and
-  //    reconciling by STATE regardless of launcher. The reconciler is constructed after the session (it
-  //    reads the session for the connector-teardown info), so the seam reads it from the holder.
-  const reconcilerRef: { rec?: CleanupReconciler } = {};
-  sessionOpts.teardown = {
-    reconcile: (sessionId) => reconcilerRef.rec?.reconcile(sessionId) ?? Promise.resolve(),
-  };
-  const session = new SessionService(sessionOpts);
-  // Publish the session into the holder the completion deps' closures read (they run only on a later open/close).
-  sessionRef.svc = session;
-
-  // ── The Cleanup Reconciler's TERMINAL teardown now revokes the connector cap AND unbinds its
-  //    secret_ref (Finding #2) — symmetric with the saga's failure compensation, so a session that
-  //    provisions successfully and is later reaped leaves NO live connector cap and NO residual binding.
-  const reconciler = new CleanupReconciler({
-    lifecycle,
-    revokeConnector: async (sessionId) => {
-      const info = session.connectorTeardownInfo(sessionId as never);
-      if (info === undefined) {
-        return; // never provisioned / already cleaned — idempotent no-op.
-      }
-      // Drop the agent-blind resource binding (no residual) and revoke the connector cap.
-      connector.unbindSecretRef(info.connectorResourceId);
-      await capability.revoke(info.connectorCapId);
-      // Forget the provision bookkeeping so a second teardown is a clean no-op (idempotent).
-      session.clearProvisioned(sessionId as never);
-    },
-  });
-  // Publish the reconciler into the holder the SessionService's teardown seam reads (Slice 7) — so
-  // `teardownSession`/`task complete` stop+reap the capsule via the SAME idempotent reconciler.
-  reconcilerRef.rec = reconciler;
-
-  // Inject the SHARED signer + capability service + task service into the bridge so the agent anchor,
-  // the task cap, and the connector cap are all minted/verified/revoked by the ONE signer (the lineage
-  // cascade across anchor→task→connector holds, and the bridge verifies with the minting key).
-  const bridge = new AgentBridge({
-    catalog,
-    admission,
-    session,
-    task,
-    capability,
-    signer,
-    provisioning: true,
-  });
-  // `attachConnector` is the worker's connector helper; the session uses the connector port directly,
-  // but exposing the reference keeps the wired surface explicit (and tree-shake-safe).
-  void attachConnector;
-  let stackClosed = false;
-  const close = async (): Promise<void> => {
-    if (stackClosed) {
-      return;
+      authModule,
+    };
+    // Slice 4b: expose the handoff pipeline handles when wired (so a test/caller can drive the gateway/route/identity).
+    if (gateway !== undefined) {
+      stack.gateway = gateway;
     }
-    stackClosed = true;
-    try {
-      for (const sessionId of lifecycle.liveSessions()) {
-        await reconciler.reconcile(sessionId).catch(() => {});
-      }
-      await connector.close().catch(() => {});
-      await gateway?.close().catch(() => {});
-    } finally {
+    if (route !== undefined) {
+      stack.route = route;
+    }
+    if (identity !== undefined) {
+      stack.identity = identity;
+    }
+    if (enrollInvite !== undefined) {
+      stack.enrollInvite = enrollInvite;
+    }
+    if (publicBaseUrl !== undefined) {
+      stack.publicBaseUrl = publicBaseUrl;
+    }
+    stateOwnedByStack = true;
+    return stack;
+  } catch (error) {
+    if (!stateOwnedByStack) {
       state?.close();
     }
-  };
-  const stack: ProvisioningStack = {
-    ready: session.recoveryComplete(),
-    close,
-    bridge,
-    lifecycle,
-    reconciler,
-    registry,
-    entrypoint,
-    capability,
-    task,
-    session,
-    connector,
-    authModule,
-  };
-  // Slice 4b: expose the handoff pipeline handles when wired (so a test/caller can drive the gateway/route/identity).
-  if (gateway !== undefined) {
-    stack.gateway = gateway;
+    throw error;
   }
-  if (route !== undefined) {
-    stack.route = route;
-  }
-  if (identity !== undefined) {
-    stack.identity = identity;
-  }
-  if (enrollInvite !== undefined) {
-    stack.enrollInvite = enrollInvite;
-  }
-  if (publicBaseUrl !== undefined) {
-    stack.publicBaseUrl = publicBaseUrl;
-  }
-  return stack;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -940,7 +1021,7 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
         expectedOrigin: opts.expectedOrigin,
       },
       undefined,
-      authDependencyEvidence(
+      providerDependencyEvidence(
         opts.authProvider ?? AUTH_WEBAUTHN_PROVIDER_ID,
         opts.dependencyBindings,
       ),

@@ -14,6 +14,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
+import type {
+  LauncherPort,
+  MountCapability,
+  MountSpec,
+  PartRef,
+  ResolvedAssemblySpec,
+  RuntimeHandle,
+  WorkspaceHandle,
+  WorkspacePort,
+} from "@gla/kernel";
+import type { GlaProviderModule } from "@gla/provider-host";
+import { createReferenceProviderHost } from "@gla/provider-set-reference";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
 import { createProvisioningBridge } from "./index.js";
@@ -55,6 +67,11 @@ function workspaceRoot(): string {
   scratchDirs.push(dir);
   return dir;
 }
+function stateRoot(): string {
+  const dir = mkdtempSync(join(tmpdir(), "gla-prov-state-"));
+  scratchDirs.push(dir);
+  return dir;
+}
 afterAll(() => {
   for (const d of scratchDirs) {
     rmSync(d, { recursive: true, force: true });
@@ -74,7 +91,155 @@ function chromiumAvailable(): boolean {
 }
 const HAVE_CHROMIUM = chromiumAvailable();
 
+interface FakeRuntimeRecords {
+  spawned: string[];
+  stopped: RuntimeHandle[];
+  realized: string[];
+  reaped: WorkspaceHandle[];
+}
+
+const FAKE_MOUNT_CAPABILITY: MountCapability = {
+  file: true,
+  directory: true,
+  modes: ["ro", "rw"],
+};
+
+function fakeRuntimeSpec(): ResolvedAssemblySpec {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "Assembly",
+    metadata: { intent: "fake-provider-proof" },
+    spec: {
+      template: "browser-handoff",
+      recipient: "tg:user:123" as never,
+      launcher: { use: "launcher-fake" },
+      workspace: { use: "workspace-fake" },
+    },
+    __resolved: true,
+  };
+}
+
+function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
+  class FakeLauncher implements LauncherPort {
+    readonly tier = "local-process" as const;
+    readonly mountCapability = FAKE_MOUNT_CAPABILITY;
+
+    async spawn(spec: ResolvedAssemblySpec): Promise<RuntimeHandle> {
+      records.spawned.push(spec.spec.launcher?.use ?? "default");
+      return JSON.stringify({ provider: "launcher-fake", endpoints: [] }) as RuntimeHandle;
+    }
+
+    async health(_handle: RuntimeHandle): Promise<"up" | "down"> {
+      return "up";
+    }
+
+    async stop(handle: RuntimeHandle): Promise<void> {
+      records.stopped.push(handle);
+    }
+  }
+
+  class FakeWorkspace implements WorkspacePort {
+    async realize(
+      strategy: PartRef,
+      _mounts: MountSpec[],
+      _asUid: number,
+    ): Promise<WorkspaceHandle> {
+      records.realized.push(strategy.use);
+      return JSON.stringify({ provider: "workspace-fake" }) as WorkspaceHandle;
+    }
+
+    async reap(handle: WorkspaceHandle): Promise<void> {
+      records.reaped.push(handle);
+    }
+  }
+
+  return [
+    {
+      manifest: {
+        apiVersion: "gla.dev/v1",
+        kind: "Launcher",
+        metadata: { name: "launcher-fake", version: "0.1.0" },
+        spec: {
+          family: "launcher",
+          capability: {
+            summary: "fake launcher selected through Provider Host",
+            mounts: { host_paths: ["file", "directory"], modes: ["ro", "rw"] },
+          },
+          probe: "launcher-fake",
+        },
+      },
+      register(ctx) {
+        ctx.registerLauncher("launcher-fake", { create: () => new FakeLauncher() });
+        ctx.registerProbe("launcher-fake", () => "available");
+      },
+    },
+    {
+      manifest: {
+        apiVersion: "gla.dev/v1",
+        kind: "Workspace",
+        metadata: { name: "workspace-fake", version: "0.1.0" },
+        spec: {
+          family: "workspace",
+          capability: { summary: "fake workspace selected through Provider Host" },
+          probe: "workspace-fake",
+        },
+      },
+      register(ctx) {
+        ctx.registerWorkspace("workspace-fake", { create: () => new FakeWorkspace() });
+        ctx.registerProbe("workspace-fake", () => "available");
+      },
+    },
+  ];
+}
+
 describe("provisioning composition root — real `session create` + `session connector` (Slice 3)", () => {
+  it("refuses the default host-touching launcher without WPM browser-runtime evidence", () => {
+    expect(() => createProvisioningBridge({ launcherMode: "headless" })).toThrow(
+      /launcher-process.*unavailable dependencies|browser-runtime/i,
+    );
+  });
+
+  it("releases daemon state lock when provider dependency validation fails during startup", async () => {
+    const root = stateRoot();
+
+    expect(() => createProvisioningBridge({ stateRoot: root, launcherMode: "headless" })).toThrow(
+      /launcher-process.*unavailable dependencies|browser-runtime/i,
+    );
+
+    const stack = createProvisioningBridge({
+      stateRoot: root,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      launcherMode: "headless",
+    });
+    await stack.close();
+  });
+
+  it("selects fake launcher and workspace providers through Provider Host without worker/core changes", async () => {
+    const records: FakeRuntimeRecords = { spawned: [], stopped: [], realized: [], reaped: [] };
+    const providerHost = createReferenceProviderHost();
+    for (const module of fakeProviderModules(records)) {
+      providerHost.registerModule(module);
+    }
+
+    const stack = createProvisioningBridge({
+      providerHost,
+      launcherProvider: "launcher-fake",
+      workspaceProvider: "workspace-fake",
+    });
+    expect(stack.bridge.catalogList().map((entity) => entity.name)).toEqual(
+      expect.arrayContaining(["launcher-fake", "workspace-fake"]),
+    );
+
+    const spawned = await stack.lifecycle.spawn("sess_fake", fakeRuntimeSpec());
+    expect(spawned.launcherName).toBe("launcher-fake");
+    expect(records.spawned).toEqual(["launcher-fake"]);
+    expect(records.realized).toEqual(["workspace-fake"]);
+
+    await stack.lifecycle.teardown("sess_fake");
+    expect(records.stopped).toHaveLength(1);
+    expect(records.reaped).toHaveLength(1);
+  });
+
   it.runIf(HAVE_CHROMIUM)(
     "PROVISIONS a live capsule (exit 0) and re-emits the connector; conflict after teardown (exit 7)",
     async () => {

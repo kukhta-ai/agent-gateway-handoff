@@ -22,23 +22,26 @@ import {
   type StoreContent,
 } from "@gla/catalog";
 import {
+  CHANNEL_CLI_MODULE,
   ChannelCli,
   type DeliverySink,
   type InboundSource,
   deliveryToStdout,
 } from "@gla/channel-cli";
-import { ConnectorCdpAdapter } from "@gla/connector-cdp";
-import { DetectorUrlAdapter } from "@gla/detector-url";
-import { EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
+import { CONNECTOR_CDP_MODULE, ConnectorCdpAdapter } from "@gla/connector-cdp";
+import { DETECTOR_URL_MODULE, DetectorUrlAdapter } from "@gla/detector-url";
+import { ENTRYPOINT_NOVNC_MODULE, EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
 import type {
   AuthProviderPort,
   CompletionDetectorPort,
   ConfigSchema,
   IdentityPort,
+  LauncherPort,
   RawCompletionSignal,
   RuntimeHandle,
+  WorkspacePort,
 } from "@gla/kernel";
-import { LauncherProcessAdapter } from "@gla/launcher-process";
+import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { ProviderHost } from "@gla/provider-host";
 import type {
   CreateProviderOptions,
@@ -49,7 +52,7 @@ import type {
   ProviderRegistrationContext,
   ProviderStateRoot,
 } from "@gla/provider-host";
-import { WorkspaceProfileAdapter } from "@gla/workspace-profile";
+import { WORKSPACE_PROFILE_MODULE, WorkspaceProfileAdapter } from "@gla/workspace-profile";
 
 /** Stable package-identity marker. */
 export const PROVIDER_SET_REFERENCE_MODULE = "@gla/provider-set-reference" as const;
@@ -57,6 +60,10 @@ export const PROVIDER_SET_REFERENCE_MODULE = "@gla/provider-set-reference" as co
 export const AUTH_WEBAUTHN_PROVIDER_ID = "webauthn" as const;
 /** Provider id for the delegated authentik auth provider. */
 export const AUTH_AUTHENTIK_PROVIDER_ID = "authentik" as const;
+/** Provider id for the reference local-process launcher. */
+export const LAUNCHER_PROCESS_PROVIDER_ID = "launcher-process" as const;
+/** Provider id for the reference ephemeral browser-profile workspace. */
+export const WORKSPACE_PROFILE_PROVIDER_ID = "workspace-profile" as const;
 
 /** Provider-owned auth config values keyed by the selected provider's schema. */
 export type ReferenceAuthProviderConfig = Record<string, unknown>;
@@ -78,6 +85,46 @@ export interface ReferenceAuthProviderCreateResult {
   providerId: ProviderId;
   module: string;
   provider: AuthProviderPort;
+}
+
+/** Provider-owned launcher config values keyed by the selected provider's schema. */
+export type ReferenceLauncherProviderConfig = Record<string, unknown>;
+
+/** Inputs for creating a reference launcher provider through Provider Host. */
+export interface ReferenceLauncherProviderCreateOptions {
+  /** Opaque launcher provider id. Defaults to {@link LAUNCHER_PROCESS_PROVIDER_ID}. */
+  providerId?: ProviderId;
+  /** Provider-owned config validated against the provider's registered schema. */
+  config?: ReferenceLauncherProviderConfig;
+  /** WPM/catalog dependency evidence required by host-touching launcher providers. */
+  dependencyBindings?: CreateProviderOptions["dependencyBindings"];
+}
+
+/** Result of creating a reference launcher provider through Provider Host. */
+export interface ReferenceLauncherProviderCreateResult {
+  providerId: ProviderId;
+  module: string;
+  provider: LauncherPort;
+}
+
+/** Provider-owned workspace config values keyed by the selected provider's schema. */
+export type ReferenceWorkspaceProviderConfig = Record<string, unknown>;
+
+/** Inputs for creating a reference workspace provider through Provider Host. */
+export interface ReferenceWorkspaceProviderCreateOptions {
+  /** Opaque workspace provider id. Defaults to {@link WORKSPACE_PROFILE_PROVIDER_ID}. */
+  providerId?: ProviderId;
+  /** Provider-owned config validated against the provider's registered schema. */
+  config?: ReferenceWorkspaceProviderConfig;
+  /** WPM/catalog dependency evidence required by host-touching workspace providers. */
+  dependencyBindings?: CreateProviderOptions["dependencyBindings"];
+}
+
+/** Result of creating a reference workspace provider through Provider Host. */
+export interface ReferenceWorkspaceProviderCreateResult {
+  providerId: ProviderId;
+  module: string;
+  provider: WorkspacePort;
 }
 
 function requiredString(ctx: ProviderCreateContext, field: string): string {
@@ -258,9 +305,23 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
   moduleFor(providerManifest("launcher-process"), (id, ctx) => {
     ctx.registerLauncher(id, {
       create(createCtx) {
+        const configuredMode = optionalString(createCtx, "mode");
         const headless = createCtx.config.headless;
-        const mode = headless === true ? "headless" : headless === false ? "full" : "auto";
-        return new LauncherProcessAdapter({ mode });
+        const mode =
+          configuredMode === "headless" || configuredMode === "full" || configuredMode === "auto"
+            ? configuredMode
+            : headless === true
+              ? "headless"
+              : headless === false
+                ? "full"
+                : "auto";
+        const chromiumPath = optionalString(createCtx, "chromiumPath");
+        const startTimeoutMs = optionalNumber(createCtx, "startTimeoutMs");
+        return new LauncherProcessAdapter({
+          mode,
+          ...(chromiumPath !== undefined ? { chromiumPath } : {}),
+          ...(startTimeoutMs !== undefined ? { startTimeoutMs } : {}),
+        });
       },
     });
   }),
@@ -316,6 +377,33 @@ export function referenceAuthModuleForProviderId(providerId: ProviderId): string
   return providerId;
 }
 
+/** Return the adapter module marker associated with a reference provider id. */
+export function referenceProviderModuleForProviderId(providerId: ProviderId): string {
+  const authModule = referenceAuthModuleForProviderId(providerId);
+  if (authModule !== providerId) {
+    return authModule;
+  }
+  if (providerId === LAUNCHER_PROCESS_PROVIDER_ID) {
+    return LAUNCHER_PROCESS_MODULE;
+  }
+  if (providerId === WORKSPACE_PROFILE_PROVIDER_ID) {
+    return WORKSPACE_PROFILE_MODULE;
+  }
+  if (providerId === "entrypoint-novnc") {
+    return ENTRYPOINT_NOVNC_MODULE;
+  }
+  if (providerId === "connector-cdp") {
+    return CONNECTOR_CDP_MODULE;
+  }
+  if (providerId === "url-watcher") {
+    return DETECTOR_URL_MODULE;
+  }
+  if (providerId === "channel-cli") {
+    return CHANNEL_CLI_MODULE;
+  }
+  return providerId;
+}
+
 /** Build the trusted reference Provider Host from today's in-tree provider modules. */
 export function createReferenceProviderHost(opts: ProviderHostOptions = {}): ProviderHost {
   return new ProviderHost(opts).registerModules(referenceProviderModules);
@@ -337,6 +425,36 @@ export function createReferenceAuthProvider(
       : {}),
   });
   return { providerId, module: referenceAuthModuleForProviderId(providerId), provider };
+}
+
+/** Create a reference launcher through Provider Host. */
+export function createReferenceLauncherProvider(
+  opts: ReferenceLauncherProviderCreateOptions = {},
+): ReferenceLauncherProviderCreateResult {
+  const providerId = opts.providerId ?? LAUNCHER_PROCESS_PROVIDER_ID;
+  const host = createReferenceProviderHost();
+  const provider = host.createProviderSync("launcher", providerId, {
+    config: opts.config ?? {},
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
+  });
+  return { providerId, module: referenceProviderModuleForProviderId(providerId), provider };
+}
+
+/** Create a reference workspace through Provider Host. */
+export function createReferenceWorkspaceProvider(
+  opts: ReferenceWorkspaceProviderCreateOptions = {},
+): ReferenceWorkspaceProviderCreateResult {
+  const providerId = opts.providerId ?? WORKSPACE_PROFILE_PROVIDER_ID;
+  const host = createReferenceProviderHost();
+  const provider = host.createProviderSync("workspace", providerId, {
+    config: opts.config ?? {},
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
+  });
+  return { providerId, module: referenceProviderModuleForProviderId(providerId), provider };
 }
 
 /** Catalog store content derived from Provider Host registration data, not parallel app tables. */

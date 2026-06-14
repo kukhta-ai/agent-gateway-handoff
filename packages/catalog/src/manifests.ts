@@ -271,7 +271,16 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         mounts: { host_paths: ["file", "directory"], modes: ["ro", "rw"] },
       },
       config_schema: {
-        headless: { type: "bool", required: false, default: true },
+        mode: {
+          type: "enum",
+          required: false,
+          default: "auto",
+          enum: ["auto", "headless", "full"],
+          conflicts_with: ["headless"],
+        },
+        headless: { type: "bool", required: false, conflicts_with: ["mode"] },
+        chromiumPath: { type: "string", required: false, min: 1 },
+        startTimeoutMs: { type: "number", required: false, min: 1 },
       },
       // The browser-runtime host dependency (GLA-007 stands it up via WPM); not seeded as bound.
       requires: [
@@ -356,6 +365,9 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     spec: {
       family: "workspace",
       capability: { summary: "ephemeral browser-profile-temp workspace (wiped at reap)" },
+      config_schema: {
+        root: { type: "string", required: false, min: 1 },
+      },
       // In-tree, no host dependency to stand up.
       probe: "workspace-profile",
     },

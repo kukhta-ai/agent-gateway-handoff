@@ -518,6 +518,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         port: 0,
         bridgeEndpoint: sock,
         publicBaseUrl: "https://203.0.113.10/",
+        dependencyBindings: referenceWpmDependencyBindings(),
         log: () => {},
       }),
     ).rejects.toThrow(/runtime directory|group\/other write|pre-create|replace/i);
@@ -533,6 +534,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         port: 0,
         bridgeEndpoint: symlinkEndpoint,
         publicBaseUrl: "https://203.0.113.10/",
+        dependencyBindings: referenceWpmDependencyBindings(),
         log: () => {},
       }),
     ).rejects.toThrow(/symlink/i);
@@ -549,6 +551,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         port: 0,
         bridgeEndpoint: join(linkedParent, "gla.sock"),
         publicBaseUrl: "https://203.0.113.10/",
+        dependencyBindings: referenceWpmDependencyBindings(),
         log: () => {},
       }),
     ).rejects.toThrow(/parent path component|symlink/i);
@@ -562,6 +565,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         port: 0,
         bridgeEndpoint: regularEndpoint,
         publicBaseUrl: "https://203.0.113.10/",
+        dependencyBindings: referenceWpmDependencyBindings(),
         log: () => {},
       }),
     ).rejects.toThrow(/not a Unix socket|regular file/i);
@@ -576,6 +580,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         port: 0,
         bridgeEndpoint: directoryEndpoint,
         publicBaseUrl: "https://203.0.113.10/",
+        dependencyBindings: referenceWpmDependencyBindings(),
         log: () => {},
       }),
     ).rejects.toThrow(/directory/i);
@@ -593,6 +598,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
           port: 0,
           bridgeEndpoint: activeEndpoint,
           publicBaseUrl: "https://203.0.113.10/",
+          dependencyBindings: referenceWpmDependencyBindings(),
           log: () => {},
         }),
       ).rejects.toThrow(/already accepts connections|owning daemon/i);
@@ -628,6 +634,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         port: 0,
         bridgeEndpoint: join(dir, "gla.sock"),
         publicBaseUrl: "https://203.0.113.10/",
+        dependencyBindings: referenceWpmDependencyBindings(),
         log: () => {},
       }),
     ).rejects.toThrow(/owned by uid 65534|daemon uid/i);
