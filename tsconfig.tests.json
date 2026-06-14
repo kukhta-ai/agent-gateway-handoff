@@ -1,0 +1,24 @@
+{
+  "//": "Strict no-emit typecheck for tests outside production build roots. Production packages keep rootDir=src/outDir=dist; this config keeps package-local tests first-class in the quality gate without emitting them.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": [
+    "packages/**/*.test.ts",
+    "packages/**/test/**/*.ts",
+    "adapters/**/*.test.ts",
+    "adapters/**/test/**/*.ts",
+    "surfaces/**/*.test.ts",
+    "surfaces/**/test/**/*.ts",
+    "tools/**/*.test.ts",
+    "tests/**/*.test.ts"
+  ],
+  "exclude": ["**/dist/**", "**/node_modules/**"]
+}

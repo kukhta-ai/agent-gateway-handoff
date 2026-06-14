@@ -26,5 +26,15 @@
     "isolatedModules": true,
     "esModuleInterop": true,
     "skipLibCheck": true
-  }
+  },
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/test/**",
+    "**/tests/**",
+    "**/__fixtures__/**",
+    "**/fixtures/**",
+    "**/dist/**",
+    "**/node_modules/**"
+  ]
 }

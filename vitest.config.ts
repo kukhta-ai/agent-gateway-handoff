@@ -8,6 +8,7 @@ export default defineConfig({
       "surfaces/**/*.test.ts",
       "adapters/**/*.test.ts",
       "tools/**/*.test.ts",
+      "tests/**/*.test.ts",
     ],
     exclude: ["**/node_modules/**", "**/dist/**"],
     // The boundary test shells out to Biome (a real subprocess) — give it headroom.

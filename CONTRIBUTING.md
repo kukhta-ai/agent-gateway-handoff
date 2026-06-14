@@ -16,7 +16,7 @@ the rest of the process (pre-commit, CI, the backlog Definition of Done) refers 
 
 The quality gate is the **single, named set of checks** that defines "this change is acceptable." It runs in
 three places and must be **identical** in all three — there is no separate, stricter CI-only bar. The one
-documented entrypoint is the root **`pnpm gate`** script (it runs the three checks below, in order, stopping
+documented entrypoint is the root **`pnpm gate`** script (it runs the four checks below, in order, stopping
 at the first failure):
 
 ```bash
@@ -30,7 +30,7 @@ Its four checks:
 
 | Check | Command (also runs standalone) | What it asserts |
 |---|---|---|
-| **Build / type-check** | `pnpm run typecheck` (`tsc -b`) | every workspace package compiles / type-checks with no errors, from a clean checkout |
+| **Build / type-check** | `pnpm run typecheck` (`clean:dist`, `tsc -b`, `tsc -p tsconfig.tests.json --noEmit`, `check:dist-layout`) | every workspace package compiles from runtime `src` roots, package-local/app/top-level tests outside `src` type-check with the same strict settings, and production `dist` contains no tests or fixtures |
 | **Lint + format** | `biome ci .` (or `pnpm run lint`) | Biome style + static-analysis rules pass, including the generic module-boundary rule (`noRestrictedImports`) used by the boundary selftest |
 | **Browser E2E preflight** | `pnpm run test:e2e:preflight` | Playwright Chromium is installed, executable, and launchable; full human-view binaries (`Xvfb`, `x11vnc`, `websockify`) and browser-backed E2E fixture files are present; absence is a gate failure, not a skipped pass |
 | **Tests** | `vitest run` (or `pnpm test`) | the suite is green — unit for pure logic, contract/integration tests, browser-backed E2Es, and boundary tests that prove forbidden adapter imports/dependencies are rejected |
