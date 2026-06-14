@@ -2,6 +2,7 @@
 // This package is allowed to import today's concrete adapters because it is a selected provider set,
 // not the neutral host and not narrow-waist core. App migration later imports this set as one opaque list.
 
+import { randomUUID } from "node:crypto";
 import {
   AUTH_AUTHENTIK_MODULE,
   AuthAuthentikProvider,
@@ -43,13 +44,18 @@ import {
 } from "@gla/entrypoint-novnc";
 import type {
   AuthProviderPort,
+  ChannelPort,
   CompletionDetectorPort,
   ConfigSchema,
   HumanEntrypointPort,
   IdentityPort,
+  InjectionTarget,
   LauncherPort,
   RawCompletionSignal,
+  Ref,
   RuntimeHandle,
+  SecretStorePort,
+  SecretValue,
   WorkspacePort,
 } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
@@ -60,6 +66,7 @@ import type {
   ProviderCreateContext,
   ProviderHostOptions,
   ProviderId,
+  ProviderKvStore,
   ProviderRegistrationContext,
   ProviderStateRoot,
 } from "@gla/provider-host";
@@ -83,6 +90,10 @@ export const CONNECTOR_CDP_PROVIDER_ID = "connector-cdp" as const;
 export const DETECTOR_URL_PROVIDER_ID = "url-watcher" as const;
 /** Provider id for the reference explicit user-done completion detector. */
 export const DETECTOR_USER_DONE_PROVIDER_ID = "user-done" as const;
+/** Provider id for the reference in-tree SecretStore provider. */
+export const SECRET_STORE_REFERENCE_PROVIDER_ID = "secret-store-reference" as const;
+/** Provider id for the reference CLI channel provider. */
+export const CHANNEL_CLI_PROVIDER_ID = "channel-cli" as const;
 
 /** Provider-owned auth config values keyed by the selected provider's schema. */
 export type ReferenceAuthProviderConfig = Record<string, unknown>;
@@ -166,6 +177,50 @@ export interface ReferenceEntrypointProviderCreateResult {
   provider: HumanEntrypointPort;
 }
 
+/** Provider-owned channel config values keyed by the selected provider's schema. */
+export type ReferenceChannelProviderConfig = Record<string, unknown>;
+
+/** Inputs for creating a reference channel provider through Provider Host. */
+export interface ReferenceChannelProviderCreateOptions {
+  /** Opaque channel provider id. Defaults to {@link CHANNEL_CLI_PROVIDER_ID}. */
+  providerId?: ProviderId;
+  /** Provider-owned config validated against the provider's registered schema. */
+  config?: ReferenceChannelProviderConfig;
+  /** WPM/catalog dependency evidence required by host-touching channel providers. */
+  dependencyBindings?: CreateProviderOptions["dependencyBindings"];
+  /** Non-provider services needed by the selected channel provider, such as IdentityPort. */
+  services?: CreateProviderOptions["services"];
+}
+
+/** Result of creating a reference channel provider through Provider Host. */
+export interface ReferenceChannelProviderCreateResult {
+  providerId: ProviderId;
+  module: string;
+  provider: ChannelPort;
+}
+
+/** Provider-owned SecretStore config values keyed by the selected provider's schema. */
+export type ReferenceSecretStoreProviderConfig = Record<string, unknown>;
+
+/** Inputs for creating a reference SecretStore provider through Provider Host. */
+export interface ReferenceSecretStoreProviderCreateOptions {
+  /** Opaque SecretStore provider id. Defaults to {@link SECRET_STORE_REFERENCE_PROVIDER_ID}. */
+  providerId?: ProviderId;
+  /** Provider-owned config validated against the provider's registered schema. */
+  config?: ReferenceSecretStoreProviderConfig;
+  /** Provider Host state root used for provider-owned secret-ref indexes. */
+  stateRoot?: ProviderStateRoot;
+  /** WPM/catalog dependency evidence required by host-touching SecretStore providers. */
+  dependencyBindings?: CreateProviderOptions["dependencyBindings"];
+}
+
+/** Result of creating a reference SecretStore provider through Provider Host. */
+export interface ReferenceSecretStoreProviderCreateResult {
+  providerId: ProviderId;
+  module: string;
+  provider: SecretStorePort;
+}
+
 function requiredString(ctx: ProviderCreateContext, field: string): string {
   const value = ctx.config[field];
   if (typeof value !== "string" || value.length === 0) {
@@ -233,6 +288,37 @@ class UserDoneDetectorAdapter implements CompletionDetectorPort {
   ): AsyncIterable<RawCompletionSignal> {}
 }
 
+interface StoredReferenceSecret {
+  value: SecretValue;
+  audience: string;
+}
+
+interface SecretInjectionReceiver {
+  injectSecret?(ref: Ref<"secret-ref">, value: SecretValue): void | Promise<void>;
+}
+
+class ReferenceSecretStore implements SecretStorePort {
+  constructor(
+    private readonly refs: ProviderKvStore<StoredReferenceSecret>,
+    private readonly namespace: string,
+  ) {}
+
+  async put(value: SecretValue, audience: string): Promise<Ref<"secret-ref">> {
+    const ref = `secret:gla/${this.namespace}/${randomUUID()}` as Ref<"secret-ref">;
+    this.refs.set(ref, { value, audience });
+    return ref;
+  }
+
+  async injectInto(ref: Ref<"secret-ref">, target: InjectionTarget): Promise<void> {
+    const stored = this.refs.get(ref);
+    if (stored === undefined) {
+      throw new Error("secret reference is not known to this provider");
+    }
+    const receiver = target as SecretInjectionReceiver;
+    await receiver.injectSecret?.(ref, stored.value);
+  }
+}
+
 export const AUTH_WEBAUTHN_PROVIDER_MANIFEST: ProviderManifest = {
   apiVersion: "gla.dev/v1",
   kind: "AuthProvider",
@@ -293,6 +379,37 @@ export const AUTH_AUTHENTIK_PROVIDER_MANIFEST: ProviderManifest = {
         id: "use-auth-authentik",
         for: "authentik",
         body: "# use-auth-authentik\nUse delegated authentik OIDC through the AuthProviderPort.",
+      },
+    ],
+  },
+};
+
+/** The reference in-tree SecretStore provider manifest. */
+export const SECRET_STORE_REFERENCE_MANIFEST: ProviderManifest = {
+  apiVersion: "gla.dev/v1",
+  kind: "SecretStore",
+  metadata: { name: SECRET_STORE_REFERENCE_PROVIDER_ID, version: "0.1.0" },
+  spec: {
+    family: "secret-store",
+    capability: {
+      summary: "in-tree SecretStore for tests and single-process reference deployments",
+      diagnostics: "secret-ref-only",
+    },
+    config_schema: {
+      namespace: { type: "string", required: false, min: 1 },
+    },
+    probe: "secret-store-reference",
+    skills: [
+      {
+        id: "use-secret-store-reference",
+        for: SECRET_STORE_REFERENCE_PROVIDER_ID,
+        body: [
+          "# use-secret-store-reference",
+          "",
+          "Use the in-tree SecretStore only through SecretStorePort. Store raw values with `put`,",
+          "pass only returned `secret:` refs across agent-visible seams, and keep diagnostics",
+          "secret-ref-only.",
+        ].join("\n"),
       },
     ],
   },
@@ -398,13 +515,44 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
     ctx.registerChannel(id, {
       create(createCtx) {
         const identity = createCtx.services.require<IdentityPort>("identity");
-        const source = createCtx.services.get<InboundSource>("channelCli.source");
-        const sink = createCtx.services.get<DeliverySink>("channelCli.sink") ?? deliveryToStdout;
+        const sourceService =
+          createCtx.services.get<InboundSource>("channel.source") ??
+          createCtx.services.get<InboundSource>("channelCli.source");
+        const sinkService =
+          createCtx.services.get<DeliverySink>("channel.sink") ??
+          createCtx.services.get<DeliverySink>("channelCli.sink");
+        const inbound = optionalString(createCtx, "inbound");
+        const delivery = optionalString(createCtx, "delivery");
+        if (inbound === "injected" && sourceService === undefined) {
+          throw new Error(
+            'channel-cli config inbound="injected" requires service "channel.source"',
+          );
+        }
+        if (delivery === "injected" && sinkService === undefined) {
+          throw new Error('channel-cli config delivery="injected" requires service "channel.sink"');
+        }
+        const source = inbound === "memory" ? undefined : sourceService;
+        const sink = delivery === "stdout" ? deliveryToStdout : (sinkService ?? deliveryToStdout);
         return new ChannelCli({
           identity,
           ...(source !== undefined ? { source } : {}),
           sink,
         });
+      },
+    });
+  }),
+  moduleFor(SECRET_STORE_REFERENCE_MANIFEST, (id, ctx) => {
+    ctx.registerSecretStore(id, {
+      create(createCtx) {
+        return new ReferenceSecretStore(
+          createCtx.state.kv<StoredReferenceSecret>("refs"),
+          optionalString(createCtx, "namespace") ?? "reference",
+        );
+      },
+    });
+    ctx.registerStateSchema(id, {
+      slots: {
+        refs: { sensitive: true, summary: "opaque secret refs mapped to raw agent-blind values" },
       },
     });
   }),
@@ -442,8 +590,11 @@ export function referenceProviderModuleForProviderId(providerId: ProviderId): st
   if (providerId === DETECTOR_URL_PROVIDER_ID) {
     return DETECTOR_URL_MODULE;
   }
-  if (providerId === "channel-cli") {
+  if (providerId === CHANNEL_CLI_PROVIDER_ID) {
     return CHANNEL_CLI_MODULE;
+  }
+  if (providerId === SECRET_STORE_REFERENCE_PROVIDER_ID) {
+    return PROVIDER_SET_REFERENCE_MODULE;
   }
   return providerId;
 }
@@ -509,6 +660,40 @@ export function createReferenceEntrypointProvider(
   const host = createReferenceProviderHost();
   const provider = host.createProviderSync("entrypoint", providerId, {
     config: opts.config ?? {},
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
+  });
+  return { providerId, module: referenceProviderModuleForProviderId(providerId), provider };
+}
+
+/** Create a reference channel provider through Provider Host. */
+export function createReferenceChannelProvider(
+  opts: ReferenceChannelProviderCreateOptions = {},
+): ReferenceChannelProviderCreateResult {
+  const providerId = opts.providerId ?? CHANNEL_CLI_PROVIDER_ID;
+  const host = createReferenceProviderHost();
+  const provider = host.createProviderSync("channel", providerId, {
+    config: opts.config ?? {},
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
+    ...(opts.services !== undefined ? { services: opts.services } : {}),
+  });
+  return { providerId, module: referenceProviderModuleForProviderId(providerId), provider };
+}
+
+/** Create a reference SecretStore provider through Provider Host. */
+export function createReferenceSecretStoreProvider(
+  opts: ReferenceSecretStoreProviderCreateOptions = {},
+): ReferenceSecretStoreProviderCreateResult {
+  const providerId = opts.providerId ?? SECRET_STORE_REFERENCE_PROVIDER_ID;
+  const host = createReferenceProviderHost(
+    opts.stateRoot !== undefined ? { stateRoot: opts.stateRoot } : {},
+  );
+  const provider = host.createProviderSync("secret-store", providerId, {
+    config: opts.config ?? {},
+    ...(opts.stateRoot !== undefined ? { stateRoot: opts.stateRoot } : {}),
     ...(opts.dependencyBindings !== undefined
       ? { dependencyBindings: opts.dependencyBindings }
       : {}),

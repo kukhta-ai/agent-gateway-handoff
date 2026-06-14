@@ -21,7 +21,6 @@ import { type IncomingMessage, type Server, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { AuthWebauthnProvider } from "@gla/auth-webauthn";
 import { CapabilityService } from "@gla/capability";
-import { ChannelCli, type DeliverySink } from "@gla/channel-cli";
 import { AccessGateway } from "@gla/gateway";
 import { IdentityService } from "@gla/identity";
 import type {
@@ -31,10 +30,13 @@ import type {
   SessionId,
   TaskId,
 } from "@gla/kernel";
+import { providerServices } from "@gla/provider-host";
+import { createReferenceChannelProvider } from "@gla/provider-set-reference";
 import { RouteController } from "@gla/route";
 import { type HandoffDeps, SessionService } from "@gla/session";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
+import type { DeliverySink } from "./index.js";
 
 function chromiumAvailable(): boolean {
   if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
@@ -188,7 +190,9 @@ async function startHandoffStack(upstreamEndpoint: string): Promise<{
   const capability = new CapabilityService();
   const links: string[] = [];
   const sink: DeliverySink = { write: (l) => links.push(l) };
-  const channel = new ChannelCli({ identity, sink });
+  const channel = createReferenceChannelProvider({
+    services: providerServices({ identity, "channel.sink": sink }),
+  }).provider;
   // The gateway: BOTH the enrollment seams (so we can enroll) AND the handoff seams (grant verify + step-up).
   const gateway = new AccessGateway({
     grants: capability,

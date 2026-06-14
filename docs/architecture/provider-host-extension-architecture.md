@@ -153,6 +153,24 @@ Security constraints:
 - Ambiguous provider evidence must fail closed or degrade to the lowest safe assurance at the adapter boundary; the
   gateway must not learn provider-specific evidence names.
 
+Channel adapters and SecretStore providers share the same registration path, but they do not have the same trust
+surface:
+
+- A **channel adapter** is a delivery provider. It may need non-secret operator config, external dependency receipts,
+  and runtime services such as `IdentityPort` or a local delivery sink. It must preserve recipient binding and never
+  widen delivery beyond the bound recipient. Secrets used by real channels, such as bot tokens, are supplied as
+  secret refs or resolver inputs, not catalog literals.
+- A **SecretStore provider** is a secret-bearing provider. Its public outputs are opaque `secret:` refs and redacted
+  diagnostics only. Its state schema is sensitive by default because provider-owned slots may map refs to raw
+  agent-blind values. Catalog entries may describe config/state/probe capabilities, but they must not expose raw
+  stored values, bootstrap secrets, or resolved dependency secrets.
+
+To add a new channel or SecretStore provider, a developer adds a provider module to the selected provider set. The
+module supplies a manifest, config schema, probe, optional state schema, skills/docs, and a factory registered with
+`registerChannel` or `registerSecretStore`. `packages/app` selects only the provider id and provider-owned config;
+kernel, gateway, session, identity, capability, bridge, and worker core packages must not be edited for a new
+provider in either family.
+
 ## 6. Non-goals
 
 - No public plugin ABI in this migration.
@@ -171,7 +189,9 @@ Security constraints:
 3. **Capsule runtime migration.** Move launcher, workspace, human entrypoint, agent connector, and completion
    detector wiring behind the host. Preserve the provider-neutral resource descriptors from GLA-088.
 4. **Channel and SecretStore migration.** Make channel adapters host-registered and introduce secret-store provider
-   registration before real external secret stores are added.
+   registration before real external secret stores are added. The reference provider set carries `channel-cli` as
+   the default `channel` provider and a minimal in-tree `secret-store-reference` provider; both are selected by
+   provider id through Provider Host rather than by app-owned adapter construction.
 5. **Public-edge and template alignment.** Keep edge as dependency/transport binding and templates as declarative
    catalog composition, but ensure both derive compatibility and availability from provider-host state rather than
    duplicate static tables.

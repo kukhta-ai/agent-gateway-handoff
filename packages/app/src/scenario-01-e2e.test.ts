@@ -35,12 +35,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthWebauthnProvider } from "@gla/auth-webauthn";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
-import {
-  ChannelCli,
-  type DeliverySink,
-  InMemoryInbound,
-  type InboundMessage,
-} from "@gla/channel-cli";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { IdentityService } from "@gla/identity";
 import {
@@ -54,11 +48,13 @@ import {
   type TaskId,
   decodeRuntimeHandle,
 } from "@gla/kernel";
+import { providerServices } from "@gla/provider-host";
+import { createReferenceChannelProvider } from "@gla/provider-set-reference";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
 // @ts-expect-error — plain ESM helper shared with the gate:selftest (no .d.ts; runtime-only). AC#5.
 import { checkBoundary } from "../../../tools/boundary-check/check-boundary.mjs";
-import type { ProvisioningStack } from "./index.js";
+import type { DeliverySink, ProvisioningStack } from "./index.js";
 import { createProvisioningBridge } from "./index.js";
 
 // ── The KNOWN secrets the "human" types via the human path. Each MUST appear in ZERO agent-readable
@@ -67,6 +63,23 @@ const KNOWN_PASSWORD = "S3cr3t-Passw0rd-Zx9Q-CAPSTONE-AGENTMUSTNOTSEE";
 const KNOWN_CODE = "VERIFY-CODE-7Q2X-CAPSTONE-AGENTMUSTNOTSEE";
 const recipient = "tg:user:123" as RecipientRef;
 const wrongRecipient = "tg:user:999" as RecipientRef; // S-1/S-10: a DIFFERENT recipient (forwarded link is useless)
+
+interface InboundMessage {
+  recipientRef: RecipientRef;
+  text: string;
+  chatContext?: unknown;
+}
+
+function inMemoryInbound(messages: InboundMessage[]): {
+  next(): Promise<InboundMessage | undefined>;
+} {
+  const queue = [...messages];
+  return {
+    async next(): Promise<InboundMessage | undefined> {
+      return queue.shift();
+    },
+  };
+}
 
 function chromiumAvailable(): boolean {
   if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
@@ -387,8 +400,8 @@ function rawUpgrade(
 /**
  * AC#6 (provider-swap / horizontal extension) — proof A: a SECOND, compatible `ChannelPort` adapter. The
  * channel family is wired in `app` (NOT pinned by the template), so it is the legitimate `app`-wiring swap
- * seam (the repo already ships two channels: telegram + cli). This trivial in-tree `ChannelPort` records
- * deliveries and yields injected inbound messages — a drop-in for `ChannelCli`. The capstone runs the AFFECTED
+ * seam (the provider set owns concrete channel packages). This trivial in-tree `ChannelPort` records
+ * deliveries and yields injected inbound messages — a drop-in channel provider. The capstone runs the AFFECTED
  * STEP (Phase 0 inbound binding) THROUGH it, proving a second channel-family provider is a drop-in with NO
  * core change: nothing in `kernel`/`session`/`gateway`/`task`/`route` imports a channel — only `app` does.
  */
@@ -402,7 +415,7 @@ class RecordingChannel implements ChannelPort {
     this.delivered.push({ recipient, link });
   }
   // The kernel ChannelPort's inbound surface — yields the injected messages, binding each via IdentityPort
-  // (the SAME narrow-only binding contract `ChannelCli.receive`/`receiveBound` uses).
+  // (the SAME narrow-only binding contract the channel provider family uses).
   async *receive(): AsyncIterable<{
     recipient: RecipientRef;
     message: string;
@@ -412,7 +425,7 @@ class RecordingChannel implements ChannelPort {
       yield { recipient: m.recipientRef, message: m.text, chatContext: m.chatContext ?? null };
     }
   }
-  /** Bind an inbound message to its recipient (the Bridge-facing surface, mirrors ChannelCli.receiveBound). */
+  /** Bind an inbound message to its recipient (the richer Bridge-facing surface used by this proof). */
   async bindInbound(
     m: InboundMessage,
   ): Promise<{ recipientRef: RecipientRef; text: string; binding: unknown }> {
@@ -583,35 +596,37 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
 
         // ═══════════════════════ PHASE 0 — inbound request via the channel (AC#1 + AC#6 proof A) ═══════════════════════
         // (Composes the Slice-1 inbound contract.) A single inbound request for the enrolled recipient; the
-        // agent receives the message WITH its recipient binding (GLA-015 AC#1). We FIRST run it through the REAL
-        // `channel-cli` (faithful to the scenario's "channel is cli" harness), THEN through the SWAPPED
+        // agent receives the message at the ChannelPort seam. We FIRST run it through the reference
+        // `channel-cli` provider (faithful to the scenario's "channel is cli" harness), THEN through the SWAPPED
         // `ChannelPort` (AC#6 proof A) — the AFFECTED STEP genuinely runs through the second provider, with
         // identical binding, proving the channel family is a drop-in with no core change.
         const inboundMsg: InboundMessage = {
           recipientRef: recipient,
           text: "Register me on acme.example",
         };
-        const inbound = new InMemoryInbound();
-        inbound.push(inboundMsg);
-        const cliChannel = new ChannelCli({
-          identity: countingIdentity as unknown as IdentityService,
-          source: inbound,
-          sink,
-        });
-        let bound: { recipientRef: RecipientRef; text: string } | undefined;
-        for await (const item of cliChannel.receiveBound()) {
-          bound = item;
+        const cliChannel = createReferenceChannelProvider({
+          services: providerServices({
+            identity: countingIdentity as unknown as IdentityService,
+            "channel.source": inMemoryInbound([inboundMsg]),
+            "channel.sink": sink,
+          }),
+        }).provider;
+        let received: { recipient: RecipientRef; message: string } | undefined;
+        for await (const item of cliChannel.receive()) {
+          received = item;
           break; // a single inbound request.
         }
-        expect(bound?.recipientRef).toBe(recipient);
-        expect(bound?.text).toBe("Register me on acme.example");
+        expect(received).toMatchObject({
+          recipient,
+          message: "Register me on acme.example",
+        });
         // AC#6 proof A: the SAME inbound, bound through the SWAPPED ChannelPort — same recipient binding.
         const boundViaSwap = await swappedChannel.bindInbound(inboundMsg);
         expect(boundViaSwap.recipientRef).toBe(recipient);
         expect(boundViaSwap.binding).toBeDefined();
         log(
           "0",
-          `inbound bound to ${bound?.recipientRef} via channel-cli AND the swapped ChannelPort (AC#6 proof A): "${bound?.text}"`,
+          `inbound received by ${received?.recipient} via channel-cli provider AND bound through the swapped ChannelPort (AC#6 proof A): "${received?.message}"`,
         );
 
         // ═══════════════════════ PHASE 1 — orient (AC#1 part a) ═══════════════════════

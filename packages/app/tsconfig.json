@@ -15,8 +15,6 @@
     { "path": "../bridge" },
     { "path": "../capability" },
     { "path": "../catalog" },
-    { "path": "../../adapters/channel-cli" },
-    { "path": "../../adapters/channel-telegram" },
     { "path": "../../surfaces/cli" },
     { "path": "../completion" },
     { "path": "../gateway" },

@@ -526,6 +526,10 @@ export const CHANNEL_CLI_MANIFEST: ProviderManifest = {
   spec: {
     family: "channel",
     capability: { summary: "local/CLI fallback channel (headless tests)" },
+    config_schema: {
+      delivery: { type: "enum", enum: ["stdout", "injected"], required: false },
+      inbound: { type: "enum", enum: ["memory", "injected"], required: false },
+    },
     probe: "channel-cli",
   },
 };
