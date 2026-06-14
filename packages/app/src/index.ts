@@ -29,7 +29,12 @@ import {
 } from "@gla/auth-webauthn";
 import { AgentBridge } from "@gla/bridge";
 import { CapabilityService } from "@gla/capability";
-import { CatalogService, type DependencyBinding, toAdmissionCatalog } from "@gla/catalog";
+import {
+  CatalogService,
+  type CatalogServiceOptions,
+  type DependencyBinding,
+  toAdmissionCatalog,
+} from "@gla/catalog";
 import {
   CHANNEL_CLI_MODULE,
   ChannelCli,
@@ -57,6 +62,7 @@ import {
 } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
+import { referenceProviderStoreContent } from "@gla/provider-set-reference";
 import { RouteController } from "@gla/route";
 import {
   type CompletionDeps,
@@ -262,6 +268,16 @@ function stateSlot<T>(
   };
 }
 
+function referenceCatalogOptions(
+  dependencyBindings: DependencyBinding[] | undefined,
+): CatalogServiceOptions {
+  const options: CatalogServiceOptions = { content: referenceProviderStoreContent() };
+  if (dependencyBindings !== undefined) {
+    options.dependencyBindings = dependencyBindings;
+  }
+  return options;
+}
+
 /** Options for {@link createBridge}: an override Cedar policy set (defaults to the MVP set). */
 export interface CreateBridgeOptions {
   /** The Cedar policy set source (defaults to {@link MVP_POLICY_SET}). */
@@ -276,9 +292,7 @@ export interface CreateBridgeOptions {
  * `session create` dispatches a Session in `issued` — NO spawn (provisioning is `createProvisioningBridge`).
  */
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
-  const catalog = new CatalogService(
-    opts.dependencyBindings !== undefined ? { dependencyBindings: opts.dependencyBindings } : {},
-  );
+  const catalog = new CatalogService(referenceCatalogOptions(opts.dependencyBindings));
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );
@@ -469,9 +483,7 @@ export function createProvisioningBridge(
           unsafeRoots: opts.workspaceRoot !== undefined ? [opts.workspaceRoot] : [],
         })
       : undefined;
-  const catalog = new CatalogService(
-    opts.dependencyBindings !== undefined ? { dependencyBindings: opts.dependencyBindings } : {},
-  );
+  const catalog = new CatalogService(referenceCatalogOptions(opts.dependencyBindings));
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );

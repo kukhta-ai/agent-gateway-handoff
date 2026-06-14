@@ -5,9 +5,9 @@
 
 phase: 5
 phase_name: "Autonomous build — GLA-095..GLA-105 provider-host and test-layout migration"
-branch: feature/provider-host
+branch: feature/provider-host-task-095
 epic: provider-host-and-test-layout-095-105
-active_story: null
+active_story: GLA-095
 review_cycle: 0
 follow_on_scope:
   tasks: "GLA-095..GLA-105"
@@ -87,11 +87,11 @@ specialists:
   retro:        {spawned: true, id: "019ebe2c-d23e-7520-85b7-3e08ad373179", open: true, resumable: true, role: "epic retrospective", last_skill: "bmad-retrospective loaded and workflow resolved; init only"}
 specialist_runtime_note: "Collaboration limit allows six open agents. Analyst/PM/UX/architect were initialized, then closed to free capacity; their IDs remain resumable."
 provider_host_095_105_specialists:
-  architect: {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "provider-host architecture and layer-boundary review", last_skill: "bmad-create-architecture loaded; full workflow is interactive/doc-initialization gated; initialized for GLA-095..105"}
-  tea: {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test architecture and security evidence review", last_skill: "bmad-testarch-test-design loaded; initialized for GLA-095..105"}
+  architect: {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "provider-host architecture and layer-boundary review", last_skill: "GLA-095 architecture review APPROVE; bmad-create-architecture loaded, interactive workflow gated, docs-driven conformance fallback"}
+  tea: {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test architecture and security evidence review", last_skill: "GLA-095 TEA review APPROVE after caller-supplied diagnostics redaction fix; bmad-testarch-test-review loaded; pnpm gate passed"}
   sm: {spawned: true, id: "019ec65a-d9fe-7da2-b590-b24693c2f8f9", open: true, resumable: true, role: "story sequencing and create-story evidence", last_skill: "bmad-create-story loaded; sprint-status.yaml missing for auto-discovery, explicit task target required"}
-  worker: {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation and E2E generation", last_skill: "bmad-create-story and bmad-dev-story loaded; initialized for GLA-095"}
-  reviewer: {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "independent story review", last_skill: "bmad-story-automator-review loaded; initialized for GLA-095..105"}
+  worker: {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation and E2E generation", last_skill: "GLA-095 provider-host foundation implemented; bmad-create-story/dev-story skills loaded; docs-driven fallback for missing sprint-status.yaml"}
+  reviewer: {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "independent story review", last_skill: "GLA-095 independent review APPROVE after user-done and host-derived catalog-content fixes; bmad-story-automator-review loaded"}
   investigator: {spawned: true, id: "019ec65a-da4c-7861-b190-a29f872d42e0", open: true, resumable: true, role: "root-cause analysis for failed gates/regressions", last_skill: "bmad-investigate loaded; initialized for GLA-095..105"}
 
 gates_pending: []

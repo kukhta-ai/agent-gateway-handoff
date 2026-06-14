@@ -43,6 +43,7 @@
     "@gla/launcher-process": "workspace:*",
     "@gla/mcp": "workspace:*",
     "@gla/policy-cedar": "workspace:*",
+    "@gla/provider-set-reference": "workspace:*",
     "@gla/route": "workspace:*",
     "@gla/session": "workspace:*",
     "@gla/task": "workspace:*",

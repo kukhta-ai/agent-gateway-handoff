@@ -13,12 +13,14 @@ import type { ConfigSchema } from "@gla/kernel";
 
 /** The pluggable provider families (docs/02 §3) this slice seeds. */
 export type ProviderFamily =
+  | "auth"
   | "launcher"
   | "entrypoint"
   | "connector"
   | "workspace"
   | "detector"
   | "channel"
+  | "secret-store"
   | "template";
 
 /** A dependency's binding status, written by `wpm`, read by GLA (docs/02 §6). Drives availability. */
