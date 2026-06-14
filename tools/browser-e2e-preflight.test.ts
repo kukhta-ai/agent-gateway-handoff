@@ -84,5 +84,10 @@ describe("browser E2E preflight", () => {
     expect(testStrategy).toContain("GLA_BROWSER_E2E_MODE=optional");
     expect(testStrategy).toContain("GLA_BROWSER_E2E_CANARY_FAIL=1");
     expect(testStrategy).toContain("not valid backlog");
+
+    const preflight = readProjectFile("tools/browser-e2e-preflight.mjs");
+    expect(preflight).toContain("packages/app/test/e2e/scenario-01-e2e.test.ts");
+    expect(preflight).toContain("packages/app/test/integration/provision.test.ts");
+    expect(preflight).toContain("adapters/launcher-process/test/contract/launcher-process.test.ts");
   });
 });

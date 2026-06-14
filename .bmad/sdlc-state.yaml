@@ -5,10 +5,10 @@
 
 phase: 5
 phase_name: "Autonomous build — GLA-095..GLA-105 provider-host and test-layout migration"
-branch: feature/provider-host
+branch: feature/provider-host-task-102
 epic: provider-host-and-test-layout-095-105
-active_story: null
-review_cycle: 0
+active_story: GLA-102
+review_cycle: 1
 follow_on_scope:
   tasks: "GLA-095..GLA-105"
   branch_base: "feature/provider-host"
@@ -87,11 +87,11 @@ specialists:
   retro:        {spawned: true, id: "019ebe2c-d23e-7520-85b7-3e08ad373179", open: true, resumable: true, role: "epic retrospective", last_skill: "bmad-retrospective loaded and workflow resolved; init only"}
 specialist_runtime_note: "Collaboration limit allows six open agents. Analyst/PM/UX/architect were initialized, then closed to free capacity; their IDs remain resumable."
 provider_host_095_105_specialists:
-  architect: {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "provider-host architecture and layer-boundary review", last_skill: "GLA-101 architecture review APPROVE; provider-set seam, protected runtime packages, fake-provider contract extensibility, and internal ABI boundary checked"}
-  tea: {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test architecture and security evidence review", last_skill: "GLA-101 TEA re-review PASS; CommonJS/import-equals false-negative fixed, boundary/provider tests and pnpm gate evidence checked"}
+  architect: {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "provider-host architecture and layer-boundary review", last_skill: "GLA-102 architecture review APPROVE; package-local test layout, dist hygiene, and migration path checked"}
+  tea: {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test architecture and security evidence review", last_skill: "GLA-102 TEA PASS; strict outside-src test typecheck, Vitest discovery, dist-layout, browser preflight, and boundary preservation checked"}
   sm: {spawned: true, id: "019ec65a-d9fe-7da2-b590-b24693c2f8f9", open: true, resumable: true, role: "story sequencing and create-story evidence", last_skill: "bmad-create-story loaded; sprint-status.yaml missing for auto-discovery, explicit task target required"}
-  worker: {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation and E2E generation", last_skill: "GLA-101 bmad-create-story/dev-story/qa-generate-e2e-tests loaded; sprint-status/story artifact missing so docs/backlog fallback used; implementation completed and pnpm gate passed"}
-  reviewer: {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "independent story review", last_skill: "GLA-101 story-automator-review checklist used against Backlog.md contract; APPROVE after focused boundary/provider-set/app tests and git diff --check"}
+  worker: {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation and E2E generation", last_skill: "GLA-102 bmad-create-story/dev-story/qa-generate-e2e-tests loaded; sprint-status/story artifact missing so docs/backlog fallback used; implementation completed and pnpm gate passed"}
+  reviewer: {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "independent story review", last_skill: "GLA-102 story-automator-review checklist used against Backlog.md contract; APPROVE after doc drift fix, focused tests, and git diff --check"}
   investigator: {spawned: true, id: "019ec65a-da4c-7861-b190-a29f872d42e0", open: true, resumable: true, role: "root-cause analysis for failed gates/regressions", last_skill: "bmad-investigate loaded; initialized for GLA-095..105"}
 
 gates_pending: []
