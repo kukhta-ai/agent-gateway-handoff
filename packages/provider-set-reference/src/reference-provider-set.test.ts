@@ -1,3 +1,4 @@
+import { CatalogService, referenceWpmDependencyBindings } from "@gla/catalog";
 import type {
   AuthProviderPort,
   IdentityPort,
@@ -103,6 +104,44 @@ describe("referenceProviderModules", () => {
         ],
       },
     });
+  });
+
+  it("creates launcher and workspace ports from provider-owned schemas and catalog dependency evidence", async () => {
+    const host = createReferenceProviderHost();
+    const content = referenceProviderStoreContent(host);
+    const catalog = new CatalogService({
+      content,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+
+    expect(host.providerManifest("launcher-process")?.spec.config_schema).toMatchObject({
+      mode: { type: "enum", enum: ["auto", "headless", "full"] },
+      chromiumPath: { type: "string" },
+      startTimeoutMs: { type: "number" },
+    });
+    expect(host.providerManifest("workspace-profile")?.spec.config_schema).toMatchObject({
+      root: { type: "string" },
+    });
+
+    const launcherDependencyEvidence = catalog.show("launcher-process")?.requires;
+    expect(launcherDependencyEvidence).toBeDefined();
+
+    const launcher = await host.createProvider("launcher", "launcher-process", {
+      config: { mode: "headless", startTimeoutMs: 40_000 },
+      dependencyBindings: launcherDependencyEvidence ?? [],
+    });
+    expect(launcher.tier).toBe("local-process");
+    expect(launcher.mountCapability).toMatchObject({
+      file: true,
+      directory: true,
+      modes: ["ro", "rw"],
+    });
+
+    const workspace = await host.createProvider("workspace", "workspace-profile", {
+      config: { root: "/tmp/gla-provider-host-workspaces" },
+    });
+    expect(workspace).toHaveProperty("realize");
+    expect(workspace).toHaveProperty("reap");
   });
 
   it("keeps the WebAuthn Provider Host config compatible with multiple expected origins", async () => {

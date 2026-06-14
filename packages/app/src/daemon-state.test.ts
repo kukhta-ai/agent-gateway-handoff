@@ -19,6 +19,7 @@ import {
 } from "@gla/auth-authentik";
 import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import { CapabilityService } from "@gla/capability";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { type EnrollmentRecord, IdentityService } from "@gla/identity";
 import type {
   AuthChallenge,
@@ -317,11 +318,17 @@ describe("restart-safe security state wiring", () => {
     const root = tempRoot("capability");
     const recipient = "tg:user:123" as RecipientRef;
 
-    const first = createProvisioningBridge({ stateRoot: root });
+    const first = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      stateRoot: root,
+    });
     const minted = await first.capability.mintEnrollmentGrant(recipient);
     expect(first.capability.verifyEnrollmentGrantToken(minted.token).ok).toBe(true);
 
-    const second = createProvisioningBridge({ stateRoot: root });
+    const second = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      stateRoot: root,
+    });
     const afterRestart = second.capability.verifyEnrollmentGrantToken(minted.token);
     expect(afterRestart.ok).toBe(true);
     if (!afterRestart.ok) {
@@ -329,7 +336,10 @@ describe("restart-safe security state wiring", () => {
     }
 
     await second.capability.revoke(afterRestart.capability.id);
-    const third = createProvisioningBridge({ stateRoot: root });
+    const third = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      stateRoot: root,
+    });
     expect(third.capability.verifyEnrollmentGrantToken(minted.token)).toEqual({
       ok: false,
       reason: "auth.revoked",
@@ -337,7 +347,10 @@ describe("restart-safe security state wiring", () => {
 
     const spent = await third.capability.mintEnrollmentGrant(recipient);
     expect(third.capability.tryConsumeEnrollmentGrantToken(spent.token).ok).toBe(true);
-    const fourth = createProvisioningBridge({ stateRoot: root });
+    const fourth = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      stateRoot: root,
+    });
     expect(fourth.capability.verifyEnrollmentGrantToken(spent.token)).toEqual({
       ok: false,
       reason: "auth.revoked",
@@ -347,14 +360,20 @@ describe("restart-safe security state wiring", () => {
   it("releases the state-root owner lock on clean stack shutdown", async () => {
     const root = tempRoot("lock-release");
 
-    const first = createProvisioningBridge({ stateRoot: root });
+    const first = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      stateRoot: root,
+    });
     await first.ready;
     expect(existsSync(join(root, "daemon.lock"))).toBe(true);
 
     await first.close();
     expect(existsSync(join(root, "daemon.lock"))).toBe(false);
 
-    const second = createProvisioningBridge({ stateRoot: root });
+    const second = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      stateRoot: root,
+    });
     await second.ready;
     await second.close();
   });
