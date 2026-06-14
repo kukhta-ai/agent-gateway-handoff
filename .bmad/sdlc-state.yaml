@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 6
-phase_name: "Epic gate — noVNC readiness fix"
-branch: fix/authentik/novnc-readiness
+phase_name: "Epic gate — GLA-077..GLA-094 complete"
+branch: feature/authentik
 epic: authentik-hardening-077-094
 active_story: null
-review_cycle: 1
+review_cycle: 0
 follow_on_scope:
   tasks: "GLA-077..GLA-094"
   branch_base: "feature/authentik"
-  next_ready_sequence: "epic-gate-fix"
-  note: "2026-06-12 user goal: implement backlog 077-094 according to project SDLC, architecture, and vision; GLA-077..GLA-094 are Done and merged to feature/authentik. Final integration gate exposed a noVNC full-mode readiness race, isolated on fix/authentik/novnc-readiness. Root cause concluded in _bmad-output/implementation-artifacts/investigations/novnc-readiness-investigation.md; fix branch gate passed on 2026-06-14 (64 files, 726 passed, 15 skipped)."
+  next_ready_sequence: "none"
+  note: "2026-06-12 user goal: implement backlog 077-094 according to project SDLC, architecture, and vision; GLA-077..GLA-094 are Done and merged to feature/authentik. Phase 6 noVNC readiness fix merged on 2026-06-14; root cause concluded in _bmad-output/implementation-artifacts/investigations/novnc-readiness-investigation.md; final gate passed on feature/authentik (64 files, 726 passed, 15 skipped)."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
 # (Redis-free path; postgres+server+worker); GLA's REAL adapter did a REAL OIDC round-trip -> finishEnrollment+verifyAssertion ->
