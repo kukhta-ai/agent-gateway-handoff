@@ -17,7 +17,6 @@ import {
   type PendingAttempt,
   type RedirectChallenge,
 } from "@gla/auth-authentik";
-import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import { CapabilityService } from "@gla/capability";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { type EnrollmentRecord, IdentityService } from "@gla/identity";
@@ -57,6 +56,7 @@ import {
   WorkspaceManager,
 } from "@gla/worker";
 import { afterEach, describe, expect, it } from "vitest";
+import { FakeAuthentik } from "../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
 import {
   DAEMON_PERSISTED_RECORDS,
   DaemonStateError,

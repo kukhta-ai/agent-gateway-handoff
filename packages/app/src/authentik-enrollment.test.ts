@@ -28,12 +28,12 @@ import {
   InMemoryKv,
   type PendingAttempt,
 } from "@gla/auth-authentik";
-import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { IdentityService } from "@gla/identity";
 import type { RecipientRef } from "@gla/kernel";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { FakeAuthentik } from "../../../adapters/auth-authentik/test/fixtures/fake-authentik.js";
 import { type EnrollmentStack, createEnrollmentStack, createProvisioningBridge } from "./index.js";
 
 const recipient = "tg:user:123" as RecipientRef;

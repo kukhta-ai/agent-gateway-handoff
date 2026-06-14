@@ -11,7 +11,7 @@
 //   6. NEGATIVES: a grant for a DIFFERENT recipient is refused at the edge; a revoke FORCE-CLOSES the live WS.
 //
 // GATED: if no cached Chromium is available, the REAL step-up is skipped (it.runIf) and the gateway's verify +
-// step-up decision + WS proxy are proven by the unit/contract tests (packages/gateway/src/handoff.test.ts) — so
+// step-up decision + WS proxy are proven by the unit/contract tests (packages/gateway/test/integration/handoff.test.ts) — so
 // the security seam is proven regardless. Browser-side ceremonies are passed to page.evaluate as STRINGS (no DOM
 // lib needed at compile time).
 

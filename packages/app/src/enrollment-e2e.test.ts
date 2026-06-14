@@ -8,7 +8,7 @@
 // refused over the real server (no credential stored), and an un-enrolled recipient cannot authenticate.
 //
 // GATED: if no cached Chromium is available (some CI), the REAL test is skipped (it.runIf) and the server-side
-// @simplewebauthn verify is proven instead by adapters/auth-webauthn/src/auth-webauthn.test.ts — so enrollment
+// @simplewebauthn verify is proven instead by adapters/auth-webauthn/test/contract/auth-webauthn.test.ts — so enrollment
 // logic is proven regardless (GLA-013).
 //
 // Browser-side ceremonies that touch the DOM/WebAuthn API are passed to page.evaluate as STRINGS (Playwright

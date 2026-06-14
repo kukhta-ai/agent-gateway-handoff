@@ -44,6 +44,8 @@ seam, but outside `src`:
 | `packages/<name>/src/`, `adapters/<name>/src/`, `surfaces/<name>/src/` | Production package | Runtime code and exported package surface only |
 | `packages/<name>/test/unit/`, `adapters/<name>/test/unit/`, `surfaces/<name>/test/unit/` | Same package | Package-local unit tests for package-owned logic |
 | `packages/<name>/test/contract/`, `adapters/<name>/test/contract/` | Same package/provider | Port/provider contract tests that prove the package-owned seam |
+| `packages/<name>/test/integration/`, `surfaces/<name>/test/integration/` | Same package/surface | Package-local integration tests for non-app runtime seams such as gateway, bridge, and CLI behavior |
+| `packages/<name>/test/e2e/` | Same package | Package-local E2E proofs for package-owned browser or process behavior that is not the app composition-root scenario |
 | `packages/app/test/integration/` and `packages/app/test/e2e/` | App composition root | Composition-root integration and E2E tests, including scenario, daemon, gateway, authentik, noVNC, teardown, and grant-canary flows |
 | `packages/<name>/test/fixtures/` or `adapters/<name>/test/fixtures/` | Same package/provider | Test-only fixtures and helpers; never exported as production API |
 | `tests/<scope>/` | Repository-wide harness | Cross-package boundary, scenario, or migration harnesses that do not belong to one package |
@@ -305,7 +307,7 @@ Definition-of-Done evidence for work whose acceptance criteria require browser-l
 
 To prove browser-backed E2E assertions are actually inside the full gate, `pnpm run gate:browser-canary`
 temporarily sets `GLA_BROWSER_E2E_CANARY_FAIL=1`, runs the real `pnpm gate`, and passes only when the gate
-turns red for the deliberate assertion inside `packages/gateway/src/handoff-client-browser.test.ts`.
+turns red for the deliberate assertion inside `packages/gateway/test/e2e/handoff-client-browser.test.ts`.
 
 ---
 
