@@ -11,6 +11,7 @@
     { "path": "packages/audit" },
     { "path": "packages/admission" },
     { "path": "packages/catalog" },
+    { "path": "packages/provider-host" },
     { "path": "packages/identity" },
     { "path": "packages/worker" },
     { "path": "packages/assembly" },
@@ -28,6 +29,7 @@
     { "path": "adapters/detector-url" },
     { "path": "adapters/channel-telegram" },
     { "path": "adapters/channel-cli" },
+    { "path": "packages/provider-set-reference" },
     { "path": "surfaces/cli" },
     { "path": "surfaces/mcp" }
   ]

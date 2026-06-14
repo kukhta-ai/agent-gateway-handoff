@@ -1,0 +1,257 @@
+import type { ProviderManifest } from "@gla/catalog";
+import type { LauncherPort, RuntimeHandle } from "@gla/kernel";
+import { describe, expect, it } from "vitest";
+import {
+  type GlaProviderModule,
+  InMemoryProviderStateRoot,
+  ProviderHost,
+  type ProviderHostDiagnostic,
+} from "./index.js";
+
+const fakeLauncher: LauncherPort = {
+  tier: "none",
+  mountCapability: { file: false, directory: false, modes: [] },
+  async spawn(): Promise<RuntimeHandle> {
+    return "runtime:fake" as RuntimeHandle;
+  },
+  async health(): Promise<"up"> {
+    return "up";
+  },
+  async stop(): Promise<void> {},
+};
+
+function manifest(overrides: Partial<ProviderManifest["spec"]> = {}): ProviderManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "Launcher",
+    metadata: { name: "fake-launcher", version: "0.1.0" },
+    spec: {
+      family: "launcher",
+      capability: { summary: "fake launcher" },
+      config_schema: {
+        mode: { type: "enum", enum: ["safe"], required: true },
+      },
+      probe: "fake-launcher",
+      skills: [{ id: "use-fake-launcher", for: "fake-launcher", body: "Use fake launcher." }],
+      relations: { compatibleWith: { connectors: ["fake-connector"] } },
+      ...overrides,
+    },
+  };
+}
+
+function module(overrides: Partial<ProviderManifest["spec"]> = {}): GlaProviderModule {
+  return {
+    manifest: manifest(overrides),
+    register(ctx) {
+      ctx.registerLauncher("fake-launcher", {
+        create(createCtx) {
+          createCtx.state.kv<{ seen: boolean }>("runtime").set("created", { seen: true });
+          return fakeLauncher;
+        },
+      });
+      ctx.registerProbe("fake-launcher", () => "available");
+      ctx.registerStateSchema("fake-launcher", {
+        slots: { runtime: { summary: "fake runtime state" } },
+      });
+    },
+  };
+}
+
+describe("ProviderHost", () => {
+  it("registers a trusted provider module with manifest, factory, probe, skills, relations, and state schema", async () => {
+    const stateRoot = new InMemoryProviderStateRoot();
+    const host = new ProviderHost({ stateRoot }).registerModule(module());
+
+    expect(host.providerIds("launcher")).toEqual(["fake-launcher"]);
+    expect(host.providerManifest("fake-launcher")).toMatchObject({
+      metadata: { name: "fake-launcher" },
+      spec: {
+        family: "launcher",
+        probe: "fake-launcher",
+        skills: [{ id: "use-fake-launcher" }],
+        relations: { compatibleWith: { connectors: ["fake-connector"] } },
+      },
+    });
+    expect(host.providerStateSchema("fake-launcher")).toEqual({
+      slots: { runtime: { summary: "fake runtime state" } },
+    });
+
+    const created = await host.createProvider("launcher", "fake-launcher", {
+      config: { mode: "safe" },
+    });
+    expect(created).toBe(fakeLauncher);
+    expect(
+      stateRoot.namespace("fake-launcher").kv<{ seen: boolean }>("runtime").get("created"),
+    ).toEqual({
+      seen: true,
+    });
+  });
+
+  it("rejects duplicate provider ids with a stable redacted diagnostic", () => {
+    const host = new ProviderHost().registerModule(module());
+
+    expect(() => host.registerModule(module())).toThrow(/already registered/);
+    expect(host.diagnostics()).toContainEqual(
+      expect.objectContaining({
+        code: "provider.duplicate",
+        providerId: "fake-launcher",
+      }),
+    );
+  });
+
+  it("rejects unknown provider ids with a stable diagnostic", async () => {
+    const host = new ProviderHost();
+
+    await expect(host.createProvider("launcher", "missing-provider")).rejects.toMatchObject({
+      code: "catalog.unknown",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.unknown",
+            providerId: "missing-provider",
+          }),
+        ],
+      },
+    });
+  });
+
+  it("does not expose partial runtime registry entries after failed registration", () => {
+    const badModule: GlaProviderModule = {
+      manifest: manifest(),
+      register(ctx) {
+        ctx.registerLauncher("fake-launcher", { create: () => fakeLauncher });
+        ctx.registerStateSchema("fake-launcher", { slots: { first: {} } });
+        ctx.registerStateSchema("fake-launcher", { slots: { duplicate: {} } });
+      },
+    };
+    const host = new ProviderHost();
+
+    expect(() => host.registerModule(badModule)).toThrow(/state schema is already registered/);
+    expect(host.providerIds("launcher")).toEqual([]);
+    expect(host.providerManifest("fake-launcher")).toBeUndefined();
+    expect(host.providerStateSchema("fake-launcher")).toBeUndefined();
+  });
+
+  it("rejects invalid provider config before creating a runtime port", async () => {
+    const host = new ProviderHost().registerModule(module());
+
+    await expect(
+      host.createProvider("launcher", "fake-launcher", {
+        config: { mode: "unsafe", token: "super-secret-token" },
+      }),
+    ).rejects.toMatchObject({
+      code: "policy.denied",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.config_invalid",
+            detail: expect.objectContaining({
+              defects: expect.arrayContaining([
+                expect.objectContaining({ field: "mode" }),
+                expect.objectContaining({ field: "token" }),
+              ]),
+            }),
+          }),
+        ],
+      },
+    });
+    expect(JSON.stringify(host.diagnostics())).not.toContain("super-secret-token");
+  });
+
+  it("fails closed when host-touching dependency evidence is missing", async () => {
+    const host = new ProviderHost().registerModule(
+      module({
+        requires: [{ dependency: "browser-runtime", hostTouching: true }],
+      }),
+    );
+
+    await expect(
+      host.createProvider("launcher", "fake-launcher", {
+        config: { mode: "safe" },
+      }),
+    ).rejects.toMatchObject({
+      code: "dependency.unavailable",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.dependency_unavailable",
+          }),
+        ],
+      },
+    });
+  });
+
+  it("fails closed when a registered provider probe reports unavailable", async () => {
+    const unavailable: GlaProviderModule = {
+      manifest: manifest(),
+      register(ctx) {
+        ctx.registerLauncher("fake-launcher", { create: () => fakeLauncher });
+        ctx.registerProbe("fake-launcher", () => "unavailable");
+      },
+    };
+    const host = new ProviderHost().registerModule(unavailable);
+
+    await expect(
+      host.createProvider("launcher", "fake-launcher", {
+        config: { mode: "safe" },
+      }),
+    ).rejects.toMatchObject({
+      code: "dependency.unavailable",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.probe_failed",
+          }),
+        ],
+      },
+    });
+  });
+
+  it("redacts provider-emitted diagnostics before forwarding to caller-supplied sinks", async () => {
+    const emitted: ProviderHostDiagnostic[] = [];
+    const host = new ProviderHost().registerModule({
+      manifest: manifest(),
+      register(ctx) {
+        ctx.registerLauncher("fake-launcher", { create: () => fakeLauncher });
+        ctx.registerProbe("fake-launcher", ({ diagnostics }) => {
+          diagnostics.emit({
+            code: "provider.probe_failed",
+            providerId: "fake-launcher",
+            message: "probe emitted provider-owned secret context",
+            detail: { clientSecret: "provider-secret-canary" },
+          });
+          return "available";
+        });
+      },
+    });
+
+    await host.createProvider("launcher", "fake-launcher", {
+      config: { mode: "safe" },
+      diagnostics: { emit: (diagnostic) => emitted.push(diagnostic) },
+    });
+
+    expect(JSON.stringify(emitted)).not.toContain("provider-secret-canary");
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        code: "provider.probe_failed",
+        detail: { clientSecret: "<redacted>" },
+      }),
+    );
+  });
+
+  it("rejects unsupported runtime families during registration", () => {
+    const unsupported: GlaProviderModule = {
+      manifest: {
+        ...manifest(),
+        spec: { ...manifest().spec, family: "template" },
+      },
+      register(ctx) {
+        ctx.registerLauncher("fake-launcher", { create: () => fakeLauncher });
+      },
+    };
+
+    expect(() => new ProviderHost().registerModule(unsupported)).toThrow(
+      /unsupported runtime family/,
+    );
+  });
+});
