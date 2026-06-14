@@ -160,7 +160,9 @@ the others are the supported settings the same dependency can take.
   fresh; Remote-External if the proxy is elsewhere; Manual-BYO via pause; Disabled n/a (the public entry is
   required).
 - **Seam:** the **reverse-proxy dependency** programmed by the **Route controller**; GLA's **Access Gateway**
-  (`gateway` package) verifies grants regardless of which proxy fills it.
+  (`gateway` package) verifies grants regardless of which proxy fills it. In the catalog, templates read this as
+  `edge-proxy` dependency evidence (`publicBaseUrl`, `gatewayUpstream` refs). Those refs prove transport/base-path
+  reachability only; they do not carry or replace GLA grant/recipient/auth-assurance facts.
 
 **D6 · WebAuthn verifier** — *identity/auth*
 - **Classification:** **split by the chosen provider.** The **default in-tree WebAuthn** (`@simplewebauthn/

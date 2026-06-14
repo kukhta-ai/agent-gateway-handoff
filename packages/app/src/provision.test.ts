@@ -37,7 +37,7 @@ import type { GlaProviderModule } from "@gla/provider-host";
 import { createReferenceProviderHost } from "@gla/provider-set-reference";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import { createProvisioningBridge } from "./index.js";
+import { createBridge, createProvisioningBridge } from "./index.js";
 
 function capture(): { out: Output; stdout: () => string; stderr: () => string } {
   const o: string[] = [];
@@ -363,6 +363,67 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
 }
 
 describe("provisioning composition root — real `session create` + `session connector` (Slice 3)", () => {
+  it("rejects missing public-edge dependency evidence before creating a task, session, route, or capsule", async () => {
+    const bindings = referenceWpmDependencyBindings().filter(
+      (binding) => binding.dependency !== "edge-proxy",
+    );
+    const bridge = createBridge({ dependencyBindings: bindings });
+
+    await expect(
+      bridge.sessionCreate({
+        proposal: {
+          intent: "reg",
+          template: "browser-handoff",
+          recipient: "tg:user:1",
+          detectors: [{ use: "user-done" }],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "catalog.unavailable",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "template.dependency_unavailable",
+            dependency: "edge-proxy",
+          }),
+        ],
+      },
+    });
+    expect(bridge.stateSnapshot()).toEqual({ tasks: [], sessions: [] });
+  });
+
+  it("rejects an available same-family provider that lacks template compatibility before state creation", async () => {
+    const records = fakeRuntimeRecords();
+    const providerHost = createReferenceProviderHost();
+    for (const module of fakeProviderModules(records)) {
+      providerHost.registerModule(module);
+    }
+    const bridge = createBridge({
+      providerHost,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+
+    await expect(
+      bridge.sessionCreate({
+        proposal: {
+          intent: "reg",
+          template: "browser-handoff",
+          recipient: "tg:user:1",
+          connector: { use: "connector-fake" },
+          detectors: [{ use: "user-done" }],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "policy.denied",
+      detail: {
+        part: "connector",
+        use: "connector-fake",
+        compatibleWith: expect.not.arrayContaining(["connector-fake"]),
+      },
+    });
+    expect(bridge.stateSnapshot()).toEqual({ tasks: [], sessions: [] });
+  });
+
   it("refuses the default host-touching launcher without WPM browser-runtime evidence", () => {
     expect(() => createProvisioningBridge({ launcherMode: "headless" })).toThrow(
       /launcher-process.*unavailable dependencies|browser-runtime/i,
@@ -458,6 +519,7 @@ describe("provisioning composition root — real `session create` + `session con
 
     const stack = createProvisioningBridge({
       providerHost,
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherProvider: "launcher-fake",
       workspaceProvider: "workspace-fake",
       connectorProvider: "connector-no-control",
@@ -507,6 +569,7 @@ describe("provisioning composition root — real `session create` + `session con
 
     const stack = createProvisioningBridge({
       providerHost,
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherProvider: "launcher-fake",
       workspaceProvider: "workspace-fake",
       connectorProvider: "connector-fake",
@@ -534,6 +597,7 @@ describe("provisioning composition root — real `session create` + `session con
 
     const stack = createProvisioningBridge({
       providerHost,
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherProvider: "launcher-fake",
       workspaceProvider: "workspace-fake",
       workspaceRoot: workspaceRoot(),

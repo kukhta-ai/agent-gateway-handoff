@@ -193,8 +193,12 @@ provider in either family.
    the default `channel` provider and a minimal in-tree `secret-store-reference` provider; both are selected by
    provider id through Provider Host rather than by app-owned adapter construction.
 5. **Public-edge and template alignment.** Keep edge as dependency/transport binding and templates as declarative
-   catalog composition, but ensure both derive compatibility and availability from provider-host state rather than
-   duplicate static tables.
+   catalog composition. The catalog read model derives open-part compatibility from registered provider manifests'
+   compatibility relations and selected template defaults, derives template availability from required providers plus
+   template-level dependencies such as `edge-proxy`, and hands Admission stable diagnostics before any
+   task/session/route/capsule is created.
+   Caddy/nginx/Traefik remain exposure/transport dependencies; they never replace Access Gateway grant,
+   recipient, revocation, or assurance checks.
 6. **Boundary hardening.** Add import-boundary and fake-provider tests so new providers can be added without app,
    gateway, session, identity, worker-core, or kernel edits.
 

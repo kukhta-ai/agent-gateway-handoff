@@ -163,7 +163,7 @@ gla
 │
 ├── template                                 read · the assemblable capsule templates (the agent's menu)
 │   ├── list
-│   └── show <id>                            required parts + each backing dependency's binding status
+│   └── show <id>                            required parts + compatible providers + part/template dependency status
 │
 ├── skill                                    read · procedural knowledge the agent loads
 │   ├── list [--for <template>]
@@ -219,7 +219,7 @@ One row per leaf command. The **Group** column is blank when it carries from the
 | `catalog` | `gla catalog list [--kind <k>] [--available]` | 1. Query the Catalog index<br>2. Filter by entity `--kind`; `--available` drops entities whose dependencies are unbound<br>3. Print entities with system-derived availability<br>4. *Read-only* |
 | `policy` | `gla policy mounts` | 1. Print the host-mount policy this install applies to the agent — the allowed-set (permitted roots), the catastrophic denylist, and the default mode<br>2. *Read-only*; the agent composes mounts within this bound |
 | `template` | `gla template list` | 1. List `CapsuleTemplate` entities from the Catalog index<br>2. *Read-only* |
-|  | `gla template show <id>` | 1. Resolve the template<br>2. Print its required parts (entrypoint / connector / workspace / detector options) and each backing dependency's binding status<br>3. Exit 5 if unknown<br>4. *Read-only* |
+|  | `gla template show <id>` | 1. Resolve the template<br>2. Print its required parts (entrypoint / connector / workspace / detector options), compatible providers derived from registered provider manifests, each backing provider/family, each provider's dependency binding status, and template-level dependency evidence such as `edge-proxy`<br>3. Exit 5 if unknown<br>4. *Read-only* |
 | `skill` | `gla skill list [--for <template>]` | 1. List registered skills, optionally those relevant to a template<br>2. *Read-only* |
 |  | `gla skill show <id>` | 1. Resolve the skill; print the SKILL.md body to stdout<br>2. Exit 5 if unknown<br>3. *Read-only* |
 | `task` | `gla task create [--intent <label>] [--recipient <ref>]` | 1. Open a `Task`; mint its `task` capability (parent = `agent-authority`)<br>2. Record the intent label + recipient binding<br>3. Print `{task_id, state:active}`<br>4. *Mutates*; accepts an idempotency key so retries are safe |

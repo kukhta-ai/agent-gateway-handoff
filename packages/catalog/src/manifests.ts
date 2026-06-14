@@ -240,6 +240,12 @@ export interface TemplateManifest {
     /** Required part-roles → the provider name (an entry in {@link PROVIDER_MANIFESTS}) backing it. */
     requiredParts: Record<string, string>;
     /**
+     * Template-level infrastructure requirements that are not owned by any one part provider. Public-edge
+     * exposure is modeled here: Caddy/nginx/Traefik-style proxy evidence is transport/dependency proof, not an
+     * Access Gateway or AuthProvider replacement.
+     */
+    requires?: DependencyRequirement[];
+    /**
      * The part-roles the agent MAY override (docs/04 §5 the fixed/open line). A role NOT listed here
      * is **template-FIXED** (the isolation tier / launcher native base / security-bearing wiring) —
      * an agent override of a fixed part is a REJECT, not a silent override (docs/04 §4/§5). When
@@ -440,6 +446,7 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         pollMs: { type: "number", required: false, min: 1 },
       },
       probe: "url-watcher",
+      relations: { compatibleWith: { templates: ["browser-handoff"] } },
     },
   },
 
@@ -459,6 +466,7 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         },
       },
       probe: "user-done",
+      relations: { compatibleWith: { templates: ["browser-handoff"] } },
     },
   },
 };
@@ -482,17 +490,23 @@ export const BROWSER_HANDOFF_TEMPLATE: TemplateManifest = {
       workspace: "workspace-profile",
       detector: "url-watcher",
     },
+    requires: [
+      {
+        dependency: "edge-proxy",
+        hostTouching: true,
+        connectionRefs: ["publicBaseUrl", "gatewayUpstream"],
+        bundle: {
+          id: "edge-proxy",
+          version: "0.1.0",
+          declaredRequires: { "gla-core": "^0.1.0" },
+        },
+      },
+    ],
     // docs/04 §5 fixed/open line: the launcher (isolation tier / native base) and the workspace are
     // FIXED — an agent override of either is a reject. The agent MAY override the entrypoint, the
-    // connector, and the detector(s), but only with a compatible provider (below).
+    // connector, and the detector(s), but only with a compatible provider derived from the catalog's
+    // registered provider manifests.
     openParts: ["entrypoint", "connector", "detector"],
-    compatibleProviders: {
-      // From the launcher's relations.compatibleWith (docs/02 §3) — the entrypoint/connector the T2
-      // launcher can drive — plus the detectors this template recognizes.
-      entrypoint: ["entrypoint-novnc"],
-      connector: ["connector-cdp"],
-      detector: ["url-watcher", "user-done"],
-    },
     openParams: {
       recipient: { type: "string", required: true },
       ttl: { type: "string", required: false, pattern: "^[0-9]+(s|m|h|d)$" },

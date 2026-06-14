@@ -65,6 +65,7 @@ import {
   DETECTOR_URL_PROVIDER_ID,
   ENTRYPOINT_NOVNC_PROVIDER_ID,
   LAUNCHER_PROCESS_PROVIDER_ID,
+  type ReferenceTemplateProviderDefaults,
   WORKSPACE_PROFILE_PROVIDER_ID,
   createReferenceAuthProvider,
   createReferenceProviderHost,
@@ -237,60 +238,13 @@ function stateSlot<T>(
   };
 }
 
-function uniqueStrings(values: readonly string[]): string[] {
-  return [...new Set(values)];
-}
-
 function referenceCatalogOptions(
   dependencyBindings: DependencyBinding[] | undefined,
   providerHost?: ProviderHost,
   providerDefaults: ReferenceTemplateProviderDefaults = {},
 ): CatalogServiceOptions {
   const host = providerHost ?? createReferenceProviderHost();
-  const content = referenceProviderStoreContent(host);
-  const template = content.templates.find(
-    (candidate) => candidate.metadata.name === "browser-handoff",
-  );
-  if (template !== undefined) {
-    const compatible = template.spec.compatibleProviders ?? {};
-    template.spec.compatibleProviders = {
-      ...compatible,
-      entrypoint: uniqueStrings([
-        ...(compatible.entrypoint ?? []),
-        ...content.providers
-          .filter((provider) => provider.spec.family === "entrypoint")
-          .map((provider) => provider.metadata.name),
-      ]),
-      connector: uniqueStrings([
-        ...(compatible.connector ?? []),
-        ...content.providers
-          .filter((provider) => provider.spec.family === "connector")
-          .map((provider) => provider.metadata.name),
-      ]),
-      detector: uniqueStrings([
-        ...(compatible.detector ?? []),
-        ...content.providers
-          .filter((provider) => provider.spec.family === "detector")
-          .map((provider) => provider.metadata.name),
-      ]),
-    };
-    const required = template.spec.requiredParts;
-    if (providerDefaults.launcher !== undefined) {
-      required.launcher = providerDefaults.launcher;
-    }
-    if (providerDefaults.entrypoint !== undefined) {
-      required.entrypoint = providerDefaults.entrypoint;
-    }
-    if (providerDefaults.connector !== undefined) {
-      required.connector = providerDefaults.connector;
-    }
-    if (providerDefaults.workspace !== undefined) {
-      required.workspace = providerDefaults.workspace;
-    }
-    if (providerDefaults.detector !== undefined) {
-      required.detector = providerDefaults.detector;
-    }
-  }
+  const content = referenceProviderStoreContent(host, providerDefaults);
   const options: CatalogServiceOptions = {
     content,
   };
@@ -298,14 +252,6 @@ function referenceCatalogOptions(
     options.dependencyBindings = dependencyBindings;
   }
   return options;
-}
-
-interface ReferenceTemplateProviderDefaults {
-  launcher?: ProviderId;
-  entrypoint?: ProviderId;
-  connector?: ProviderId;
-  workspace?: ProviderId;
-  detector?: ProviderId;
 }
 
 function providerDependencyEvidence(

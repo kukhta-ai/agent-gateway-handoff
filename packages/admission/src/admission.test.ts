@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import {
   type AdmissionCatalogPort,
   AdmissionService,
+  type AdmissionTemplateDefaults,
   type AssemblyProposal,
   DEFAULT_MOUNT_POLICY,
   type LauncherMountCapability,
@@ -61,6 +62,11 @@ interface FakeCatalogOpts {
   providers?: Record<string, ProviderInfo | undefined>;
   /** Whether the template is known (default true). */
   templateKnown?: boolean;
+  /** Optional template availability/diagnostics override. */
+  templateStatus?: Pick<
+    AdmissionTemplateDefaults,
+    "available" | "availability" | "dependencies" | "diagnostics"
+  >;
   /** Launcher mount capability override (default: file+dir, ro+rw). */
   launcherCap?: LauncherMountCapability | undefined;
 }
@@ -80,7 +86,9 @@ function fakeCatalog(opts: FakeCatalogOpts = {}): AdmissionCatalogPort {
   };
   return {
     templateDefaults: (id) =>
-      (opts.templateKnown ?? true) && id === "browser-handoff" ? BROWSER_DEFAULTS : undefined,
+      (opts.templateKnown ?? true) && id === "browser-handoff"
+        ? { ...BROWSER_DEFAULTS, ...(opts.templateStatus ?? {}) }
+        : undefined,
     provider: (use) => {
       if (opts.providers && use in opts.providers) {
         return opts.providers[use];
@@ -233,6 +241,41 @@ describe("AdmissionService.admit — each rejection class → its stable code + 
     if (res.decision !== "reject") return;
     expect(res.code).toBe("catalog.unavailable");
     expect(res.exitCode).toBe(8);
+  });
+
+  it("UNAVAILABLE template dependency → catalog.unavailable with template diagnostics before part checks", async () => {
+    const catalog = fakeCatalog({
+      templateStatus: {
+        available: false,
+        availability: "unavailable",
+        dependencies: [{ dependency: "edge-proxy", status: "unbound" }],
+        diagnostics: [
+          {
+            code: "template.dependency_unavailable",
+            dependency: "edge-proxy",
+          },
+        ],
+      },
+    });
+    const res = new AdmissionService({ policy: policyAllowAll(), catalog }).admit(
+      proposal(),
+      await agentAuthority(),
+    );
+
+    expect(res.decision).toBe("reject");
+    if (res.decision !== "reject") return;
+    expect(res.code).toBe("catalog.unavailable");
+    expect(res.exitCode).toBe(8);
+    expect(res.error.detail).toMatchObject({
+      template: "browser-handoff",
+      availability: "unavailable",
+      diagnostics: [
+        expect.objectContaining({
+          code: "template.dependency_unavailable",
+          dependency: "edge-proxy",
+        }),
+      ],
+    });
   });
 
   it("MISSING required detail → reject, NOT a guess (GLA-021 AC#3): url-watcher without complete_on", async () => {

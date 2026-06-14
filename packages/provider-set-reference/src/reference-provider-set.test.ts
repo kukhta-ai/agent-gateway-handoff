@@ -104,6 +104,29 @@ describe("referenceProviderModules", () => {
     ]);
   });
 
+  it("applies operator-selected template defaults without embedding compatibility tables in the provider set", () => {
+    const host = createReferenceProviderHost();
+    const content = referenceProviderStoreContent(host, {
+      connector: "connector-cdp",
+      detector: "user-done",
+    });
+    const template = content.templates[0];
+
+    expect(template?.spec.requiredParts).toMatchObject({
+      connector: "connector-cdp",
+      detector: "user-done",
+    });
+    expect(template?.spec.compatibleProviders).toBeUndefined();
+    const catalog = new CatalogService({
+      content,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+    expect(catalog.templateShow("browser-handoff").compatibleProviders).toMatchObject({
+      connector: expect.arrayContaining(["connector-cdp"]),
+      detector: expect.arrayContaining(["url-watcher", "user-done"]),
+    });
+  });
+
   it("keeps host-touching reference providers unavailable without WPM dependency evidence", async () => {
     const host = new ProviderHost().registerModules(referenceProviderModules);
 

@@ -56,8 +56,24 @@ export interface ProviderInfo {
   name: string;
   /** SYSTEM-DERIVED availability (catalog invariant). */
   available: boolean;
+  /** Optional richer availability state from catalog reads. */
+  availability?: string;
+  /** Optional provider family, used only for diagnostics. */
+  family?: string;
+  /** Optional evaluated dependency evidence, already redacted by the catalog. */
+  dependencies?: unknown[];
+  /** Optional stable catalog/provider diagnostics. */
+  diagnostics?: unknown[];
   /** The provider's typed option schema (for per-part config validation), if any. */
   config_schema?: ConfigSchema;
+}
+
+/** Template defaults plus optional catalog status evidence. */
+export interface AdmissionTemplateDefaults extends TemplateDefaults {
+  available?: boolean;
+  availability?: string;
+  dependencies?: unknown[];
+  diagnostics?: unknown[];
 }
 
 /** A launcher's declared mount capability (kernel `MountCapability`-shaped). */
@@ -73,7 +89,7 @@ export interface LauncherMountCapability {
  */
 export interface AdmissionCatalogPort {
   /** The template's structural DEFAULTS (parts + ttl) for the mutate step; undefined ⇒ unknown template. */
-  templateDefaults(id: string): TemplateDefaults | undefined;
+  templateDefaults(id: string): AdmissionTemplateDefaults | undefined;
   /** A provider's facts by `use` name; undefined ⇒ not registered. */
   provider(use: string): ProviderInfo | undefined;
   /** The mount capability of a launcher provider; undefined ⇒ launcher unknown / declares none. */
@@ -316,6 +332,14 @@ export class AdmissionService {
         template: proposal.template,
       });
     }
+    if (defaults.available === false) {
+      return reject("catalog.unavailable", `template "${proposal.template}" is not available`, {
+        template: proposal.template,
+        availability: defaults.availability ?? "unavailable",
+        dependencies: defaults.dependencies ?? [],
+        diagnostics: defaults.diagnostics ?? [],
+      });
+    }
     // FIXED/OPEN line (docs/04 §4/§5): an agent override of a template-FIXED part is a REJECT, not a
     // silent override; an override of an OPEN part must use a COMPATIBLE provider. Decided from the
     // agent's EXPLICIT proposal parts (not the merged spec), so it runs BEFORE resolution.
@@ -496,6 +520,10 @@ export class AdmissionService {
       if (!info.available) {
         return reject("catalog.unavailable", `provider "${ref.use}" is not available`, {
           use: ref.use,
+          availability: info.availability ?? "unavailable",
+          family: info.family,
+          dependencies: info.dependencies ?? [],
+          diagnostics: info.diagnostics ?? [],
         });
       }
     }
