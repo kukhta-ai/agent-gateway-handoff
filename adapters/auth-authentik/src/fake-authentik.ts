@@ -63,6 +63,8 @@ export interface FakeAuthentikOptions {
   issuerUrl?: string;
   /** The OIDC client id (the `aud`). Default `"gla-client"`. */
   clientId?: string;
+  /** The public JWKS key id. Default `"fake-key-1"`; tests may vary it to model key rotation. */
+  keyId?: string;
   /** The token endpoint URL the adapter is configured with (the fake `fetch` routes this path). Default discovered. */
   tokenEndpoint?: string;
 }
@@ -85,6 +87,7 @@ export class FakeAuthentik {
   readonly jwks: JWTVerifyGetKey;
 
   private readonly privateKey: CryptoKey;
+  private readonly publicJwk: JWK;
   /** `code` → the staged token-endpoint response. A `code` with no staging yields an HTTP 400. */
   private readonly staged = new Map<string, TokenEndpointResponse>();
   /** A second JWKS (a DIFFERENT key) for minting bad-signature tokens jose will reject. */
@@ -106,6 +109,7 @@ export class FakeAuthentik {
     this.authorizationEndpoint = new URL("authorize/", base).toString();
     this.tokenEndpoint = args.tokenEndpoint ?? new URL("token/", base).toString();
     this.jwksUri = new URL("jwks/", base).toString();
+    this.publicJwk = args.publicJwk;
     this.jwks = createLocalJWKSet({ keys: [args.publicJwk] });
   }
 
@@ -115,7 +119,7 @@ export class FakeAuthentik {
     const clientId = opts.clientId ?? "gla-client";
     const { publicKey, privateKey } = await generateKeyPair(ALG);
     const publicJwk = await exportJWK(publicKey);
-    publicJwk.kid = "fake-key-1";
+    publicJwk.kid = opts.keyId ?? "fake-key-1";
     publicJwk.alg = ALG;
     publicJwk.use = "sig";
     const wrong = await generateKeyPair(ALG);
@@ -136,6 +140,11 @@ export class FakeAuthentik {
       tokenEndpoint: this.tokenEndpoint,
       jwksUri: this.jwksUri,
     };
+  }
+
+  /** The JWKS document a real authentik JWKS endpoint would serve. */
+  jwksDocument(): { keys: JWK[] } {
+    return { keys: [this.publicJwk] };
   }
 
   /** Mint a signed id_token with the chosen claims (defaults: this fake's iss/aud, sub-default, now..+300s). */
@@ -161,7 +170,7 @@ export class FakeAuthentik {
       payload.gla_uv = claims.userVerified;
     }
     return new SignJWT(payload)
-      .setProtectedHeader({ alg: ALG, kid: "fake-key-1" })
+      .setProtectedHeader({ alg: ALG, kid: String(this.publicJwk.kid ?? "fake-key-1") })
       .setIssuer(claims.iss ?? this.issuerUrl)
       .setAudience(claims.aud ?? this.clientId)
       .setSubject(claims.sub ?? "sub-default")
@@ -200,7 +209,7 @@ export class FakeAuthentik {
       payload.nonce = claims.nonce;
     }
     return new SignJWT(payload)
-      .setProtectedHeader({ alg: "HS256", kid: "fake-key-1" })
+      .setProtectedHeader({ alg: "HS256", kid: String(this.publicJwk.kid ?? "fake-key-1") })
       .setIssuer(claims.iss ?? this.issuerUrl)
       .setAudience(claims.aud ?? this.clientId)
       .setSubject(claims.sub ?? "sub-default")
@@ -224,7 +233,7 @@ export class FakeAuthentik {
       payload.amr = claims.amr;
     }
     return new SignJWT(payload)
-      .setProtectedHeader({ alg: ALG, kid: "fake-key-1" })
+      .setProtectedHeader({ alg: ALG, kid: String(this.publicJwk.kid ?? "fake-key-1") })
       .setIssuer(claims.iss ?? this.issuerUrl)
       .setAudience(claims.aud ?? this.clientId)
       .setSubject(claims.sub ?? "sub-default")
