@@ -8,7 +8,9 @@ The default and custom provider path is intentionally the same for runtime layer
 is a provider family, every implementation is a provider package, and selected defaults live in provider profiles.
 Capsule templates follow the same package/test discipline as catalog `TemplatePackage`s rather than Provider Host
 factories. The provider graph plan in `provider-graph-defaults-and-extension-plan.md` is the architecture source for
-that direction.
+that direction. The developer/operator-agent authoring experience for this workflow is specified in
+`provider-authoring-ux.md`; that UX spec covers entry points, diagnostics, recovery, and the handoff into operator
+install/update.
 
 ## Where Provider Code Lives
 
