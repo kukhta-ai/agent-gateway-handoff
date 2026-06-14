@@ -4,15 +4,15 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — GLA-106 provider-set-agnostic app composition"
-branch: feature/provider-host-task-106
+phase_name: "Autonomous build — provider-host composition epic"
+branch: feature/provider-host
 epic: provider-host-composition-106
-active_story: GLA-106
-review_cycle: 2
+active_story: null
+review_cycle: 0
 follow_on_scope:
   tasks: "GLA-106"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "GLA-106 is In Progress on feature/provider-host-task-106; dependencies GLA-100, GLA-101, GLA-105 are Done"
+  next_ready_sequence: "GLA-106 is Done and merged into feature/provider-host; run backlog sequence list before selecting any next work"
   note: "2026-06-14 user goal: implement backlog task GLA-106 according to the project SDLC, architecture, and vision. Persistent specialists were initialized first: architect Mill, SM Hilbert, worker Dirac, reviewer Wegener, TEA/security Helmholtz, investigator Tesla."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
