@@ -78,6 +78,56 @@ describe("Provider Host runtime boundaries", () => {
     );
   });
 
+  it("allows only the explicit app distribution entrypoint to import the reference provider set", () => {
+    const result = checkProviderBoundaries({
+      extraRuntimeFiles: [
+        {
+          file: "packages/app/src/index.ts",
+          source: 'import { referenceProviderModules } from "@gla/provider-set-reference";\n',
+        },
+        {
+          file: "packages/app/src/composition.ts",
+          source: 'import { createReferenceProviderHost } from "@gla/provider-set-reference";\n',
+        },
+        {
+          file: "packages/session/src/reference-leak.ts",
+          source: 'const p = require("@gla/provider-set-reference");\n',
+        },
+        {
+          file: "packages/app/src/daemon.ts",
+          source: 'import { createProvisioningBridge } from "./index.js";\n',
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "runtime-reference-set-import",
+          file: "packages/app/src/composition.ts",
+          specifier: "@gla/provider-set-reference",
+        }),
+        expect.objectContaining({
+          kind: "runtime-reference-set-import",
+          file: "packages/session/src/reference-leak.ts",
+          specifier: "@gla/provider-set-reference",
+        }),
+        expect.objectContaining({
+          kind: "runtime-provider-set-entrypoint-import",
+          file: "packages/app/src/daemon.ts",
+          specifier: "./index.js",
+        }),
+      ]),
+    );
+    expect(result.violations).not.toContainEqual(
+      expect.objectContaining({
+        file: "packages/app/src/index.ts",
+        specifier: "@gla/provider-set-reference",
+      }),
+    );
+  });
+
   it("would reject a protected package declaring a concrete provider as a production dependency", () => {
     const result = checkProviderBoundaries({
       extraPackageJsons: [

@@ -263,9 +263,11 @@ function providerManifest(name: keyof typeof PROVIDER_MANIFESTS): ProviderManife
 
 function moduleFor(
   manifest: ProviderManifest,
+  moduleId: string,
   register: (id: ProviderId, ctx: ProviderRegistrationContext) => void,
 ): GlaProviderModule {
   return {
+    moduleId,
     manifest,
     register(ctx) {
       const id = manifest.metadata.name;
@@ -416,7 +418,7 @@ export const SECRET_STORE_REFERENCE_MANIFEST: ProviderManifest = {
 };
 
 export const referenceProviderModules: readonly GlaProviderModule[] = [
-  moduleFor(AUTH_WEBAUTHN_PROVIDER_MANIFEST, (id, ctx) => {
+  moduleFor(AUTH_WEBAUTHN_PROVIDER_MANIFEST, AUTH_WEBAUTHN_MODULE, (id, ctx) => {
     ctx.registerAuthProvider(id, {
       create(createCtx) {
         const rpName = optionalString(createCtx, "rpName");
@@ -436,7 +438,7 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
   }),
-  moduleFor(AUTH_AUTHENTIK_PROVIDER_MANIFEST, (id, ctx) => {
+  moduleFor(AUTH_AUTHENTIK_PROVIDER_MANIFEST, AUTH_AUTHENTIK_MODULE, (id, ctx) => {
     ctx.registerAuthProvider(id, {
       create(createCtx) {
         const scopes = optionalString(createCtx, "scopes");
@@ -458,7 +460,7 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
   }),
-  moduleFor(providerManifest("launcher-process"), (id, ctx) => {
+  moduleFor(providerManifest("launcher-process"), LAUNCHER_PROCESS_MODULE, (id, ctx) => {
     ctx.registerLauncher(id, {
       create(createCtx) {
         const configuredMode = optionalString(createCtx, "mode");
@@ -481,13 +483,13 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
   }),
-  moduleFor(providerManifest(ENTRYPOINT_NOVNC_PROVIDER_ID), (id, ctx) => {
+  moduleFor(providerManifest(ENTRYPOINT_NOVNC_PROVIDER_ID), ENTRYPOINT_NOVNC_MODULE, (id, ctx) => {
     ctx.registerHumanEntrypoint(id, { create: () => new EntrypointNovncAdapter() });
   }),
-  moduleFor(providerManifest(CONNECTOR_CDP_PROVIDER_ID), (id, ctx) => {
+  moduleFor(providerManifest(CONNECTOR_CDP_PROVIDER_ID), CONNECTOR_CDP_MODULE, (id, ctx) => {
     ctx.registerAgentConnector(id, { create: () => new ConnectorCdpAdapter() });
   }),
-  moduleFor(providerManifest("workspace-profile"), (id, ctx) => {
+  moduleFor(providerManifest("workspace-profile"), WORKSPACE_PROFILE_MODULE, (id, ctx) => {
     ctx.registerWorkspace(id, {
       create(createCtx) {
         const root = optionalString(createCtx, "root");
@@ -495,7 +497,7 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
   }),
-  moduleFor(providerManifest(DETECTOR_URL_PROVIDER_ID), (id, ctx) => {
+  moduleFor(providerManifest(DETECTOR_URL_PROVIDER_ID), DETECTOR_URL_MODULE, (id, ctx) => {
     ctx.registerCompletionDetector(id, {
       create(createCtx) {
         const pollMs = optionalNumber(createCtx, "pollMs");
@@ -508,10 +510,14 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
   }),
-  moduleFor(providerManifest(DETECTOR_USER_DONE_PROVIDER_ID), (id, ctx) => {
-    ctx.registerCompletionDetector(id, { create: () => new UserDoneDetectorAdapter() });
-  }),
-  moduleFor(CHANNEL_CLI_MANIFEST, (id, ctx) => {
+  moduleFor(
+    providerManifest(DETECTOR_USER_DONE_PROVIDER_ID),
+    PROVIDER_SET_REFERENCE_MODULE,
+    (id, ctx) => {
+      ctx.registerCompletionDetector(id, { create: () => new UserDoneDetectorAdapter() });
+    },
+  ),
+  moduleFor(CHANNEL_CLI_MANIFEST, CHANNEL_CLI_MODULE, (id, ctx) => {
     ctx.registerChannel(id, {
       create(createCtx) {
         const identity = createCtx.services.require<IdentityPort>("identity");
@@ -541,7 +547,7 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
   }),
-  moduleFor(SECRET_STORE_REFERENCE_MANIFEST, (id, ctx) => {
+  moduleFor(SECRET_STORE_REFERENCE_MANIFEST, PROVIDER_SET_REFERENCE_MODULE, (id, ctx) => {
     ctx.registerSecretStore(id, {
       create(createCtx) {
         return new ReferenceSecretStore(

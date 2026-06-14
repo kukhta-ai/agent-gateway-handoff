@@ -70,6 +70,7 @@ export type ProviderHostDiagnosticCode =
   | "provider.probe_failed"
   | "provider.factory_missing"
   | "provider.service_missing"
+  | "provider.state_unavailable"
   | "provider.async_unsupported";
 
 /** A redacted, stable diagnostic suitable for operator and agent-facing surfaces. */
@@ -246,8 +247,18 @@ export interface ProviderCreateContext {
 
 /** A trusted installed provider module. */
 export interface GlaProviderModule {
+  /** Stable package or distribution identity for diagnostics/read models. Defaults to the provider id when absent. */
+  readonly moduleId?: string;
   readonly manifest: ProviderManifest;
   register(ctx: ProviderRegistrationContext): void;
+}
+
+/** Provider metadata registered with the host, including the module that supplied it. */
+export interface ProviderDescriptor {
+  readonly providerId: ProviderId;
+  readonly moduleId: string;
+  readonly manifest: ProviderManifest;
+  readonly stateSchema?: ProviderStateSchema;
 }
 
 /** Registration surface exposed only to trusted provider modules. */
@@ -445,6 +456,7 @@ interface PreparedProviderCreate<TPort> {
 /** Internal Provider Host for trusted installed provider modules. */
 export class ProviderHost {
   private readonly manifests = new Map<ProviderId, ProviderManifest>();
+  private readonly moduleIds = new Map<ProviderId, string>();
   private readonly factories = factoryMap();
   private readonly probes = new Map<ProviderId, ProviderProbe>();
   private readonly stateSchemas = new Map<ProviderId, ProviderStateSchema>();
@@ -509,6 +521,7 @@ export class ProviderHost {
     }
     this.commitRegistration(staged);
     this.manifests.set(providerId, module.manifest);
+    this.moduleIds.set(providerId, module.moduleId ?? providerId);
     return this;
   }
 
@@ -529,6 +542,62 @@ export class ProviderHost {
   providerManifest(id: ProviderId): ProviderManifest | undefined {
     const manifest = this.manifests.get(id);
     return manifest === undefined ? undefined : structuredClone(manifest);
+  }
+
+  /** Registered provider metadata with the supplying module identity. */
+  providerDescriptor(id: ProviderId): ProviderDescriptor | undefined {
+    const manifest = this.providerManifest(id);
+    const moduleId = this.moduleIds.get(id);
+    if (manifest === undefined || moduleId === undefined) {
+      return undefined;
+    }
+    const stateSchema = this.providerStateSchema(id);
+    return {
+      providerId: id,
+      moduleId,
+      manifest,
+      ...(stateSchema !== undefined ? { stateSchema } : {}),
+    };
+  }
+
+  /** Registered provider metadata, failing closed through Provider Host diagnostics when absent or wrong-family. */
+  requireProviderDescriptor(
+    id: ProviderId,
+    expectedFamily?: RuntimeProviderFamily,
+  ): ProviderDescriptor {
+    const descriptor = this.providerDescriptor(id);
+    if (descriptor === undefined) {
+      this.fail({
+        code: "provider.unknown",
+        providerId: id,
+        ...(expectedFamily !== undefined ? { family: expectedFamily } : {}),
+        message: `unknown provider "${id}"`,
+      });
+    }
+    if (expectedFamily !== undefined && descriptor.manifest.spec.family !== expectedFamily) {
+      this.fail({
+        code: "provider.family_mismatch",
+        providerId: id,
+        family: expectedFamily,
+        message: `provider "${id}" is registered as ${descriptor.manifest.spec.family}, not ${expectedFamily}`,
+        detail: {
+          actualFamily: descriptor.manifest.spec.family,
+          expectedFamily,
+        },
+      });
+    }
+    return descriptor;
+  }
+
+  /** Registered provider metadata, in registration order. */
+  providerDescriptors(): ProviderDescriptor[] {
+    return this.providerIds().map((id) => {
+      const descriptor = this.providerDescriptor(id);
+      if (descriptor === undefined) {
+        throw new Error(`provider descriptor missing for registered provider "${id}"`);
+      }
+      return descriptor;
+    });
   }
 
   /** Registered provider ids for a family. */
@@ -691,11 +760,12 @@ export class ProviderHost {
     }
 
     const diagnostics = redactingDiagnostics(opts.diagnostics ?? this);
+    const state = this.providerStateNamespace(id, family, opts.stateRoot ?? this.stateRoot);
     const ctx: ProviderCreateContext = {
       providerId: id,
       config,
       dependencies,
-      state: (opts.stateRoot ?? this.stateRoot).namespace(id),
+      state,
       secrets: opts.secrets ?? EMPTY_SECRET_RESOLVER,
       diagnostics,
       services: opts.services ?? new EmptyProviderServices(),
@@ -712,6 +782,26 @@ export class ProviderHost {
     }
 
     return { factory, ...(probe !== undefined ? { probe } : {}), ctx };
+  }
+
+  private providerStateNamespace(
+    id: ProviderId,
+    family: RuntimeProviderFamily,
+    stateRoot: ProviderStateRoot,
+  ): ProviderStateNamespace {
+    try {
+      return stateRoot.namespace(id);
+    } catch (error) {
+      this.fail({
+        code: "provider.state_unavailable",
+        providerId: id,
+        family,
+        message: `provider "${id}" state namespace is unavailable`,
+        detail: {
+          errorName: error instanceof Error ? error.name : typeof error,
+        },
+      });
+    }
   }
 
   private assertProbeAvailable(

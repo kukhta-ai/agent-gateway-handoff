@@ -1,11 +1,10 @@
 # Provider Host and Layer Migration Architecture
 
-> **Status:** architecture addendum and migration backlog seed. **Scope:** close the gap between the
-> provider-extension model in `docs/02-provider-and-extension-model.md` and the current implementation, where
-> `packages/app` still wires concrete providers by importing individual adapter packages and provider-specific
-> config/state types. This document does not create a public plugin ABI, dynamic hot-loading, marketplace
-> resolution, or a new auth gateway. It defines the internal provider-host shape needed before those heavier
-> mechanisms would be justified.
+> **Status:** architecture addendum and implemented Provider Host target for the migrated runtime families.
+> **Scope:** make the provider-extension model in `docs/02-provider-and-extension-model.md` concrete in code:
+> generic app composition consumes a trusted provider set/profile at boot, Provider Host owns registered provider
+> metadata and runtime creation, and the reference build is only one explicit distribution entrypoint. This document
+> does not create a public plugin ABI, dynamic hot-loading, marketplace resolution, or a new auth gateway.
 
 ## How this was produced
 
@@ -19,7 +18,9 @@ Inputs read for this note: `docs/01-architecture-overview.md`, `docs/02-provider
 `docs/03-software-candidates.md`, `docs/architecture/catalog-dependency-bindings.md`,
 `docs/architecture/authentik-integration.md`, `docs/architecture/kernel-contracts.md`,
 `docs/components/catalog.md`, `packages/kernel/src/ports.ts`, `packages/catalog/src/manifests.ts`,
-`packages/worker/src/index.ts`, and `packages/app/src/index.ts`.
+`packages/worker/src/index.ts`, `packages/provider-host/src/index.ts`,
+`packages/provider-set-reference/src/index.ts`, `packages/app/src/composition.ts`, and
+`packages/app/src/index.ts`.
 
 ## 1. Problem statement
 
@@ -33,15 +34,15 @@ places today:
   availability derived from WPM dependency bindings.
 - `packages/worker` already has a `SpawnerRegistry` for launchers.
 
-The missing piece is the runtime bridge between manifest and wiring: a generic **Provider Host** that turns
+The missing piece was the runtime bridge between manifest and wiring: a generic **Provider Host** that turns
 trusted installed provider modules into registered factories, catalog entries, probes, state namespaces, client
 assets, diagnostics, and runtime ports.
 
-Without that host, `packages/app` becomes the real extension API. It imports `@gla/auth-authentik`,
-`@gla/entrypoint-novnc`, `@gla/connector-cdp`, `@gla/launcher-process`, `@gla/channel-cli`, and their
-provider-specific types directly. That is acceptable for the first slice, but it violates the long-term rule:
-adding a provider should be adding a provider package, not editing the application composition root or teaching
-it the provider's vocabulary.
+Without that host, `packages/app` becomes the real extension API: it must import adapter packages, keep
+provider-id-to-module lookup tables, and understand provider-specific config/state vocabulary. That was acceptable
+for the first slice, but it violates the long-term rule: adding a provider should be adding a provider package and
+selecting a provider set/profile, not editing the application composition engine or teaching core packages the
+provider's vocabulary.
 
 ## 2. Layer inventory and migration target
 
@@ -72,8 +73,16 @@ install. The runtime agent can read and consume the resulting registry; it canno
 export type ProviderId = string;
 
 export interface GlaProviderModule {
+  readonly moduleId?: string;
   readonly manifest: ProviderManifest;
   register(ctx: ProviderRegistrationContext): void;
+}
+
+export interface ProviderDescriptor {
+  readonly providerId: ProviderId;
+  readonly moduleId: string;
+  readonly manifest: ProviderManifest;
+  readonly stateSchema?: ProviderStateSchema;
 }
 
 export interface ProviderRegistrationContext {
@@ -87,7 +96,6 @@ export interface ProviderRegistrationContext {
   registerSecretStore(id: ProviderId, factory: ProviderFactory<SecretStorePort>): void;
   registerProbe(id: ProviderId, probe: ProviderProbe): void;
   registerStateSchema(id: ProviderId, schema: ProviderStateSchema): void;
-  registerClientAssets?(id: ProviderId, assets: ProviderClientAssets): void;
 }
 
 export interface ProviderFactory<TPort> {
@@ -104,23 +112,45 @@ export interface ProviderCreateContext {
 }
 ```
 
-The exact TypeScript names are open to implementation refinement. The contract boundaries are not:
+The TypeScript names may continue to refine, but the contract boundaries are not open:
 
 - Provider modules own provider-specific config schemas, state schemas, probes, client assets, dependency
   requirements, compatibility relations, and factory construction.
 - The Provider Host owns validation, duplicate registration checks, dependency availability checks, redaction,
-  diagnostics, state namespace allocation, and creating the runtime registry views.
-- `packages/app` owns process bootstrapping, daemon state root, public bind configuration, and selection of
-  provider ids, but not provider-specific adapter construction.
+  diagnostics, state namespace allocation, provider descriptors, and creating runtime ports.
+- Generic app composition owns process bootstrapping, daemon state root, public bind configuration, and consuming
+  selected provider ids, but not provider-specific adapter construction, provider-id-to-module lookup tables, or
+  reference-provider defaults.
 - Core, gateway, session, identity, route, completion, and worker packages continue to depend on kernel ports and
   provider-neutral descriptors only.
 
 ## 4. Composition model
 
-Provider modules are loaded from a trusted **provider set** selected at build/install time. Initially this can be a
-static in-repo distribution package such as `@gla/provider-set-reference` that imports WebAuthn, authentik,
-process launcher, noVNC, CDP, profile workspace, URL detector, and CLI channel modules. `packages/app` imports the
-provider set as one opaque list, then gives that list to the Provider Host.
+Provider modules are loaded from a trusted **provider set** selected at build/install time. A provider set is the
+operator/distribution-owned bundle of provider modules plus a selected profile:
+
+```ts
+export interface AppProviderSet {
+  moduleId: string;
+  modules: readonly GlaProviderModule[];
+  profile: ProviderSelectionProfile;
+  defaultConfig?(args: ProviderDefaultConfigArgs): Record<string, unknown> | undefined;
+  defaultServices?(args: ProviderDefaultServicesArgs): Record<string, unknown> | undefined;
+  entrypointClientAssets?(host: ProviderHost, providerIds: readonly ProviderId[]): EntrypointClientAssetMount[];
+}
+```
+
+`packages/app/src/composition.ts` is the provider-set-agnostic composition engine. It accepts an
+`AppProviderSet` or a prebuilt `ProviderHost` plus full selected profile, registers modules into Provider Host,
+derives catalog content from `host.providerManifests()`, and derives wiring/read-model module identities from
+`host.providerDescriptor(id).moduleId`.
+
+`packages/app/src/index.ts` is the explicit reference/default distribution entrypoint. It imports
+`@gla/provider-set-reference`, defines today's default profile (`webauthn`, `launcher-process`,
+`connector-cdp`, `workspace-profile`, `entrypoint-novnc`, `url-watcher`, `channel-cli`), and supplies
+reference-only default config/service/asset mappings. This is the only generic-runtime source path allowed to
+select the reference set directly; the boundary scanner rejects reference-set imports from `composition.ts` and
+the narrow-waist packages.
 
 That is intentionally not dynamic hot-loading. The first goal is to remove provider-specific knowledge from app and
 runtime core while preserving a simple, testable modular monolith. Public ABI, third-party package loading, and
@@ -128,14 +158,22 @@ marketplace/version solving remain deferred until there are multiple real provid
 
 Startup flow:
 
-1. Load trusted provider modules from the selected provider set.
-2. Register each module into the Provider Host.
-3. Ingest provider manifests into the Catalog and derive availability from WPM dependency bindings plus current
+1. Select a trusted provider set/profile at distribution or install boot.
+2. Register each provider module into the Provider Host.
+3. Read provider descriptors and manifests from Provider Host; app-local lookup tables are not an authority.
+4. Ingest provider manifests into the Catalog and derive availability from WPM dependency bindings plus current
    probes.
-4. Normalize operator/env/WPM configuration into provider config keyed by provider id.
-5. Create selected runtime ports from provider factories only after config and dependency checks pass.
-6. Populate family registries such as the worker `SpawnerRegistry`.
-7. Expose catalog, schema, skill, doctor, and diagnostics views from the same provider-host state.
+5. Normalize operator/env/WPM compatibility inputs into provider-owned config/service maps through the selected
+   provider set.
+6. Create selected runtime ports from provider factories only after config, dependency, probe, and state checks pass.
+7. Populate family registries such as the worker `SpawnerRegistry`.
+8. Expose catalog, schema, skill, doctor, and diagnostics views from the same provider-host state.
+
+This differs from ordinary dependency injection. DI can pass an already-built object graph to app code, but it does
+not by itself define provider manifests, selected profiles, catalog projections, dependency evidence, probes,
+state namespaces, redaction, compatibility, or fail-closed runtime creation. Provider Host is the architectural
+layer that joins those concerns. DI remains an implementation technique inside this layer; it is not the extension
+contract.
 
 ## 5. State, secrets, and diagnostics
 
