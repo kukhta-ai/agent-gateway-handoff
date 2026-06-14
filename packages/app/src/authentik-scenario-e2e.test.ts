@@ -53,13 +53,12 @@ import {
 import { FakeAuthentik } from "@gla/auth-authentik/testing";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
-import type { DeliverySink } from "@gla/channel-cli";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { IdentityService } from "@gla/identity";
 import type { CapabilityId, OpaqueToken, RecipientRef, SessionId, TaskId } from "@gla/kernel";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
-import type { ProvisioningStack } from "./index.js";
+import type { DeliverySink, ProvisioningStack } from "./index.js";
 import { createProvisioningBridge } from "./index.js";
 
 const recipient = "tg:user:123" as RecipientRef;

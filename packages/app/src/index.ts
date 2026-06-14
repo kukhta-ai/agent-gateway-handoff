@@ -23,12 +23,6 @@ import {
   type IndexedDependencyBinding,
   toAdmissionCatalog,
 } from "@gla/catalog";
-import {
-  CHANNEL_CLI_MODULE,
-  ChannelCli,
-  type DeliverySink,
-  deliveryToStdout,
-} from "@gla/channel-cli";
 import { CompletionService, type DetectorContract } from "@gla/completion";
 import { AccessGateway } from "@gla/gateway";
 import { type EnrollmentRecord, IdentityService } from "@gla/identity";
@@ -39,6 +33,7 @@ import {
   type AuthAssuranceProfile,
   type AuthProviderPort,
   type CapabilityId,
+  type ChannelPort,
   type CompletionDetectorPort,
   type ConfigSchema,
   HmacCapabilitySigner,
@@ -65,6 +60,7 @@ import {
 } from "@gla/provider-host";
 import {
   AUTH_WEBAUTHN_PROVIDER_ID,
+  CHANNEL_CLI_PROVIDER_ID,
   CONNECTOR_CDP_PROVIDER_ID,
   DETECTOR_URL_PROVIDER_ID,
   ENTRYPOINT_NOVNC_PROVIDER_ID,
@@ -109,6 +105,15 @@ export interface Wiring {
   channel: string;
 }
 
+/** Provider-neutral sink used by channel providers that expose line-oriented delivery in dev/test. */
+export interface DeliverySink {
+  write(line: string): void;
+}
+
+const deliveryToStdout: DeliverySink = {
+  write: (line) => void process.stdout.write(`${line}\n`),
+};
+
 /** The composed application handle. `listen()` boots the real long-running daemon (the `:3000` deployable). */
 export interface App {
   readonly wiring: Wiring;
@@ -132,7 +137,7 @@ export function createApp(): App {
     connector: referenceProviderModuleForProviderId(CONNECTOR_CDP_PROVIDER_ID),
     workspace: referenceProviderModuleForProviderId(WORKSPACE_PROFILE_PROVIDER_ID),
     detector: referenceProviderModuleForProviderId(DETECTOR_URL_PROVIDER_ID),
-    channel: CHANNEL_CLI_MODULE,
+    channel: referenceProviderModuleForProviderId(CHANNEL_CLI_PROVIDER_ID),
   };
   return {
     wiring,
@@ -312,6 +317,29 @@ function providerDependencyEvidence(
     referenceCatalogOptions(dependencyBindings, providerHost),
   ).show(providerId)?.requires;
   return requires !== undefined && requires.length > 0 ? requires : undefined;
+}
+
+function buildChannelProvider(opts: {
+  providerHost: ProviderHost;
+  providerId: ProviderId;
+  config?: Record<string, unknown>;
+  dependencyBindings?: DependencyBinding[];
+  identity: IdentityService;
+  deliverySink?: DeliverySink;
+}): ChannelPort {
+  const dependencyEvidence = providerDependencyEvidence(
+    opts.providerId,
+    opts.dependencyBindings,
+    opts.providerHost,
+  );
+  return opts.providerHost.createProviderSync("channel", opts.providerId, {
+    config: opts.config ?? {},
+    ...(dependencyEvidence !== undefined ? { dependencyBindings: dependencyEvidence } : {}),
+    services: providerServices({
+      identity: opts.identity,
+      "channel.sink": opts.deliverySink ?? deliveryToStdout,
+    }),
+  });
 }
 
 interface ConnectorLifecycleMethods {
@@ -557,6 +585,10 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
   detectorProvider?: ProviderId;
   /** Provider-owned completion-detector config. */
   detectorProviderConfig?: Record<string, unknown>;
+  /** Opaque channel-provider id. Default `"channel-cli"` when handoff delivery is wired. */
+  channelProvider?: ProviderId;
+  /** Provider-owned channel config. Defaults preserve the CLI channel's injected-sink behaviour. */
+  channelProviderConfig?: Record<string, unknown>;
   /** Override the workspace root (tests pass a scratch dir under which profile dirs are created). */
   workspaceRoot?: string;
   /**
@@ -756,6 +788,7 @@ export function createProvisioningBridge(
     const connectorProviderId = opts.connectorProvider ?? CONNECTOR_CDP_PROVIDER_ID;
     const entrypointProviderId = opts.entrypointProvider ?? ENTRYPOINT_NOVNC_PROVIDER_ID;
     const detectorProviderId = opts.detectorProvider ?? DETECTOR_URL_PROVIDER_ID;
+    const channelProviderId = opts.channelProvider ?? CHANNEL_CLI_PROVIDER_ID;
     const catalogOptions = referenceCatalogOptions(opts.dependencyBindings, providerHost, {
       ...(opts.launcherProvider !== undefined ? { launcher: opts.launcherProvider } : {}),
       ...(opts.workspaceProvider !== undefined ? { workspace: opts.workspaceProvider } : {}),
@@ -945,7 +978,16 @@ export function createProvisioningBridge(
             ? { enrollments: state.kv<EnrollmentRecord>("identity.enrollments") }
             : {}),
         });
-      const channel = new ChannelCli({ identity, sink: h.deliverySink ?? deliveryToStdout });
+      const channel = buildChannelProvider({
+        providerHost,
+        providerId: channelProviderId,
+        config: opts.channelProviderConfig ?? {},
+        identity,
+        ...(opts.dependencyBindings !== undefined
+          ? { dependencyBindings: opts.dependencyBindings }
+          : {}),
+        ...(h.deliverySink !== undefined ? { deliverySink: h.deliverySink } : {}),
+      });
       const authAssurancePolicy =
         h.authAssuranceProfile !== undefined
           ? authAssurancePolicyFromProfile(h.authAssuranceProfile)
@@ -1355,6 +1397,12 @@ export interface CreateEnrollmentStackOptions {
   port?: number;
   /** Structured WPM dependency evidence used by host-touching auth providers. */
   dependencyBindings?: DependencyBinding[];
+  /** Trusted provider-host registry for channel selection. Defaults to the reference provider set. */
+  providerHost?: ProviderHost;
+  /** Opaque channel-provider id. Default `"channel-cli"`. */
+  channelProvider?: ProviderId;
+  /** Provider-owned channel config. Defaults preserve the CLI channel's injected-sink behaviour. */
+  channelProviderConfig?: Record<string, unknown>;
   /** Where the channel writes the enrollment invite link (defaults to stdout). */
   deliverySink?: DeliverySink;
   /**
@@ -1391,8 +1439,8 @@ export interface EnrollmentStack {
    * The auth module actually wired, mapped from the selected provider id by the trusted provider set.
    */
   authModule: string;
-  /** The channel adapter the invite is delivered through (recipient-bound). */
-  channel: ChannelCli;
+  /** The channel provider the invite is delivered through (recipient-bound). */
+  channel: ChannelPort;
   /**
    * The OPERATOR enrollment action (docs/05 §3: NOT on the agent surface). Mint a single-use operator-discharge
    * grant bound to the recipient, then deliver the enrollment invite link (carrying the grant) to exactly that
@@ -1415,7 +1463,7 @@ export interface EnrollmentStack {
  *   - IdentityService ← the WebAuthn provider (the swap-IdP boundary: identity depends on the PORT)
  *   - CapabilityService.mintEnrollmentGrant / verifyEnrollmentGrant(Token) / markSpent — the single-use grant
  *   - AccessGateway ← the capability grant seam + the identity enroll seam (no adapter import)
- *   - ChannelCli ← delivers the recipient-bound invite link
+ *   - ChannelPort from Provider Host ← selected provider id + provider-owned config
  */
 export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): EnrollmentStack {
   // Provider selection (doc §1/§7): default → the in-tree WebAuthn provider (constructed exactly as before);
@@ -1454,9 +1502,16 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
   }
   const identity = new IdentityService({ authProvider });
   const capability = new CapabilityService();
-  const channel = new ChannelCli({
+  const providerHost = opts.providerHost ?? createReferenceProviderHost();
+  const channel = buildChannelProvider({
+    providerHost,
+    providerId: opts.channelProvider ?? CHANNEL_CLI_PROVIDER_ID,
+    config: opts.channelProviderConfig ?? {},
     identity,
-    sink: opts.deliverySink ?? deliveryToStdout,
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
+    ...(opts.deliverySink !== undefined ? { deliverySink: opts.deliverySink } : {}),
   });
   const gateway = new AccessGateway({
     grants: capability,

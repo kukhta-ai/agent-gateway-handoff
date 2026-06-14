@@ -17,14 +17,17 @@ import { Output, type OutputStreams, run } from "@gla/cli";
 import type {
   AgentConnector,
   AgentConnectorPort,
+  ChannelPort,
   CompletionDetectorPort,
   HumanEntrypointBinding,
   HumanEntrypointPort,
   LauncherPort,
   MountCapability,
   MountSpec,
+  OpaqueToken,
   PartRef,
   RawCompletionSignal,
+  RecipientRef,
   ResolvedAssemblySpec,
   RuntimeHandle,
   WorkspaceHandle,
@@ -107,6 +110,7 @@ interface FakeRuntimeRecords {
   reaped: WorkspaceHandle[];
   entrypoints: RuntimeHandle[];
   detectorSignals: string[];
+  delivered: Array<{ recipient: RecipientRef; link: string }>;
 }
 
 function fakeRuntimeRecords(): FakeRuntimeRecords {
@@ -120,6 +124,7 @@ function fakeRuntimeRecords(): FakeRuntimeRecords {
     reaped: [],
     entrypoints: [],
     detectorSignals: [],
+    delivered: [],
   };
 }
 
@@ -228,6 +233,18 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
     }
   }
 
+  class FakeChannel implements ChannelPort {
+    async deliver(recipient: RecipientRef, link: string, _delegation: OpaqueToken): Promise<void> {
+      records.delivered.push({ recipient, link });
+    }
+
+    async *receive(): AsyncIterable<{
+      recipient: RecipientRef;
+      message: string;
+      chatContext: unknown;
+    }> {}
+  }
+
   return [
     {
       manifest: {
@@ -321,6 +338,25 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
       register(ctx) {
         ctx.registerCompletionDetector("detector-fake", { create: () => new FakeDetector() });
         ctx.registerProbe("detector-fake", () => "available");
+      },
+    },
+    {
+      manifest: {
+        apiVersion: "gla.dev/v1",
+        kind: "ChannelAdapter",
+        metadata: { name: "channel-fake", version: "0.1.0" },
+        spec: {
+          family: "channel",
+          capability: { summary: "fake channel selected through Provider Host" },
+          config_schema: {
+            mode: { type: "enum", enum: ["record"], required: false },
+          },
+          probe: "channel-fake",
+        },
+      },
+      register(ctx) {
+        ctx.registerChannel("channel-fake", { create: () => new FakeChannel() });
+        ctx.registerProbe("channel-fake", () => "available");
       },
     },
   ];
@@ -489,7 +525,7 @@ describe("provisioning composition root — real `session create` + `session con
     expect(records.reaped).toHaveLength(1);
   });
 
-  it("selects fake entrypoint connector and detector providers from the admitted session assembly without core package changes", async () => {
+  it("selects fake channel entrypoint connector and detector providers without core package changes", async () => {
     const records = fakeRuntimeRecords();
     const providerHost = createReferenceProviderHost();
     for (const module of fakeProviderModules(records)) {
@@ -504,12 +540,13 @@ describe("provisioning composition root — real `session create` + `session con
       connectorProvider: "connector-fake",
       entrypointProvider: "entrypoint-fake",
       detectorProvider: "detector-fake",
+      channelProvider: "channel-fake",
+      channelProviderConfig: { mode: "record" },
       handoff: {
         expectedOrigin: "http://localhost:3000",
         publicBaseUrl: "http://localhost:3000",
         host: "127.0.0.1",
         port: 0,
-        deliverySink: { write: () => {} },
         completion: {},
       },
     });
@@ -550,6 +587,10 @@ describe("provisioning composition root — real `session create` + `session con
       });
       expect(records.attached).toEqual(["connector-fake", "connector-fake"]);
       expect(records.entrypoints).toHaveLength(1);
+      expect(records.delivered).toHaveLength(1);
+      expect(records.delivered[0]?.recipient).toBe("tg:user:1");
+      expect(records.delivered[0]?.link).toContain("http://localhost:3000/task/");
+      expect(records.delivered[0]?.link).toContain("/handoff/");
       expect(records.detectorSignals).toEqual(["fake-complete"]);
       expect(records.suspended).toEqual(["connector:fake"]);
       expect(records.resumed).toEqual(["connector:fake"]);

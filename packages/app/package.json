@@ -28,8 +28,6 @@
     "@gla/bridge": "workspace:*",
     "@gla/capability": "workspace:*",
     "@gla/catalog": "workspace:*",
-    "@gla/channel-cli": "workspace:*",
-    "@gla/channel-telegram": "workspace:*",
     "@gla/cli": "workspace:*",
     "@gla/completion": "workspace:*",
     "@gla/gateway": "workspace:*",

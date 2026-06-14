@@ -28,7 +28,6 @@ import {
 import { dirname, isAbsolute } from "node:path";
 import type { AgentBridge } from "@gla/bridge";
 import type { DependencyBinding } from "@gla/catalog";
-import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
 import { parsePublicBaseUrl, publicPath } from "@gla/gateway";
 import {
@@ -54,12 +53,16 @@ import { redactDaemonState } from "./daemon-state.js";
 import {
   type AuthProviderConfig,
   type AuthProviderKind,
+  type DeliverySink,
   createProvisioningBridge,
 } from "./index.js";
 
 const BRIDGE_SOCKET_MODE = 0o600;
 const BRIDGE_RUNTIME_DIR_MODE = 0o700;
 const BRIDGE_ENDPOINT_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const deliveryToStdout: DeliverySink = {
+  write: (line) => void process.stdout.write(`${line}\n`),
+};
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
 export interface ServeOptions {

@@ -135,27 +135,12 @@ importers:
       '@gla/catalog':
         specifier: workspace:*
         version: link:../catalog
-      '@gla/channel-cli':
-        specifier: workspace:*
-        version: link:../../adapters/channel-cli
-      '@gla/channel-telegram':
-        specifier: workspace:*
-        version: link:../../adapters/channel-telegram
       '@gla/cli':
         specifier: workspace:*
         version: link:../../surfaces/cli
       '@gla/completion':
         specifier: workspace:*
         version: link:../completion
-      '@gla/connector-cdp':
-        specifier: workspace:*
-        version: link:../../adapters/connector-cdp
-      '@gla/detector-url':
-        specifier: workspace:*
-        version: link:../../adapters/detector-url
-      '@gla/entrypoint-novnc':
-        specifier: workspace:*
-        version: link:../../adapters/entrypoint-novnc
       '@gla/gateway':
         specifier: workspace:*
         version: link:../gateway
