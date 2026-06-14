@@ -233,6 +233,8 @@ export class LauncherProcessAdapter implements LauncherPort {
         String(vncPort),
         "-localhost",
         "-forever",
+        "-shared",
+        "-noshm",
         "-nopw",
         "-quiet",
       ],
@@ -248,6 +250,25 @@ export class LauncherProcessAdapter implements LauncherPort {
     );
     if (websockify.pid !== undefined) {
       sidePids.push(websockify.pid);
+    }
+
+    const vncReady = await waitForVncBanner(vncPort, this.startTimeoutMs);
+    const websockifyReady = vncReady
+      ? await waitForTcpPorts([novncPort], this.startTimeoutMs)
+      : false;
+    if (!vncReady || !websockifyReady) {
+      reapPids(collectPids(child, sidePids));
+      throw glaError("dependency.probe_failed", "noVNC sidecar endpoints did not come up in time", {
+        detail: {
+          mode: "full",
+          display,
+          vncPort,
+          novncPort,
+          vncReady,
+          websockifyReady,
+          timeoutMs: this.startTimeoutMs,
+        },
+      });
     }
 
     const novncEndpoint = `ws://127.0.0.1:${novncPort}/`;
@@ -516,6 +537,68 @@ async function freePort(): Promise<number> {
       const port = typeof addr === "object" && addr !== null ? addr.port : 0;
       srv.close(() => resolve(port));
     });
+  });
+}
+
+/** Wait until every loopback TCP endpoint accepts a connection. */
+async function waitForTcpPorts(ports: number[], timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (const port of ports) {
+    let ready = false;
+    while (Date.now() < deadline) {
+      if (await tcpAccepts(port)) {
+        ready = true;
+        break;
+      }
+      await delay(150);
+    }
+    if (!ready) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Probe one loopback TCP port without sending application bytes. */
+async function tcpAccepts(port: number): Promise<boolean> {
+  const { createConnection } = await import("node:net");
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const done = (ok: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(500, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
+/** Probe x11vnc by waiting for the RFB banner instead of opening and immediately closing. */
+async function waitForVncBanner(port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await vncBannerAvailable(port)) {
+      return true;
+    }
+    await delay(150);
+  }
+  return false;
+}
+
+async function vncBannerAvailable(port: number): Promise<boolean> {
+  const { createConnection } = await import("node:net");
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const done = (ok: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(750, () => done(false));
+    socket.once("data", (chunk) => done(chunk.toString("ascii").startsWith("RFB ")));
+    socket.once("error", () => done(false));
   });
 }
 

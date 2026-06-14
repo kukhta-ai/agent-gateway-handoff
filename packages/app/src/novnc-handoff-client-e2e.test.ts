@@ -35,6 +35,7 @@ const HAVE_FULL_NOVNC = chromiumAvailable() && fullStackAvailable();
 const browsers: Browser[] = [];
 const closers: Array<() => Promise<void> | void> = [];
 const scratchDirs: string[] = [];
+const browserDiagnostics: string[] = [];
 
 afterAll(async () => {
   for (const browser of browsers) {
@@ -116,14 +117,39 @@ async function runEnrollment(page: Page, link: string): Promise<string> {
 async function stepUpAndWaitForNovnc(page: Page, link: string): Promise<void> {
   await page.goto(link);
   await page.click("#go");
-  await page.waitForFunction(
-    `(() => {
-      const text = document.getElementById("status")?.textContent || "";
-      return text.includes("Connected to the live browser");
-    })()`,
-    undefined,
-    { timeout: 45_000 },
-  );
+  try {
+    await page.waitForFunction(
+      `(() => {
+        const text = document.getElementById("status")?.textContent || "";
+        return text.includes("Connected to the live browser");
+      })()`,
+      undefined,
+      { timeout: 45_000 },
+    );
+  } catch (e) {
+    const diagnostics = await page
+      .evaluate(`(() => {
+        const resources = performance
+          .getEntriesByType("resource")
+          .map((entry) => ({
+            name: entry.name,
+            duration: entry.duration,
+            transferSize: entry.transferSize,
+          }))
+          .filter((entry) => /handoff|novnc|rfb|websock|core/i.test(entry.name));
+        return {
+          status: document.getElementById("status")?.textContent || "",
+          viewer: document.getElementById("viewer")?.textContent || "",
+          resources,
+        };
+      })()`)
+      .catch(() => ({ status: "", viewer: "", resources: [] }));
+    throw new Error(
+      `noVNC viewer did not connect; diagnostics=${JSON.stringify(diagnostics)}; cause=${
+        e instanceof Error ? e.message : String(e)
+      }; browserDiagnostics=${JSON.stringify(browserDiagnostics.slice(-30))}`,
+    );
+  }
   await page.waitForFunction(
     `(() => {
       const viewer = document.getElementById("viewer");
@@ -188,6 +214,21 @@ describe("REAL noVNC handoff browser client (GLA-077)", () => {
       browsers.push(humanBrowser);
       const humanContext = await humanBrowser.newContext();
       const humanPage = await humanContext.newPage();
+      humanPage.on("console", (msg) => {
+        browserDiagnostics.push(`console:${msg.type()}:${msg.text()}`);
+      });
+      humanPage.on("pageerror", (err) => {
+        browserDiagnostics.push(`pageerror:${err.message}`);
+      });
+      humanPage.on("websocket", (ws) => {
+        browserDiagnostics.push(`ws:${ws.url()}:open`);
+        ws.on("close", () => {
+          browserDiagnostics.push(`ws:${ws.url()}:close`);
+        });
+        ws.on("socketerror", (err) => {
+          browserDiagnostics.push(`ws:${ws.url()}:error:${String(err)}`);
+        });
+      });
       const gatewayResponses: Array<{ url: string; body: string }> = [];
       const gatewayResponseReads: Promise<void>[] = [];
       humanPage.on("response", (response) => {

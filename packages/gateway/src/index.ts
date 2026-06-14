@@ -1503,6 +1503,7 @@ export class AccessGateway {
     this.trackSocket(grantId, upstream);
 
     let cleaned = false;
+    let proxyStarted = false;
     const cleanup = (): void => {
       if (cleaned) {
         return;
@@ -1547,11 +1548,14 @@ export class AccessGateway {
       }
       // Pipe bytes both ways — the gateway is a transparent conduit to the mounted stream and NOTHING else. Every
       // byte resets the idle timeout (Node refreshes `setTimeout` on activity), so a LIVE stream is never killed.
+      proxyStarted = true;
       upstream.pipe(clientSocket);
       clientSocket.pipe(upstream);
     });
     upstream.on("error", () => {
-      this.refuseUpgrade(clientSocket, 502);
+      if (!proxyStarted) {
+        this.refuseUpgrade(clientSocket, 502);
+      }
       cleanup();
     });
     clientSocket.on("error", cleanup);
