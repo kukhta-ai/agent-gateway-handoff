@@ -475,8 +475,13 @@ export class ProviderHost {
         message: `provider "${providerId}" declares unsupported runtime family "${family}"`,
       });
     }
-    const schema = module.manifest.spec.config_schema;
-    if (schema !== undefined) {
+    for (const schema of [
+      module.manifest.spec.config_schema,
+      module.manifest.spec.factory_config_schema,
+    ]) {
+      if (schema === undefined) {
+        continue;
+      }
       const shape = validateSchemaShape(schema);
       if (!shape.ok) {
         const diagnostic: ProviderHostDiagnostic = {
@@ -654,7 +659,7 @@ export class ProviderHost {
         detail: { configType: typeof config },
       });
     }
-    const schema = manifest.spec.config_schema ?? {};
+    const schema = manifest.spec.factory_config_schema ?? manifest.spec.config_schema ?? {};
     const validation = validateConfig(schema, config);
     if (!validation.ok) {
       const err = configDefectsToError(validation.defects);

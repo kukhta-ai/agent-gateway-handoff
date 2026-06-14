@@ -97,7 +97,7 @@ export function handoffClientScript(): string {
   };
   const assetModuleUrl = (ctx, modulePath) => {
     const client = ctx.client || {};
-    const ref = cleanSegment(client.ref || "novnc");
+    const ref = cleanSegment(client.ref);
     if (!ref) return undefined;
     const base = String(ctx.clientAssets || cfg.paths.clientAssets || "${DEFAULT_CLIENT_ASSETS_PATH}").replace(/\\/+$/, "");
     const mod = cleanAssetPath(modulePath || "core/rfb.js");

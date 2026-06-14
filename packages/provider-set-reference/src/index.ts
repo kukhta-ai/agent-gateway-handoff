@@ -29,12 +29,23 @@ import {
   deliveryToStdout,
 } from "@gla/channel-cli";
 import { CONNECTOR_CDP_MODULE, ConnectorCdpAdapter } from "@gla/connector-cdp";
-import { DETECTOR_URL_MODULE, DetectorUrlAdapter } from "@gla/detector-url";
-import { ENTRYPOINT_NOVNC_MODULE, EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
+import {
+  DETECTOR_URL_MODULE,
+  DetectorUrlAdapter,
+  type DetectorUrlOptions,
+} from "@gla/detector-url";
+import {
+  ENTRYPOINT_NOVNC_MODULE,
+  type EntrypointClientAssetMount,
+  EntrypointNovncAdapter,
+  NOVNC_CLIENT_ASSET_REF,
+  novncClientAssetMounts,
+} from "@gla/entrypoint-novnc";
 import type {
   AuthProviderPort,
   CompletionDetectorPort,
   ConfigSchema,
+  HumanEntrypointPort,
   IdentityPort,
   LauncherPort,
   RawCompletionSignal,
@@ -64,6 +75,14 @@ export const AUTH_AUTHENTIK_PROVIDER_ID = "authentik" as const;
 export const LAUNCHER_PROCESS_PROVIDER_ID = "launcher-process" as const;
 /** Provider id for the reference ephemeral browser-profile workspace. */
 export const WORKSPACE_PROFILE_PROVIDER_ID = "workspace-profile" as const;
+/** Provider id for the reference noVNC human entrypoint. */
+export const ENTRYPOINT_NOVNC_PROVIDER_ID = "entrypoint-novnc" as const;
+/** Provider id for the reference CDP agent connector. */
+export const CONNECTOR_CDP_PROVIDER_ID = "connector-cdp" as const;
+/** Provider id for the reference URL watcher completion detector. */
+export const DETECTOR_URL_PROVIDER_ID = "url-watcher" as const;
+/** Provider id for the reference explicit user-done completion detector. */
+export const DETECTOR_USER_DONE_PROVIDER_ID = "user-done" as const;
 
 /** Provider-owned auth config values keyed by the selected provider's schema. */
 export type ReferenceAuthProviderConfig = Record<string, unknown>;
@@ -125,6 +144,26 @@ export interface ReferenceWorkspaceProviderCreateResult {
   providerId: ProviderId;
   module: string;
   provider: WorkspacePort;
+}
+
+/** Provider-owned entrypoint config values keyed by the selected provider's schema. */
+export type ReferenceEntrypointProviderConfig = Record<string, unknown>;
+
+/** Inputs for creating a reference human-entrypoint provider through Provider Host. */
+export interface ReferenceEntrypointProviderCreateOptions {
+  /** Opaque entrypoint provider id. Defaults to {@link ENTRYPOINT_NOVNC_PROVIDER_ID}. */
+  providerId?: ProviderId;
+  /** Provider-owned config validated against the provider's registered schema. */
+  config?: ReferenceEntrypointProviderConfig;
+  /** WPM/catalog dependency evidence required by host-touching entrypoint providers. */
+  dependencyBindings?: CreateProviderOptions["dependencyBindings"];
+}
+
+/** Result of creating a reference human-entrypoint provider through Provider Host. */
+export interface ReferenceEntrypointProviderCreateResult {
+  providerId: ProviderId;
+  module: string;
+  provider: HumanEntrypointPort;
 }
 
 function requiredString(ctx: ProviderCreateContext, field: string): string {
@@ -325,10 +364,10 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
   }),
-  moduleFor(providerManifest("entrypoint-novnc"), (id, ctx) => {
+  moduleFor(providerManifest(ENTRYPOINT_NOVNC_PROVIDER_ID), (id, ctx) => {
     ctx.registerHumanEntrypoint(id, { create: () => new EntrypointNovncAdapter() });
   }),
-  moduleFor(providerManifest("connector-cdp"), (id, ctx) => {
+  moduleFor(providerManifest(CONNECTOR_CDP_PROVIDER_ID), (id, ctx) => {
     ctx.registerAgentConnector(id, { create: () => new ConnectorCdpAdapter() });
   }),
   moduleFor(providerManifest("workspace-profile"), (id, ctx) => {
@@ -339,15 +378,20 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
   }),
-  moduleFor(providerManifest("url-watcher"), (id, ctx) => {
+  moduleFor(providerManifest(DETECTOR_URL_PROVIDER_ID), (id, ctx) => {
     ctx.registerCompletionDetector(id, {
       create(createCtx) {
         const pollMs = optionalNumber(createCtx, "pollMs");
-        return new DetectorUrlAdapter(pollMs !== undefined ? { pollMs } : {});
+        const readUrl =
+          createCtx.services.get<DetectorUrlOptions["readUrl"]>("detectorUrl.readUrl");
+        return new DetectorUrlAdapter({
+          ...(pollMs !== undefined ? { pollMs } : {}),
+          ...(readUrl !== undefined ? { readUrl } : {}),
+        });
       },
     });
   }),
-  moduleFor(providerManifest("user-done"), (id, ctx) => {
+  moduleFor(providerManifest(DETECTOR_USER_DONE_PROVIDER_ID), (id, ctx) => {
     ctx.registerCompletionDetector(id, { create: () => new UserDoneDetectorAdapter() });
   }),
   moduleFor(CHANNEL_CLI_MANIFEST, (id, ctx) => {
@@ -389,13 +433,13 @@ export function referenceProviderModuleForProviderId(providerId: ProviderId): st
   if (providerId === WORKSPACE_PROFILE_PROVIDER_ID) {
     return WORKSPACE_PROFILE_MODULE;
   }
-  if (providerId === "entrypoint-novnc") {
+  if (providerId === ENTRYPOINT_NOVNC_PROVIDER_ID) {
     return ENTRYPOINT_NOVNC_MODULE;
   }
-  if (providerId === "connector-cdp") {
+  if (providerId === CONNECTOR_CDP_PROVIDER_ID) {
     return CONNECTOR_CDP_MODULE;
   }
-  if (providerId === "url-watcher") {
+  if (providerId === DETECTOR_URL_PROVIDER_ID) {
     return DETECTOR_URL_MODULE;
   }
   if (providerId === "channel-cli") {
@@ -457,12 +501,86 @@ export function createReferenceWorkspaceProvider(
   return { providerId, module: referenceProviderModuleForProviderId(providerId), provider };
 }
 
+/** Create a reference human-entrypoint through Provider Host. */
+export function createReferenceEntrypointProvider(
+  opts: ReferenceEntrypointProviderCreateOptions = {},
+): ReferenceEntrypointProviderCreateResult {
+  const providerId = opts.providerId ?? ENTRYPOINT_NOVNC_PROVIDER_ID;
+  const host = createReferenceProviderHost();
+  const provider = host.createProviderSync("entrypoint", providerId, {
+    config: opts.config ?? {},
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
+  });
+  return { providerId, module: referenceProviderModuleForProviderId(providerId), provider };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function clientAssetDeclarations(
+  manifest: ProviderManifest | undefined,
+): Record<string, unknown>[] {
+  const assets = manifest?.spec.capability.clientAssets;
+  return Array.isArray(assets) ? assets.filter(isRecord) : [];
+}
+
+function unique(values: readonly string[]): string[] {
+  return [...new Set(values)];
+}
+
+function providerIdsByFamily(
+  host: ProviderHost,
+  family: ProviderManifest["spec"]["family"],
+): string[] {
+  return host
+    .providerManifests()
+    .filter((provider) => provider.spec.family === family)
+    .map((provider) => provider.metadata.name);
+}
+
+function templateWithHostCompatibleProviders(host: ProviderHost): typeof BROWSER_HANDOFF_TEMPLATE {
+  const template = structuredClone(BROWSER_HANDOFF_TEMPLATE);
+  const compatible = template.spec.compatibleProviders ?? {};
+  template.spec.compatibleProviders = {
+    ...compatible,
+    entrypoint: unique([
+      ...(compatible.entrypoint ?? []),
+      ...providerIdsByFamily(host, "entrypoint"),
+    ]),
+    connector: unique([...(compatible.connector ?? []), ...providerIdsByFamily(host, "connector")]),
+    detector: unique([...(compatible.detector ?? []), ...providerIdsByFamily(host, "detector")]),
+  };
+  return template;
+}
+
+/**
+ * Resolve provider-declared browser-client asset mounts for reference entrypoint providers.
+ *
+ * The app/gateway see only generic asset mounts keyed by provider manifest metadata; concrete package
+ * resolution remains inside the selected reference provider set.
+ */
+export function referenceEntrypointClientAssetMounts(
+  host: ProviderHost = createReferenceProviderHost(),
+  providerIds: readonly ProviderId[] = host.providerIds("entrypoint"),
+): EntrypointClientAssetMount[] {
+  return providerIds.flatMap((providerId) => {
+    const declarations = clientAssetDeclarations(host.providerManifest(providerId));
+    const declaresNovnc = declarations.some(
+      (asset) => asset.ref === NOVNC_CLIENT_ASSET_REF && asset.package === "@novnc/novnc",
+    );
+    return declaresNovnc ? novncClientAssetMounts() : [];
+  });
+}
+
 /** Catalog store content derived from Provider Host registration data, not parallel app tables. */
 export function referenceProviderStoreContent(
   host: ProviderHost = createReferenceProviderHost(),
 ): StoreContent {
   return {
     providers: host.providerManifests(),
-    templates: [structuredClone(BROWSER_HANDOFF_TEMPLATE)],
+    templates: [templateWithHostCompatibleProviders(host)],
   };
 }

@@ -1,9 +1,10 @@
 ---
 id: GLA-098
 title: Migrate entrypoint connector and detector providers behind Provider Host
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-14 13:24'
+updated_date: '2026-06-14 16:02'
 labels:
   - architecture
   - provider-host
@@ -41,20 +42,26 @@ Context: noVNC, CDP, and url-watcher remain the reference providers. This task m
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The noVNC human entrypoint, CDP agent connector, url-watcher detector, and user-done detector are registered and selected through Provider Host modules while preserving existing scenario behavior.
-- [ ] #2 Human-entrypoint client assets and reverse-proxy transport requirements come from provider-host metadata, and gateway code serves them through generic entrypoint bindings without naming noVNC.
-- [ ] #3 Agent connector DTOs may carry provider-owned fields, but session, capability, worker, gateway, and route lifecycle logic continues to key on provider-neutral resource ids and connector bindings.
-- [ ] #4 Completion detector contracts, raw-signal validation, and watch behavior are supplied by provider-host registration, and out-of-contract detector signals remain rejected by the Completion service.
-- [ ] #5 Fake non-noVNC entrypoint, non-CDP connector, and non-url detector providers can be registered and exercised without changes to kernel, session, gateway, route, identity, or completion core packages.
-- [ ] #6 Unavailable entrypoint, connector, or detector providers fail proposal admission or provisioning with stable provider-host diagnostics rather than falling back to reference-slice defaults.
+- [x] #1 The noVNC human entrypoint, CDP agent connector, url-watcher detector, and user-done detector are registered and selected through Provider Host modules while preserving existing scenario behavior.
+- [x] #2 Human-entrypoint client assets and reverse-proxy transport requirements come from provider-host metadata, and gateway code serves them through generic entrypoint bindings without naming noVNC.
+- [x] #3 Agent connector DTOs may carry provider-owned fields, but session, capability, worker, gateway, and route lifecycle logic continues to key on provider-neutral resource ids and connector bindings.
+- [x] #4 Completion detector contracts, raw-signal validation, and watch behavior are supplied by provider-host registration, and out-of-contract detector signals remain rejected by the Completion service.
+- [x] #5 Fake non-noVNC entrypoint, non-CDP connector, and non-url detector providers can be registered and exercised without changes to kernel, session, gateway, route, identity, or completion core packages.
+- [x] #6 Unavailable entrypoint, connector, or detector providers fail proposal admission or provisioning with stable provider-host diagnostics rather than falling back to reference-slice defaults.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+GLA-098 implemented on feature/provider-host-task-098. BMAD evidence: worker loaded bmad-create-story and bmad-dev-story; literal workflow was blocked by missing sprint-status/story artifacts, so implementation used the committed design set and backlog fallback already recorded in SDLC state. Provider Host now selects entrypoint, connector, and detector runtime ports from each session's admitted ResolvedAssemblySpec; provider-set-reference owns concrete noVNC/CDP/url-watcher/user-done modules and client asset resolution; app package/tsconfig no longer directly depend on migrated concrete providers. Gateway no longer falls back missing client.ref to noVNC. Independent reviewer, architect, and TEA/security re-reviews approved after fixes. Verification: focused provider-host/app/gateway suite passed after typecheck (80 passed, 2 skipped); full pnpm gate passed (66 test files, 755 passed, 15 skipped).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Typecheck passes with no errors.
-- [ ] #2 Linter passes clean.
-- [ ] #3 Tests are added for the change and the full suite is green.
-- [ ] #4 Public functions and exported types are documented.
-- [ ] #5 No dead code or unused exports are introduced.
-- [ ] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
+- [x] #1 Typecheck passes with no errors.
+- [x] #2 Linter passes clean.
+- [x] #3 Tests are added for the change and the full suite is green.
+- [x] #4 Public functions and exported types are documented.
+- [x] #5 No dead code or unused exports are introduced.
+- [x] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
 <!-- DOD:END -->
