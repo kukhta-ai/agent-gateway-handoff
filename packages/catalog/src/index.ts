@@ -45,6 +45,7 @@ import {
 } from "./manifests.js";
 
 export * from "./manifests.js";
+export * from "./provider-profile.js";
 
 /** Stable package-identity marker (used by the `app` composition root's wiring record). */
 export const CATALOG_MODULE = "@gla/catalog" as const;
