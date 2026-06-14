@@ -6,6 +6,8 @@ The framing that drives every decision: **for GLA the primary user of the CLI is
 
 > The CLI and the MCP server are **two transports over the same primitives** (overview §, principle 11). Every noun-verb command here maps 1:1 to an MCP tool, and every read command maps to an MCP resource. Parity is an invariant: identical authority, validation, audit, and outcome on both surfaces.
 
+> **Current-vs-future status (GLA-094).** This document is both the current executable CLI contract and the agent-first CLI roadmap. The current runtime contract is explicitly listed in §3.1. Future surfaces remain in §3.2+ as product direction, but a command or flag not listed in the current contract is not silently supported: it is either rejected with a stable `usage.unsupported` diagnostic or left as ordinary `usage.unknown_command` when it has no current contract at all.
+
 ---
 
 ## 1. Design stance & principles
@@ -63,9 +65,77 @@ Why these and not, say, `capability` or `route`: those are how GLA *enforces*, n
 
 ## 3. Command reference
 
-### Command tree
+### 3.1 Current executable contract
 
-Global flags (accepted by every command):
+This is the CLI surface that the current runtime, root help, command-scoped help, and `gla schema` expose. It covers the scenario-control slice plus the small self-description and diagnostics surfaces needed by current tests and operators.
+
+Current global flags:
+
+```
+-o, --output  json|text       default: json  (text auto when stdout is a TTY)
+    --fields  <a,b,c>         top-level field mask for successful JSON/text results
+-q, --quiet                   suppress non-essential diagnostics; never suppresses results/errors
+    --endpoint <path|host:port>  process-entry override for GLA_ENDPOINT
+    --no-input                accepted no-op; current CLI never prompts
+-h, --help                    add `-o json` or use non-TTY output for machine-readable help
+```
+
+Current command tree:
+
+```
+gla
+├── whoami
+├── schema [<noun> [<verb>]]
+├── version
+├── catalog list [--kind <k>] [--available]
+├── template list [--available]
+├── template show <id>
+├── skill list [--for <template>]
+├── skill show <id>
+├── task create [--intent <label>] [--recipient <ref>]
+├── task get <id>
+├── task list [--state <s>]
+├── task complete <id>
+├── task revoke <id>
+├── session create [--task <id>] [--intent <label>] (-f <assembly.json> | --template <id> [parts...])
+│       [--mount <host>:<target>:<ro|rw> ...] [--ttl <dur>] [--dry-run]
+├── session get <id>
+├── session list [--task <id>] [--state <s>]
+├── session connector <id>
+├── session revoke <id>
+├── handoff open --session <id> [--reason <text>] [--recipient <ref>] [--ttl <dur>]
+├── handoff wait <id> [--timeout <dur>]
+├── handoff get <id>
+├── handoff list [--session <id>]
+├── handoff cancel <id>
+└── auth diagnostics [--recipient <ref>]   operator/local-daemon diagnostics, not agent login
+```
+
+Current self-description:
+
+- `gla schema` emits the machine-readable current contract: noun, verb, args, flags, output shape category, exit codes, and whether the command reads, mutates, or blocks.
+- `gla <noun> --help -o json` and `gla <noun> <verb> --help -o json` emit the same scoped contract for that noun or leaf command.
+- `--fields a,b,c` trims successful results to requested top-level fields. An unknown field is a usage diagnostic (`usage.bad_field`) before a known mutating command runs.
+- `--quiet` never suppresses stdout results or stderr error objects.
+
+Current deferred surfaces and diagnostics:
+
+| Surface | Current behavior | Future direction |
+|---|---|---|
+| `policy mounts` | `usage.unsupported` | policy inspection for host-mount planning |
+| `events [--follow]` | `usage.unsupported` | NDJSON state-change and handoff lifecycle stream |
+| `audit list` | `usage.unsupported` | redacted audit browsing and trace correlation |
+| `auth login/logout` | `usage.unsupported`; local profile remains credential-free | authenticated-agent profiles |
+| `-o ndjson` | `usage.unsupported` | streaming output mode for events/audit |
+| `--context` | `usage.unsupported`; use `GLA_ENDPOINT` or `--endpoint` today | named multi-install profiles |
+| `--trace-id` | `usage.unsupported` | audit/event correlation |
+| batch operations | `usage.unsupported` where named; otherwise no current command | bulk operations after single-command semantics stabilize |
+
+### 3.2 Future/target command tree
+
+The following target tree preserves the broader agent-first CLI vision. It is not a claim that every listed command is executable today. Current support is defined in §3.1; deferred entries below remain roadmap/future-contract items unless promoted by a later task.
+
+Target global flags (not all executable in the current contract):
 
 ```
 -o, --output  json|ndjson|text   default: json  (text auto when stdout is a TTY)
@@ -137,7 +207,7 @@ gla
     └── logout
 ```
 
-### Per-command actions
+### Target per-command actions
 
 One row per leaf command. The **Group** column is blank when it carries from the row above (so the visual blocks show hierarchy). The **What the CLI does** column is the contract for that invocation — what it validates, reads, writes, and returns, plus notable non-zero exit codes. *Read* = no state change; *mutates* = changes server state (safe to retry or returns a conflict); *blocks* = a long-poll.
 
@@ -157,7 +227,7 @@ One row per leaf command. The **Group** column is blank when it carries from the
 |  | `gla task list [--state <s>]` | 1. List tasks visible to this authority, filtered by `--state`<br>2. *Read-only* |
 |  | `gla task complete <id>` | 1. Drive the Task to `completed`<br>2. Tear down its sessions + capsules; revoke descendant capabilities<br>3. Exit 7 on an invalid state transition<br>4. *Mutates* |
 |  | `gla task revoke <id>` | 1. Abort the Task; same teardown as `complete` but a non-success terminal state<br>2. *Mutates* |
-| `session` | `gla session create [--task <id>] ( -f <spec> \| --template <id> [parts…] ) [--mount <h>:<t>:<mode> …] [--ttl <dur>] [--dry-run]` | 1. Resolve the task: use `--task`, else auto-create (or attach to) an implicit single-session task<br>2. Assemble the spec from `-f` or the part flags; collect `--mount` entries (mode default `ro`, target default `/work/<basename>`)<br>3. Submit to Admission (mutate defaults + canonicalize mount paths → validate policy / capability / catalog / identity, and each mount vs the allowed-set + denylist + mode + the launcher's mount capability — all offline)<br>4. `--dry-run`: print accept/reject and stop (exit 3 on reject)<br>5. On accept: provision the capsule via the Worker, mounting host paths as the agent's own uid; mint the `agent-connector` capability<br>6. Print `{session_id, state, capsule, connector:{type, cdp_url\|path, secret_ref}}`<br>7. Exit 3 (policy, incl. `mount.denied`) / 4 (capability) / 5 (`mount.not_found`) / 7 (`mount.conflict`) / 8 (dependency, incl. `mount.unsupported` by the launcher)<br>8. *Mutates* |
+| `session` | `gla session create [--task <id>] [--intent <label>] ( -f <spec> \| --template <id> [parts…] ) [--mount <h>:<t>:<mode> …] [--ttl <dur>] [--dry-run]` | 1. Resolve the task: use `--task`, else auto-create (or attach to) an implicit single-session task<br>2. Assemble the spec from `-f` or the part flags; collect `--mount` entries (mode default `ro`, target default `/work/<basename>`)<br>3. Submit to Admission (mutate defaults + canonicalize mount paths → validate policy / capability / catalog / identity, and each mount vs the allowed-set + denylist + mode + the launcher's mount capability — all offline)<br>4. `--dry-run`: print accept/reject and stop (exit 3 on reject)<br>5. On accept: provision the capsule via the Worker, mounting host paths as the agent's own uid; mint the `agent-connector` capability<br>6. Print `{session_id, state, capsule, connector:{type, cdp_url\|path, secret_ref}}`<br>7. Exit 3 (policy, incl. `mount.denied`) / 4 (capability) / 5 (`mount.not_found`) / 7 (`mount.conflict`) / 8 (dependency, incl. `mount.unsupported` by the launcher)<br>8. *Mutates* |
 |  | `gla session get <id>` | 1. Read the Session aggregate + state<br>2. Exit 5 if unknown<br>3. *Read-only* |
 |  | `gla session list [--task <id>] [--state <s>]` | 1. List sessions, filtered<br>2. *Read-only* |
 |  | `gla session connector <id>` | 1. Re-emit the agent-connector for a live session so a crashed agent re-attaches its CDP client<br>2. Prints a `secret_ref`, never a raw secret<br>3. Exit 7 if the session has no live capsule<br>4. *Read-only* |
@@ -176,8 +246,12 @@ One row per leaf command. The **Group** column is blank when it carries from the
 
 ### Connection & auth
 
-- **Local profile** (reference): the endpoint is a verified local socket (`GLA_ENDPOINT`, or a default); no token, no `login`. For the default Unix-domain socket profile, the daemon only serves after confirming the runtime directory and socket path are daemon-owned and not group/other writable/openable, with symlinks, regular files, directories, wrong-owner paths, unsafe parents, and already-active sockets refused. A same-owner stale socket may be removed after it no longer accepts connections. Loopback TCP (`127.0.0.1:<port>`, `[::1]:<port>`, `localhost:<port>`) is a development/advanced fallback, not equivalent to a private Unix socket for cross-user isolation. Same-UID compromise is out of scope for this profile. (Consistent with "we don't authenticate the agent in the local profile" — see `components/identity-and-auth.md` and `components/agent-bridge.md`.)
-- **Authenticated profiles:** `gla auth login` (mTLS / token) or a token supplied via `GLA_TOKEN` in the environment — **never** on argv.
+- **Current no-endpoint profile:** when neither `GLA_ENDPOINT` nor `--endpoint` is set, the CLI composes an in-process bridge for that invocation. This is useful for local/reference tests and read/provisioning flows that do not need daemon-shared live state.
+- **Current daemon profile:** `GLA_ENDPOINT` points at a local Unix socket path or loopback TCP endpoint; `--endpoint <path|host:port>` is the process-entry override and wins over the environment. Commands then operate on the running daemon's shared state (live capsules, grants, sessions). A non-local endpoint is rejected as `usage.bad_argument`; an unreachable local daemon is `dependency.unavailable` (exit 8).
+- **Local auth stance:** the current local profile has no token and no `auth login`. For the default Unix-domain socket profile, the daemon only serves after confirming the runtime directory and socket path are daemon-owned and not group/other writable/openable, with symlinks, regular files, directories, wrong-owner paths, unsafe parents, and already-active sockets refused. A same-owner stale socket may be removed after it no longer accepts connections. Loopback TCP (`127.0.0.1:<port>`, `[::1]:<port>`, `localhost:<port>`) is a development/advanced fallback, not equivalent to a private Unix socket for cross-user isolation. Same-UID compromise is out of scope for this profile. (Consistent with "we don't authenticate the agent in the local profile" — see `components/identity-and-auth.md` and `components/agent-bridge.md`.)
+- **Future authenticated profiles:** `gla auth login` (mTLS / token) or a token supplied via `GLA_TOKEN` in the environment — **never** on argv. This remains future work and is rejected by the current CLI with `usage.unsupported`.
+
+`gla version` reports the client version plus the observed connection mode (`client-only`, `in-process`, or `daemon`). It includes a `server` field only when a server version was actually queried; it must not imply a daemon/server version is known in client-only or in-process cases.
 
 ---
 
@@ -190,6 +264,13 @@ One row per leaf command. The **Group** column is blank when it carries from the
   "capsule": { "id": "cap_77a1", "template": "browser-handoff" },
   "connector": { "type": "cdp", "cdp_url": "ws://127.0.0.1:premapped/...", "secret_ref": "cap_ref_..." } }
 ```
+
+Current output modes:
+
+- JSON is the agent/default result channel. Human text is emitted only when `-o text` is forced or stdout is a TTY.
+- `-o ndjson` is reserved for future streaming surfaces and is rejected today with `usage.unsupported`.
+- `--fields a,b,c` applies a top-level field mask to successful results. For arrays, the mask is applied to each top-level object. Unknown fields fail with `usage.bad_field`.
+- `--quiet` suppresses only non-essential diagnostics. It does not suppress parseable stdout results or stderr error objects.
 
 **Error** → stderr, a JSON object; non-zero exit:
 
@@ -226,7 +307,7 @@ Stable and documented so agents branch without parsing prose.
 
 ## 6. Scenario 01, mapped to the CLI
 
-The exact calls the agent makes in `scenario-01-unified` when the Bridge surface is the CLI. Phases where the agent works *inside* the capsule use the **connector (CDP), not `gla`** — marked accordingly. (`$VAR` = captured from prior JSON output.)
+The exact calls the agent makes in `scenario-01-unified` when the Bridge surface is the CLI. Phases where the agent works *inside* the capsule use the **connector (CDP), not `gla`** — marked accordingly. (`$VAR` = captured from prior JSON output.) Field masks keep JSON object shape, so shell examples parse the requested id before reusing it.
 
 ```bash
 # Phase 1 — orient
@@ -236,16 +317,20 @@ gla skill show browser-handoff            # load procedural knowledge
 
 # Phase 2 — propose (validate, then provision)
 # (optional — a single-capsule goal may skip this; session create auto-creates an implicit task)
-TASK=$(gla task create --intent "register on acme" --recipient "$RECIPIENT" --fields task_id -q)
+TASK_JSON=$(gla task create --intent "register on acme" --recipient "$RECIPIENT" --fields task_id -q)
+TASK=$(node -pe 'JSON.parse(process.argv[1]).task_id' "$TASK_JSON")
 gla session create --task "$TASK" -f assembly.json --dry-run        # admission check only
-SESS_JSON=$(gla session create --task "$TASK" -f assembly.json)     # provisions the capsule
-# SESS_JSON.connector -> {cdp_url, secret_ref}  (the agent's handle to drive the browser)
+SESS_JSON=$(gla session create --task "$TASK" -f assembly.json --fields session_id -q)
+SESS=$(node -pe 'JSON.parse(process.argv[1]).session_id' "$SESS_JSON")
+CONN_JSON=$(gla session connector "$SESS")
+# CONN_JSON -> {type, cdp_url|path, secret_ref}  (the agent's handle to drive the browser)
 
 # Phase 4 — drive to the form          [CONNECTOR / CDP, not gla]
 #   agent uses connector.cdp_url with its own CDP client: open acme.example, go to /register
 
 # Phase 5 — handoff #1
-H1=$(gla handoff open --session "$SESS" --reason "complete registration form" --fields handoff_id -q)
+H1_JSON=$(gla handoff open --session "$SESS" --reason "complete registration form" --fields handoff_id -q)
+H1=$(node -pe 'JSON.parse(process.argv[1]).handoff_id' "$H1_JSON")
 #   link is delivered to the recipient via Telegram
 
 # Phases 6-7 — user authenticates + fills the form   [no agent CLI; agent waits]
@@ -255,7 +340,8 @@ gla handoff wait "$H1" --timeout 15m
 # Phase 9 — inspect /verify page        [CONNECTOR / CDP, not gla]  -> "code emailed"
 
 # Phase 11-12 — handoff #2 (same capsule)
-H2=$(gla handoff open --session "$SESS" --reason "enter verification code" --fields handoff_id -q)
+H2_JSON=$(gla handoff open --session "$SESS" --reason "enter verification code" --fields handoff_id -q)
+H2=$(node -pe 'JSON.parse(process.argv[1]).handoff_id' "$H2_JSON")
 gla handoff wait "$H2" --timeout 15m
 #   -> {status: verified}
 

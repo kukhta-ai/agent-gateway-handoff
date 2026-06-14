@@ -51,7 +51,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   const endpoint = flagEndpoint ?? resolveClientEndpoint();
   if (endpoint === undefined) {
     // In-process profile (no daemon): compose a fresh bridge per invocation (the default behaviour).
-    return run(rest, out);
+    return run(rest, out, inProcessServices());
   }
   // Daemon profile: forward the command to the running `gla serve` over the local bridge socket.
   let client: DaemonBridgeClient;
@@ -81,7 +81,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     return ExitCode.DEPENDENCY;
   }
   try {
-    const services: CliServices = { bridge: client };
+    const services: CliServices = { bridge: client, connection: { mode: "daemon" } };
     return await run(rest, out, services);
   } finally {
     client.close();
@@ -118,7 +118,7 @@ function extractEndpointFlag(argv: readonly string[]): {
 
 /** Build the default in-process services (the in-tree reference-slice Bridge) — exported for callers/tests. */
 export function inProcessServices(): CliServices {
-  return { bridge: new AgentBridge() };
+  return { bridge: new AgentBridge(), connection: { mode: "in-process" } };
 }
 
 /** Pre-scan argv for -o/--output so the Output sink is built with the right mode up front. */

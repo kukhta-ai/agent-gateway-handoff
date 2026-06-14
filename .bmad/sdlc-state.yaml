@@ -4,11 +4,11 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — awaiting next ready story"
-branch: feature/authentik
+phase_name: "Autonomous build — GLA-094 CLI runtime contract reconciliation"
+branch: feature/authentik-task-094
 epic: authentik-hardening-077-094
-active_story: null
-review_cycle: 0
+active_story: GLA-094
+review_cycle: 4
 follow_on_scope:
   tasks: "GLA-077..GLA-094"
   branch_base: "feature/authentik"
@@ -78,11 +78,11 @@ specialists:
   analyst:      {spawned: true, id: "019ebe27-1609-7391-80a3-45fca1a78f9b", open: false, resumable: true, role: "product brief / requirements conformance", last_skill: "bmad-product-brief loaded; init only; no workflow run"}
   pm:           {spawned: true, id: "019ebe27-164c-7230-bf2a-28a944582133", open: false, resumable: true, role: "PRD / plan-of-record conformance", last_skill: "bmad-prd loaded; init only; no workflow run"}
   ux-designer:  {spawned: true, id: "019ebe27-1674-76b0-8420-f493ce2d0a6b", open: false, resumable: true, role: "UX spec for capsule/access surfaces", last_skill: "bmad-ux loaded; init only; no artifact produced"}
-  architect:    {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "architecture baseline + epics/stories + readiness", last_skill: "GLA-093 bmad-create-architecture conformance review; provider-neutral boundaries and proof labels checked; APPROVED"}
-  tea:          {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test design / trace / NFR / quality gate", last_skill: "GLA-093 bmad-qa-generate-e2e-tests + TEA/security review; callback proof, canaries, JWKS retry safety checked; PASS"}
+  architect:    {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "architecture baseline + epics/stories + readiness", last_skill: "GLA-094 architecture/doc contract review; CLI registry/parser boundary and docs current/future split checked; APPROVED"}
+  tea:          {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test design / trace / NFR / quality gate", last_skill: "GLA-094 bmad-qa-generate-e2e-tests + TEA/security review; field-mask docs flow, parser fail-closed behavior, and gate evidence checked; PASS"}
   sm:           {spawned: true, id: "019ebe27-1702-75a3-b8de-ab1c33162e33", open: true, resumable: true, role: "sprint setup + create-story", last_skill: "bmad-create-story loaded; task order verified; init only"}
-  worker:       {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation + E2E generation", last_skill: "GLA-093 bmad-create-story + bmad-dev-story + bmad-qa-generate-e2e-tests; proof-quality hardening implemented; pnpm run gate passed"}
-  reviewer:     {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "separate-lane story review", last_skill: "GLA-093 bmad-story-automator-review; no blockers after artifact cleanup; APPROVED"}
+  worker:       {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation + E2E generation", last_skill: "GLA-094 bmad-create-story + bmad-dev-story + bmad-qa-generate-e2e-tests; CLI runtime contract reconciliation implemented; pnpm run gate passed"}
+  reviewer:     {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "separate-lane story review", last_skill: "GLA-094 bmad-story-automator-review; parser flag blockers resolved; APPROVED"}
   investigator: {spawned: true, id: "019ebe2c-d1e4-7c80-958e-dcab9457d9e4", open: true, resumable: true, role: "systematic debugging at the epic gate", last_skill: "bmad-investigate loaded and workflow resolved; init only"}
   retro:        {spawned: true, id: "019ebe2c-d23e-7520-85b7-3e08ad373179", open: true, resumable: true, role: "epic retrospective", last_skill: "bmad-retrospective loaded and workflow resolved; init only"}
 specialist_runtime_note: "Collaboration limit allows six open agents. Analyst/PM/UX/architect were initialized, then closed to free capacity; their IDs remain resumable."
