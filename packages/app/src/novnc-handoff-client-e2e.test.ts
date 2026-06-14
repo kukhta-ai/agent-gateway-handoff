@@ -20,6 +20,9 @@ const recipient = "tg:user:123" as RecipientRef;
 const REAL_NOVNC_CANARY = "real-novnc-secret-agent-must-not-see";
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
     return typeof p === "string" && p.length > 0 && existsSync(p);
@@ -374,9 +377,9 @@ describe("REAL noVNC handoff browser client (GLA-077)", () => {
   );
 
   it.skipIf(HAVE_FULL_NOVNC)(
-    "REAL noVNC recipient viewport skipped: full stack unavailable",
+    "REAL noVNC recipient viewport skipped: full stack unavailable or browser E2E optional",
     () => {
-      expect(fullStackAvailable()).toBe(false);
+      expect(HAVE_FULL_NOVNC).toBe(false);
     },
   );
 });

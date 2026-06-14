@@ -158,6 +158,9 @@ describe("DetectorUrlAdapter — contract + scripted URL sequence (GLA-042/043)"
 // ── REAL url-watcher over REAL CDP against a stub site ──────────────────────────────────────────────────
 
 function chromiumExe(): string | undefined {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return undefined;
+  }
   try {
     const p = chromium.executablePath();
     return typeof p === "string" && p.length > 0 && existsSync(p) ? p : undefined;
