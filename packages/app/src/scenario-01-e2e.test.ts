@@ -22,12 +22,13 @@
 // fresh virtual authenticator, a fresh workspace root scanned for the temp profile. The capsule + broker +
 // gateway + browsers are always reaped in a finally/afterAll.
 //
-// GATED: skips when no cached Chromium is available; every step it composes is ALSO proven by the per-slice
-// E2Es (cited inline) and the unit/contract tests, so the security seams hold regardless. Spawns REAL
-// browsers — a generous timeout; but it RUNS in `pnpm gate` (it is the MVP proof, not an excluded slow test).
+// GATED by the full quality gate: `pnpm gate` runs `test:e2e:preflight` before Vitest, so missing Chromium
+// is a gate failure rather than an acceptable skipped capstone. The skip branch remains only for the explicit
+// non-DoD opt-out command. Spawns REAL browsers — a generous timeout; it is the MVP proof, not an excluded
+// slow test.
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
@@ -68,9 +69,12 @@ const recipient = "tg:user:123" as RecipientRef;
 const wrongRecipient = "tg:user:999" as RecipientRef; // S-1/S-10: a DIFFERENT recipient (forwarded link is useless)
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }

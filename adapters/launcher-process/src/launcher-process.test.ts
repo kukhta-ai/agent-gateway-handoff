@@ -56,6 +56,9 @@ function specWithProfile(profileDir: string): ResolvedAssemblySpec {
 
 /** Is a usable Chromium available (the cached browser)? Skip the REAL test if not. */
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
     return typeof p === "string" && p.length > 0 && existsSync(p);
@@ -165,9 +168,9 @@ describe("LauncherProcessAdapter — FULL mode noVNC (gated; runs in hermes-1)",
   );
 
   it.skipIf(HAVE_FULL)(
-    "FULL noVNC test SKIPPED — Xvfb/x11vnc/websockify absent (will run in hermes-1)",
+    "FULL noVNC test SKIPPED — full stack unavailable or browser E2E optional",
     () => {
-      expect(fullStackAvailable()).toBe(false);
+      expect(HAVE_FULL).toBe(false);
     },
   );
 });

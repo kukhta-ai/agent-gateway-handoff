@@ -32,12 +32,12 @@
 // design set (authentik-e2e-verification.md §2–§7) as the stated fallback. Blocker recorded; not silently substituted.
 //
 // COLD = a fresh `createProvisioningBridge(...)` per test + a fresh `FakeAuthentik` + a fresh stub upstream; the
-// capsule + broker + gateway + browsers are always reaped in finally/afterAll. GATED on cached Chromium (the real
-// capsule spawn); every composed step is ALSO proven by the per-slice tests (auth-authentik, authentik-enrollment,
-// authentik-dual-method) so the seams hold regardless.
+// capsule + broker + gateway + browsers are always reaped in finally/afterAll. The full quality gate runs
+// `test:e2e:preflight` before Vitest, so missing Chromium is a gate failure rather than an acceptable skipped
+// authentik capstone. The skip branch remains only for the explicit non-DoD opt-out command.
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { type Server, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
@@ -70,9 +70,12 @@ const discharge = "operator-discharge-grant" as OpaqueToken;
 const BOUND_SUB = "sub-recipient-capstone-immutable";
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }

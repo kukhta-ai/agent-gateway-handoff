@@ -59,10 +59,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install human-view E2E runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc websockify
+
+      # Browser-backed E2Es are part of the Definition of Done. Install the Playwright Chromium
+      # runtime and Linux launch dependencies before the single gate entrypoint runs, so missing
+      # browser support is a red CI check rather than a silently skipped E2E.
+      - name: Install browser E2E runtime
+        run: pnpm dlx playwright@1.60.0 install --with-deps chromium
+
       # The quality gate — the SAME single entrypoint a contributor runs locally and the pre-commit
       # hook runs (CONTRIBUTING.md > "Quality gate"). `pnpm gate` runs, in order, failing on the first
       # non-zero exit: tsc -b (build/type-check) -> biome ci . (lint/format + module-boundary rule) ->
-      # vitest run (tests, incl. the boundary-violation guard test).
+      # browser E2E preflight -> vitest run (tests, incl. the boundary-violation guard test).
       - name: Quality gate
         run: pnpm gate
 

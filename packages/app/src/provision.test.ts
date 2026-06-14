@@ -62,9 +62,12 @@ afterAll(() => {
 });
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && existsSync(p);
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
