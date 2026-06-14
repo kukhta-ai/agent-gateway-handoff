@@ -11,9 +11,9 @@
 > `docs/01-architecture-overview.md §6`, `docs/05-cli-and-entities.md §5–§6`.
 >
 > **Quality gate:** `pnpm gate` = clean production `dist`, runtime build typecheck (`tsc -b`), strict no-emit
-> test typecheck (`tsc -p tsconfig.tests.json --noEmit`), dist-layout check, `biome ci .`, browser-E2E
-> preflight, and `vitest run` — the one bar used locally, in pre-commit, in CI, and as every task's Definition
-> of Done (see CONTRIBUTING.md).
+> test typecheck (`tsc -p tsconfig.tests.json --noEmit`), source-layout check, dist-layout check, `biome ci .`,
+> browser-E2E preflight, and `vitest run` — the one bar used locally, in pre-commit, in CI, and as every task's
+> Definition of Done (see CONTRIBUTING.md).
 
 ---
 
@@ -55,7 +55,10 @@ The gate enforces two separate TypeScript contracts:
 
 - `pnpm run typecheck` starts by cleaning production `dist`, then `tsc -b` builds production packages from
   `src` roots and inherits `tsconfig.base.json` exclusions for tests, fixtures, `dist`, and dependency folders.
-  `tools/check-dist-layout.mjs` fails the gate if a test or fixture artifact appears in production output.
+  `tools/source-layout.mjs` fails the gate if runtime `src` contains test files/test-only directories, if
+  runtime source imports package-local tests/fixtures/fake providers or `/testing` exports, or if package
+  manifests publish tests/fixtures. `tools/check-dist-layout.mjs` fails the gate if a test or fixture artifact
+  appears in production output.
 - `tsc -p tsconfig.tests.json --noEmit` typechecks all test locations above with the same strict compiler
   options. Runtime `src` directories are not test roots; package-local and app-local `test/` trees are.
 
@@ -292,11 +295,10 @@ delta chain 047–063). It is the **final test gate** that proves the whole syst
 ### 4.3 `pnpm gate` is the single DoD bar
 
 ```
-pnpm gate = clean dist && tsc -b && test typecheck && dist-layout check && biome ci . && preflight && vitest
-                                      ↑                ↑                         ↑             ↑
-         package/app-local tests typechecked          production dist has       browser/full   includes unit,
-         outside src with strict compiler options      no tests or fixtures      human-view     contract, boundary,
-                                                                              preflight      and browser E2E tests
+pnpm gate = clean dist && tsc -b && test typecheck && source-layout && dist-layout && biome ci . && preflight && vitest
+                                      ↑                ↑                         ↑                         ↑
+         package/app-local tests typechecked          runtime src has no       production dist has       browser/full
+         outside src with strict compiler options      tests/test imports       no tests or fixtures      human-view preflight
 ```
 
 The full `pnpm gate` always requires browser-backed E2E availability. For local iteration only, a developer
