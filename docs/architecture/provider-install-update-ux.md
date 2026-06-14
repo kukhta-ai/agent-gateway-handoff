@@ -177,5 +177,6 @@ daemon config, provider code, or rollback state.
 ## Related
 
 `provider-graph-defaults-and-extension-plan.md` defines the three separate UX flows and provider graph direction.
-`provider-authoring-ux.md` defines the upstream package-authoring flow. `catalog-dependency-bindings.md` defines WPM
-receipt evidence and availability rules.
+`provider-authoring-ux.md` defines the upstream package-authoring flow. `provider-runtime-consumption-ux.md` defines
+the downstream runtime-agent discovery, dry-run, and session proposal flow. `catalog-dependency-bindings.md` defines
+WPM receipt evidence and availability rules.

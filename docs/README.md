@@ -22,6 +22,7 @@ This folder is the documentation for that system. Read it in order; each documen
 | — | `architecture/provider-author-workflow.md` | Concrete workflow and boundary rules for adding a provider package without editing runtime narrow-waist packages. |
 | — | `architecture/provider-authoring-ux.md` | Provider-authoring UX spec: protagonist, entry points, package inputs, diagnostics, guarded operations, and handoff to operator install/update. |
 | — | `architecture/provider-install-update-ux.md` | Operator install/update UX spec: named profiles, overlays, WPM evidence, doctor checks, rollback, and handoff to runtime consumption. |
+| — | `architecture/provider-runtime-consumption-ux.md` | Runtime-agent consumption UX spec: catalog/template/schema/skill discovery, dry-run repair, session proposal, and handoff back to task execution. |
 | — | `components/` | One document per architecture component (start with `components/README.md`). Each maps to a lane in the diagram and to a zone in doc 01. |
 | — | `scenario-01-unified.html` | The reference scenario end to end in one diagram: the internal protocol between services, the agent's concrete `gla` commands, and the concrete provider per pluggable layer — including the one-time enrollment that precedes any handoff. |
 
