@@ -64,7 +64,7 @@ describe("referenceProviderModules", () => {
     const auth = await host.createProvider("auth", "webauthn", {
       config: {
         rpID: "localhost",
-        expectedOrigin: "http://localhost:3000",
+        expectedOrigin: ["http://localhost:3000", "https://gla.example"],
       },
     });
     expect(auth).toHaveProperty("beginEnrollment");
@@ -103,6 +103,19 @@ describe("referenceProviderModules", () => {
         ],
       },
     });
+  });
+
+  it("keeps the WebAuthn Provider Host config compatible with multiple expected origins", async () => {
+    const host = createReferenceProviderHost();
+
+    await expect(
+      host.createProvider("auth", "webauthn", {
+        config: {
+          rpID: "localhost",
+          expectedOrigin: ["http://localhost:3000", "https://gla.example"],
+        },
+      }),
+    ).resolves.toHaveProperty("verifyAssertion");
   });
 
   it("does not leak authentik client secrets through config diagnostics", async () => {

@@ -28,6 +28,7 @@
     { "path": "../../adapters/launcher-process" },
     { "path": "../../surfaces/mcp" },
     { "path": "../../adapters/policy-cedar" },
+    { "path": "../provider-host" },
     { "path": "../provider-set-reference" },
     { "path": "../route" },
     { "path": "../session" },

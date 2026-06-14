@@ -1,8 +1,7 @@
 // @gla/app — COMPOSITION ROOT (baseline §1).
-// The ONLY package permitted to import concrete adapters: here ports meet implementations and the
-// :3000 process is booted. `new CedarPolicyAdapter()` and friends live here, injected inward — never
-// in core. (The module-boundary lint exempts packages/app/** from the no-adapter-imports rule; this
-// file is the living proof that the exemption works — it imports adapters that core may not.)
+// The :3000 process is booted here: ports meet deployable implementations and are injected inward,
+// never from core. Provider-family adapters move behind Provider Host provider sets; non-provider
+// infrastructure adapters still meet their ports here until their families migrate.
 //
 // Slice 2: `createBridge()` wires the **real Cedar PolicyPort** into admission, so `gla session create
 // --dry-run` exercises real forbid-wins policy. A real run dispatches a Session in `issued` (no spawn).
@@ -14,25 +13,13 @@
 
 // Concrete adapters (the outward side) — importable ONLY from this composition root:
 import { AdmissionService } from "@gla/admission";
-import {
-  AUTH_AUTHENTIK_MODULE,
-  type AuthAuthentikOptions,
-  AuthAuthentikProvider,
-  type BoundSubject,
-  type PendingAttempt,
-} from "@gla/auth-authentik";
-import {
-  AUTH_WEBAUTHN_MODULE,
-  AuthWebauthnProvider,
-  type PendingChallenge,
-  type StoredCredential,
-} from "@gla/auth-webauthn";
 import { AgentBridge } from "@gla/bridge";
 import { CapabilityService } from "@gla/capability";
 import {
   CatalogService,
   type CatalogServiceOptions,
   type DependencyBinding,
+  type IndexedDependencyBinding,
   toAdmissionCatalog,
 } from "@gla/catalog";
 import {
@@ -62,7 +49,13 @@ import {
 } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
-import { referenceProviderStoreContent } from "@gla/provider-set-reference";
+import type { ProviderId, ProviderKvStore, ProviderStateRoot } from "@gla/provider-host";
+import {
+  AUTH_WEBAUTHN_PROVIDER_ID,
+  createReferenceAuthProvider,
+  referenceAuthModuleForProviderId,
+  referenceProviderStoreContent,
+} from "@gla/provider-set-reference";
 import { RouteController } from "@gla/route";
 import {
   type CompletionDeps,
@@ -114,7 +107,7 @@ export function createApp(): App {
   const wiring: Wiring = {
     kernel: KERNEL_MODULE,
     policy: POLICY_CEDAR_MODULE,
-    auth: AUTH_WEBAUTHN_MODULE,
+    auth: referenceAuthModuleForProviderId(AUTH_WEBAUTHN_PROVIDER_ID),
     launcher: LAUNCHER_PROCESS_MODULE,
     connector: CONNECTOR_CDP_MODULE,
     workspace: WORKSPACE_PROFILE_MODULE,
@@ -129,128 +122,79 @@ export function createApp(): App {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Auth-provider SELECTION (authentik-integration.md §1/§7, GLA-068 AC#1/#6)
+// Auth-provider SELECTION (authentik-integration.md §1/§7, GLA-096)
 //
-// The default IdP is the in-tree WebAuthn provider; authentik is an OPT-IN alternative behind the SAME
-// kernel `AuthProviderPort`. Selecting it changes NO gateway/core code — only THIS composition root picks
-// a different adapter. Both implement `AuthProviderPort`, so the `new IdentityService({ authProvider })`
-// line downstream is identical (§1). `app` is the only package the boundary lint lets import either adapter.
+// The default IdP is the in-tree WebAuthn provider; authentik is an opt-in alternative behind the same
+// kernel `AuthProviderPort`. The app no longer imports auth adapter implementations or owns auth state
+// schemas: it passes an opaque provider id, provider-owned config, dependency evidence, and a generic
+// state root into the trusted reference provider set.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Which auth provider to wire behind the kernel `AuthProviderPort`. Default `"webauthn"` (the in-tree default). */
-export type AuthProviderKind = "webauthn" | "authentik";
-
-/**
- * The authentik OIDC config (read ONLY when the provider is `"authentik"`; doc §7). Sourced from the
- * `DependencyBinding.connection` GLA-074 writes and/or env (`GLA_AUTHENTIK_*`). The `clientSecret` is
- * `sensitive` — never logged. `rpID`/`expectedOrigin` (the WebAuthn-path config) are unused under authentik
- * (the ceremony runs AT authentik), so they are not part of this shape.
- */
-export interface AuthentikConfig {
-  /** The authentik OIDC issuer (e.g. `https://idp.example/application/o/gla/`) — discovers /authorize, /token, JWKS. */
-  issuerUrl: string;
-  /** The OIDC client/application id (the id_token audience). */
-  clientId: string;
-  /** The confidential-client secret for the token exchange (`sensitive` — never logged). */
-  clientSecret: string;
-  /** The adapter callback URL (the OIDC `redirect_uri`), fronted by the same host Caddy. */
-  redirectUri: string;
-  /** Optional OIDC scopes (space-separated). Default `"openid profile"`. */
-  scopes?: string;
-}
+/** Opaque auth-provider id selected by operator or deployment config. */
+export type AuthProviderKind = ProviderId;
+/** Provider-owned auth config, validated by the selected provider's registered schema. */
+export type AuthProviderConfig = Record<string, unknown>;
 
 /**
  * The provider-selection inputs shared by the provisioning + enrollment composition (doc §7). When
- * `authProvider` is unset or `"webauthn"`, the WebAuthn path is taken byte-for-byte as before; when
- * `"authentik"`, the {@link AuthentikConfig} is required and the delegated adapter is wired instead.
+ * `authProvider` is unset, the WebAuthn path is taken by default; non-default providers receive only
+ * provider-owned config records validated by their Provider Host schema.
  */
 export interface AuthProviderSelection {
   /** The selected provider. Default `"webauthn"`. */
   authProvider?: AuthProviderKind;
-  /** The authentik OIDC config — REQUIRED when `authProvider === "authentik"`, else ignored. */
-  authentik?: AuthentikConfig;
-}
-
-interface AuthProviderStateStores {
-  webauthnCredentials?: {
-    get(key: string): StoredCredential | undefined;
-    set(key: string, value: StoredCredential): void;
-    delete(key: string): void;
-  };
-  webauthnChallenges?: {
-    get(key: string): PendingChallenge | undefined;
-    set(key: string, value: PendingChallenge): void;
-    delete(key: string): void;
-  };
-  authentikSubjects?: {
-    get(key: string): BoundSubject | undefined;
-    set(key: string, value: BoundSubject): void;
-    delete(key: string): void;
-  };
-  authentikAttempts?: {
-    get(key: string): PendingAttempt | undefined;
-    set(key: string, value: PendingAttempt): void;
-    delete(key: string): void;
-  };
+  /** Provider-owned config — required when the selected provider's schema requires fields. */
+  authProviderConfig?: AuthProviderConfig;
 }
 
 /**
  * Build the chosen {@link AuthProviderPort} adapter (the single provider-selection seam, doc §1/§7).
- * `"webauthn"`/unset → today's `new AuthWebauthnProvider(...)` (UNCHANGED); `"authentik"` → a
- * `new AuthAuthentikProvider(...)` from the OIDC config. Returns the port + the module marker for the
- * wiring record (`AUTH_WEBAUTHN_MODULE` vs `AUTH_AUTHENTIK_MODULE`). Both satisfy `AuthProviderPort`, so
- * the caller injects the result into `IdentityService` identically regardless of the choice.
+ * Provider selection goes through the trusted reference Provider Host. The app passes only an opaque provider id,
+ * provider-owned config, dependency evidence, and a generic provider-state root.
  *
- * @throws Error if `authentik` is selected without its OIDC config (fail loud, not a silent default).
+ * @throws GlaErrorException if provider id/config/dependency evidence fails Provider Host validation.
  */
 function buildAuthProvider(
   selection: AuthProviderSelection,
   webauthn: { rpID: string; rpName: string; expectedOrigin: string | string[] },
-  stores: AuthProviderStateStores = {},
+  stateRoot: ProviderStateRoot | undefined,
+  dependencyBindings: IndexedDependencyBinding[] | undefined,
 ): { provider: AuthProviderPort; module: string } {
-  if (selection.authProvider === "authentik") {
-    if (selection.authentik === undefined) {
-      throw new Error(
-        "GLA_AUTH_PROVIDER=authentik requires the authentik OIDC config (issuer/client id/secret/redirect uri)",
-      );
-    }
-    const cfg = selection.authentik;
-    const opts: AuthAuthentikOptions = {
-      issuerUrl: cfg.issuerUrl,
-      clientId: cfg.clientId,
-      clientSecret: cfg.clientSecret,
-      redirectUri: cfg.redirectUri,
-      ...(cfg.scopes !== undefined ? { scopes: cfg.scopes } : {}),
-      ...(stores.authentikSubjects !== undefined ? { subjects: stores.authentikSubjects } : {}),
-      ...(stores.authentikAttempts !== undefined ? { attempts: stores.authentikAttempts } : {}),
-    };
-    return { provider: new AuthAuthentikProvider(opts), module: AUTH_AUTHENTIK_MODULE };
-  }
-  // Default / "webauthn": the in-tree provider — constructed EXACTLY as before (the unchanged default path).
-  return {
-    provider: new AuthWebauthnProvider({
-      rpID: webauthn.rpID,
-      rpName: webauthn.rpName,
-      expectedOrigin: webauthn.expectedOrigin,
-      ...(stores.webauthnCredentials !== undefined
-        ? { credentials: stores.webauthnCredentials }
-        : {}),
-      ...(stores.webauthnChallenges !== undefined ? { challenges: stores.webauthnChallenges } : {}),
-    }),
-    module: AUTH_WEBAUTHN_MODULE,
-  };
+  const providerId = selection.authProvider ?? AUTH_WEBAUTHN_PROVIDER_ID;
+  const config =
+    providerId === AUTH_WEBAUTHN_PROVIDER_ID
+      ? {
+          rpID: webauthn.rpID,
+          rpName: webauthn.rpName,
+          expectedOrigin: Array.isArray(webauthn.expectedOrigin)
+            ? webauthn.expectedOrigin
+            : [webauthn.expectedOrigin],
+        }
+      : (selection.authProviderConfig ?? {});
+  const created = createReferenceAuthProvider({
+    providerId,
+    config,
+    ...(stateRoot !== undefined ? { stateRoot } : {}),
+    ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
+  });
+  return { provider: created.provider, module: created.module };
 }
 
-function providerStores(state: DaemonStateRoot | undefined): AuthProviderStateStores {
-  if (state === undefined) {
-    return {};
+class DaemonProviderStateRoot implements ProviderStateRoot {
+  constructor(private readonly state: DaemonStateRoot) {}
+
+  namespace(providerId: ProviderId): { kv<T>(slot: string): ProviderKvStore<T> } {
+    return {
+      kv: <T>(slot: string) => this.state.kv<T>(`provider.${providerId}.${slot}`),
+    };
   }
-  return {
-    webauthnCredentials: state.kv<StoredCredential>("auth.webauthn.credentials"),
-    webauthnChallenges: state.kv<PendingChallenge>("auth.webauthn.challenges"),
-    authentikSubjects: state.kv<BoundSubject>("auth.authentik.subjects"),
-    authentikAttempts: state.kv<PendingAttempt>("auth.authentik.attempts"),
-  };
+}
+
+function providerStateRoot(state: DaemonStateRoot | undefined): ProviderStateRoot | undefined {
+  if (state === undefined) {
+    return undefined;
+  }
+  return new DaemonProviderStateRoot(state);
 }
 
 function stateSlot<T>(
@@ -276,6 +220,13 @@ function referenceCatalogOptions(
     options.dependencyBindings = dependencyBindings;
   }
   return options;
+}
+
+function authDependencyEvidence(
+  providerId: ProviderId,
+  dependencyBindings: DependencyBinding[] | undefined,
+): IndexedDependencyBinding[] | undefined {
+  return new CatalogService(referenceCatalogOptions(dependencyBindings)).show(providerId)?.requires;
 }
 
 /** Options for {@link createBridge}: an override Cedar policy set (defaults to the MVP set). */
@@ -327,12 +278,11 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
   handoff?: {
     /**
      * The auth provider to wire behind the kernel `AuthProviderPort` (doc §1/§7). Default `"webauthn"` (the
-     * in-tree default — the line below is UNCHANGED). `"authentik"` selects the delegated OIDC adapter and
-     * requires {@link AuthProviderSelection.authentik}. The `IdentityService` injection is identical either way.
+     * in-tree default. Non-default providers receive {@link AuthProviderSelection.authProviderConfig}.
      */
     authProvider?: AuthProviderKind;
-    /** The authentik OIDC config — REQUIRED when `authProvider === "authentik"`, else ignored (doc §7). */
-    authentik?: AuthentikConfig;
+    /** Provider-owned auth config, validated by the selected provider's registered schema. */
+    authProviderConfig?: AuthProviderConfig;
     /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `"localhost"`. WebAuthn-path config. */
     rpID?: string;
     /** The human-visible RP name. Default `"GLA"`. WebAuthn-path config. */
@@ -441,7 +391,7 @@ export interface ProvisioningStack {
   identity?: IdentityService;
   /**
    * The auth module actually wired behind the kernel `AuthProviderPort` (the wiring record, doc §7):
-   * `AUTH_WEBAUTHN_MODULE` (the in-tree default) or `AUTH_AUTHENTIK_MODULE` (the opt-in delegated provider).
+   * Adapter module marker mapped from the selected auth provider id by the trusted provider set.
    * Lets a caller/test observe WHICH provider was selected without reaching into the identity service.
    */
   authModule: string;
@@ -564,7 +514,7 @@ export function createProvisioningBridge(
   let handoffDeps: HandoffDeps | undefined;
   let completionDeps: CompletionDeps | undefined;
   /** The auth module actually wired behind the AuthProviderPort (doc §7 wiring record). Default the in-tree WebAuthn. */
-  let authModule: string = AUTH_WEBAUTHN_MODULE;
+  let authModule: string = referenceAuthModuleForProviderId(AUTH_WEBAUTHN_PROVIDER_ID);
   /** The operator enrollment action (wired when handoff is, since the same gateway then fronts enrollment). */
   let enrollInvite:
     | ((recipient: RecipientRef) => Promise<{ link: string; grant: OpaqueToken; nonce: string }>)
@@ -579,10 +529,11 @@ export function createProvisioningBridge(
     const selected = buildAuthProvider(
       {
         ...(h.authProvider !== undefined ? { authProvider: h.authProvider } : {}),
-        ...(h.authentik !== undefined ? { authentik: h.authentik } : {}),
+        ...(h.authProviderConfig !== undefined ? { authProviderConfig: h.authProviderConfig } : {}),
       },
       { rpID: h.rpID ?? "localhost", rpName: h.rpName ?? "GLA", expectedOrigin: h.expectedOrigin },
-      providerStores(state),
+      providerStateRoot(state),
+      authDependencyEvidence(h.authProvider ?? AUTH_WEBAUTHN_PROVIDER_ID, opts.dependencyBindings),
     );
     authModule = selected.module;
     identity =
@@ -870,12 +821,11 @@ export function createProvisioningBridge(
 export interface CreateEnrollmentStackOptions {
   /**
    * The auth provider to wire behind the kernel `AuthProviderPort` (doc §1/§7). Default `"webauthn"` (the
-   * in-tree default — the construction below is UNCHANGED). `"authentik"` selects the delegated OIDC adapter
-   * and requires {@link AuthProviderSelection.authentik}. The `IdentityService` injection is identical either way.
+   * in-tree default. Non-default providers receive {@link AuthProviderSelection.authProviderConfig}.
    */
   authProvider?: AuthProviderKind;
-  /** The authentik OIDC config — REQUIRED when `authProvider === "authentik"`, else ignored (doc §7). */
-  authentik?: AuthentikConfig;
+  /** Provider-owned auth config, validated by the selected provider's registered schema. */
+  authProviderConfig?: AuthProviderConfig;
   /**
    * The Relying-Party ID — the registrable host the passkey is bound to (no scheme/port). hermes-1: the gateway's
    * host; the loopback test: `"localhost"`. MUST match the page origin host. Default `"localhost"`. WebAuthn-path config.
@@ -899,14 +849,14 @@ export interface CreateEnrollmentStackOptions {
   host?: string;
   /** Gateway bind port. Default `3000`; tests pass `0` for an ephemeral port. */
   port?: number;
+  /** Structured WPM dependency evidence used by host-touching auth providers. */
+  dependencyBindings?: DependencyBinding[];
   /** Where the channel writes the enrollment invite link (defaults to stdout). */
   deliverySink?: DeliverySink;
   /**
    * A PRE-BUILT auth provider to inject behind the kernel `AuthProviderPort`, bypassing {@link buildAuthProvider}
-   * (GLA-070). This is a composition seam — it lets a caller supply an {@link AuthAuthentikProvider} constructed
-   * with SHARED stores and (for deterministic enrollment E2E) the `fake-authentik` `fetch`/`jwks`/`randomness`
-   * seams, so the delegated enrollment service path is provable end-to-end through the real gateway with NO real
-   * network. When set, it wins over `authProvider`/`authentik`; `authModule` is taken from {@link authModuleOverride}
+   * for deterministic tests or external composition. When set, it wins over Provider Host creation; `authModule`
+   * is taken from {@link authModuleOverride}
    * (or, when that is absent, the resolved provider kind). Mirrors `createProvisioningBridge`'s `handoff.identity`
    * injection. (The PRODUCTION browser-redirect/callback path that feeds `{code,state}` to `enrollComplete` is
    * GLA-072's shared deliverable, see authentik-integration.md §2 / authentik-enrollment.md §8.1.)
@@ -934,8 +884,7 @@ export interface EnrollmentStack {
    */
   authProvider: AuthProviderPort;
   /**
-   * The auth module actually wired (the wiring record, doc §7): `AUTH_WEBAUTHN_MODULE` (default) or
-   * `AUTH_AUTHENTIK_MODULE` (the opt-in delegated provider).
+   * The auth module actually wired, mapped from the selected provider id by the trusted provider set.
    */
   authModule: string;
   /** The channel adapter the invite is delivered through (recipient-bound). */
@@ -958,7 +907,7 @@ export interface EnrollmentStack {
  * the gateway serves the grant-verified enrollment flow on `host:port`.
  *
  * Wiring (the ports→adapter seams):
- *   - AuthWebauthnProvider (AuthProviderPort) ← rpID + expectedOrigin
+ *   - AuthProviderPort from Provider Host ← selected provider id + provider-owned config
  *   - IdentityService ← the WebAuthn provider (the swap-IdP boundary: identity depends on the PORT)
  *   - CapabilityService.mintEnrollmentGrant / verifyEnrollmentGrant(Token) / markSpent — the single-use grant
  *   - AccessGateway ← the capability grant seam + the identity enroll seam (no adapter import)
@@ -968,26 +917,33 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
   // Provider selection (doc §1/§7): default → the in-tree WebAuthn provider (constructed exactly as before);
   // `authentik` → the delegated OIDC adapter. Both implement `AuthProviderPort` (the IdentityService injection
   // is identical), so swapping the provider is this one `buildAuthProvider` call — no downstream change. A
-  // pre-built `authProviderOverride` (GLA-070 — e.g. an AuthAuthentikProvider with shared stores + fake-authentik
-  // seams) wins, so the delegated enrollment path is testable end-to-end with no real network.
+  // pre-built `authProviderOverride` wins, so delegated enrollment paths can still be tested end-to-end with no
+  // real network.
   let authProvider: AuthProviderPort;
   let authModule: string;
   if (opts.authProviderOverride !== undefined) {
     authProvider = opts.authProviderOverride;
     authModule =
       opts.authModuleOverride ??
-      (opts.authProvider === "authentik" ? AUTH_AUTHENTIK_MODULE : AUTH_WEBAUTHN_MODULE);
+      referenceAuthModuleForProviderId(opts.authProvider ?? AUTH_WEBAUTHN_PROVIDER_ID);
   } else {
     const built = buildAuthProvider(
       {
         ...(opts.authProvider !== undefined ? { authProvider: opts.authProvider } : {}),
-        ...(opts.authentik !== undefined ? { authentik: opts.authentik } : {}),
+        ...(opts.authProviderConfig !== undefined
+          ? { authProviderConfig: opts.authProviderConfig }
+          : {}),
       },
       {
         rpID: opts.rpID ?? "localhost",
         rpName: opts.rpName ?? "GLA",
         expectedOrigin: opts.expectedOrigin,
       },
+      undefined,
+      authDependencyEvidence(
+        opts.authProvider ?? AUTH_WEBAUTHN_PROVIDER_ID,
+        opts.dependencyBindings,
+      ),
     );
     authProvider = built.provider;
     authModule = built.module;

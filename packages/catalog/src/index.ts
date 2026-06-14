@@ -761,6 +761,34 @@ export function referenceWpmDependencyBindings(): DependencyBinding[] {
       },
       decisionNotes: [{ note: "Managed install fixture for the reference human-view stack." }],
     },
+    {
+      dependency: "identity-provider",
+      source: "wpm-receipt",
+      ownershipMode: "local-external",
+      state: "adopted",
+      installed: true,
+      bundle: {
+        id: "identity-provider",
+        version: "0.1.0",
+        declaredRequires: { "gla-core": "^0.1.0" },
+      },
+      receipt: {
+        taskId: "identity-provider-6",
+        status: "Done",
+        recordedAt: "2026-06-13T00:00:00.000Z",
+        refs: ["wpm/wip/bundles/identity-provider/install-backlog/tasks/identity-provider-6"],
+      },
+      connection: {
+        refs: {
+          issuerUrl: { kind: "uri-ref", ref: "https://idp.example/application/o/gla/" },
+          clientId: { kind: "literal", ref: "gla-client" },
+          clientSecret: { kind: "secret-ref", ref: "secret:authentik/client-secret" },
+          redirectUri: { kind: "uri-ref", ref: "https://gla.example/auth/callback" },
+        },
+      },
+      lastProbe: { at: "2026-06-13T00:00:00.000Z", result: "available" },
+      decisionNotes: [{ note: "Reference adopted authentik identity-provider fixture." }],
+    },
   ]);
 }
 
