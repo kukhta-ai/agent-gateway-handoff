@@ -150,9 +150,6 @@ importers:
       '@gla/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@gla/launcher-process':
-        specifier: workspace:*
-        version: link:../../adapters/launcher-process
       '@gla/mcp':
         specifier: workspace:*
         version: link:../../surfaces/mcp
@@ -177,9 +174,6 @@ importers:
       '@gla/worker':
         specifier: workspace:*
         version: link:../worker
-      '@gla/workspace-profile':
-        specifier: workspace:*
-        version: link:../../adapters/workspace-profile
     devDependencies:
       '@gla/auth-authentik':
         specifier: workspace:*
@@ -187,6 +181,9 @@ importers:
       '@gla/auth-webauthn':
         specifier: workspace:*
         version: link:../../adapters/auth-webauthn
+      '@gla/launcher-process':
+        specifier: workspace:*
+        version: link:../../adapters/launcher-process
       playwright-core:
         specifier: ^1.49.1
         version: 1.60.0

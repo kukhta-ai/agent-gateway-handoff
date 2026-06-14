@@ -31,22 +31,25 @@ Its four checks:
 | Check | Command (also runs standalone) | What it asserts |
 |---|---|---|
 | **Build / type-check** | `pnpm run typecheck` (`tsc -b`) | every workspace package compiles / type-checks with no errors, from a clean checkout |
-| **Lint + format** | `biome ci .` (or `pnpm run lint`) | Biome style + static-analysis rules pass, **including the module-boundary rule** (`noRestrictedImports`) that forbids a core/edge package from importing a concrete adapter — only `packages/app` may (baseline §1) |
+| **Lint + format** | `biome ci .` (or `pnpm run lint`) | Biome style + static-analysis rules pass, including the generic module-boundary rule (`noRestrictedImports`) used by the boundary selftest |
 | **Browser E2E preflight** | `pnpm run test:e2e:preflight` | Playwright Chromium is installed, executable, and launchable; full human-view binaries (`Xvfb`, `x11vnc`, `websockify`) and browser-backed E2E fixture files are present; absence is a gate failure, not a skipped pass |
-| **Tests** | `vitest run` (or `pnpm test`) | the suite is green — unit for pure logic, contract/integration tests, browser-backed E2Es, and the boundary test that proves the import-boundary rule rejects a known-bad sample |
+| **Tests** | `vitest run` (or `pnpm test`) | the suite is green — unit for pure logic, contract/integration tests, browser-backed E2Es, and boundary tests that prove forbidden adapter imports/dependencies are rejected |
 
 **The gate cannot be silently bypassed.** A deliberately-bad fixture
-(`tools/boundary-check/fixtures/core-importing-adapter.ts`) imports a concrete adapter from a non-`app`
-module. Pointing the boundary lint at it is a **non-zero** result, proving the guard works:
+(`tools/boundary-check/fixtures/core-importing-adapter.ts`) imports a concrete adapter from a protected module.
+Pointing the boundary lint at it is a **non-zero** result, proving the generic guard works:
 
 ```bash
 pnpm gate:selftest   # runs the boundary lint against the bad fixture; PASS (exit 0) iff it is rejected
 ```
 
 `gate:selftest` is also exercised inside `vitest run` (the boundary test), so the everyday gate already
-covers it. Module boundaries are enforced **twice over** (defence in depth): (a) by the **pnpm package
-graph** — a core/edge package does not declare any adapter as a dependency, so a forbidden import does not
-resolve and `tsc -b` fails; and (b) by the **Biome `noRestrictedImports` rule** in `biome.json`.
+covers it. Provider Host boundaries are also checked by `tools/boundary-check/provider-boundary.mjs`: migrated
+provider adapters may be imported by provider-set packages and tests, while protected runtime packages must use
+provider ids, kernel ports, `ProviderHost`, or the selected provider set. Module boundaries are enforced **twice
+over** (defence in depth): (a) by the **pnpm package graph** — protected runtime packages do not declare migrated
+provider adapters as production dependencies, so a forbidden production import does not resolve cleanly; and (b)
+by the boundary tests plus the **Biome `noRestrictedImports` selftest**.
 
 Browser-backed E2E availability is also a hard gate. If a clean checkout lacks the cached Playwright
 Chromium runtime, launch dependencies, or full human-view binaries, `pnpm gate` fails before Vitest can

@@ -33,7 +33,6 @@
     "@gla/gateway": "workspace:*",
     "@gla/identity": "workspace:*",
     "@gla/kernel": "workspace:*",
-    "@gla/launcher-process": "workspace:*",
     "@gla/mcp": "workspace:*",
     "@gla/policy-cedar": "workspace:*",
     "@gla/provider-host": "workspace:*",
@@ -41,12 +40,12 @@
     "@gla/route": "workspace:*",
     "@gla/session": "workspace:*",
     "@gla/task": "workspace:*",
-    "@gla/worker": "workspace:*",
-    "@gla/workspace-profile": "workspace:*"
+    "@gla/worker": "workspace:*"
   },
   "devDependencies": {
     "@gla/auth-authentik": "workspace:*",
     "@gla/auth-webauthn": "workspace:*",
+    "@gla/launcher-process": "workspace:*",
     "playwright-core": "^1.49.1"
   }
 }

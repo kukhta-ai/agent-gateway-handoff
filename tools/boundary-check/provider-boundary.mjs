@@ -1,0 +1,150 @@
+// Provider Host boundary scanner (GLA-101).
+//
+// Biome proves the generic import-boundary rule can reject a deliberately bad fixture, but the
+// Provider Host migration needs a richer project rule: migrated provider adapters may be imported
+// by the selected provider set and tests, not by runtime narrow-waist packages.
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(here, "..", "..");
+
+/** Concrete provider packages that must stay behind a provider set in runtime code. */
+export const PROVIDER_ADAPTER_PACKAGES = Object.freeze([
+  "@gla/auth-authentik",
+  "@gla/auth-webauthn",
+  "@gla/channel-cli",
+  "@gla/channel-telegram",
+  "@gla/connector-cdp",
+  "@gla/detector-url",
+  "@gla/entrypoint-novnc",
+  "@gla/launcher-docker",
+  "@gla/launcher-process",
+  "@gla/workspace-profile",
+]);
+
+/** Runtime packages whose production source must not know concrete provider adapters. */
+export const PROTECTED_RUNTIME_PACKAGES = Object.freeze([
+  "packages/app",
+  "packages/gateway",
+  "packages/session",
+  "packages/identity",
+  "packages/route",
+  "packages/completion",
+  "packages/worker",
+  "packages/kernel",
+]);
+
+const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
+const TS_FILE_RE = /\.[cm]?tsx?$/;
+const SKIP_DIRS = new Set(["dist", "node_modules"]);
+
+function isProviderAdapterSpecifier(specifier) {
+  return PROVIDER_ADAPTER_PACKAGES.some(
+    (providerPackage) =>
+      specifier === providerPackage || specifier.startsWith(`${providerPackage}/`),
+  );
+}
+
+function walkFiles(dir) {
+  if (!existsSync(dir)) {
+    return [];
+  }
+  const entries = readdirSync(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (SKIP_DIRS.has(entry.name)) {
+      continue;
+    }
+    const path = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkFiles(path));
+    } else if (entry.isFile() && TS_FILE_RE.test(entry.name) && !TEST_FILE_RE.test(entry.name)) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
+function lineNumberFor(source, index) {
+  return source.slice(0, index).split("\n").length;
+}
+
+function importSpecifiers(source) {
+  const specifiers = [];
+  const staticImport = /(?:import|export)\s+(?:type\s+)?(?:[^"']*?\s+from\s+)?["']([^"']+)["']/g;
+  const dynamicImport = /import\s*\(\s*["']([^"']+)["']\s*\)/g;
+  const commonjsRequire = /require\s*\(\s*["']([^"']+)["']\s*\)/g;
+  for (const re of [staticImport, dynamicImport, commonjsRequire]) {
+    let match = re.exec(source);
+    while (match !== null) {
+      specifiers.push({ specifier: match[1], line: lineNumberFor(source, match.index) });
+      match = re.exec(source);
+    }
+  }
+  return specifiers;
+}
+
+function sourceViolations(file, source) {
+  return importSpecifiers(source)
+    .filter(({ specifier }) => isProviderAdapterSpecifier(specifier))
+    .map(({ specifier, line }) => ({
+      kind: "runtime-import",
+      file,
+      line,
+      specifier,
+      message: `${file}:${line} imports concrete provider adapter "${specifier}". Runtime packages must use provider ids, kernel ports, ProviderHost, or a selected provider set.`,
+    }));
+}
+
+function packageDependencyViolations(packagePath, packageJson) {
+  const dependencies = packageJson.dependencies ?? {};
+  return Object.keys(dependencies)
+    .filter((specifier) => isProviderAdapterSpecifier(specifier))
+    .map((specifier) => ({
+      kind: "runtime-dependency",
+      file: `${packagePath}/package.json`,
+      specifier,
+      message: `${packagePath}/package.json declares concrete provider adapter "${specifier}" as a production dependency. Put concrete providers behind a provider-set package; test-only imports belong in devDependencies.`,
+    }));
+}
+
+function protectedRuntimeFiles(root) {
+  return PROTECTED_RUNTIME_PACKAGES.flatMap((packagePath) => {
+    const sourceRoot = resolve(root, packagePath, "src");
+    return walkFiles(sourceRoot).map((file) => ({
+      file: relative(root, file),
+      source: readFileSync(file, "utf8"),
+    }));
+  });
+}
+
+function protectedPackageJsons(root) {
+  return PROTECTED_RUNTIME_PACKAGES.flatMap((packagePath) => {
+    const file = resolve(root, packagePath, "package.json");
+    if (!existsSync(file) || !statSync(file).isFile()) {
+      return [];
+    }
+    return [{ packagePath, packageJson: JSON.parse(readFileSync(file, "utf8")) }];
+  });
+}
+
+/**
+ * Check Provider Host boundaries against current repo state.
+ *
+ * `extraRuntimeFiles` exists so tests can prove the check fails on a synthetic protected-package
+ * import without committing a permanently failing fixture.
+ */
+export function checkProviderBoundaries(options = {}) {
+  const root = options.repoRoot ?? repoRoot;
+  const runtimeFiles = [...protectedRuntimeFiles(root), ...(options.extraRuntimeFiles ?? [])];
+  const packageJsons = [...protectedPackageJsons(root), ...(options.extraPackageJsons ?? [])];
+  const violations = [
+    ...runtimeFiles.flatMap(({ file, source }) => sourceViolations(file, source)),
+    ...packageJsons.flatMap(({ packagePath, packageJson }) =>
+      packageDependencyViolations(packagePath, packageJson),
+    ),
+  ];
+  return { ok: violations.length === 0, violations };
+}

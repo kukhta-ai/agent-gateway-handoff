@@ -991,12 +991,23 @@ describe("AC#6/#7 · operator diagnostics report provider ability to satisfy pol
 
 describe("AC#1/#2 · structural: auth adapters live behind the provider set, not app/core runtime", () => {
   /** Read a package.json's dependency names (relative to this test file's compiled location). */
-  function deps(relFromRepoRoot: string): string[] {
+  function pkgDeps(relFromRepoRoot: string): {
+    dependencies: string[];
+    devDependencies: string[];
+  } {
     const pkg = JSON.parse(readFileSync(`${repoRootFromHere()}/${relFromRepoRoot}`, "utf8")) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
     };
-    return [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
+    return {
+      dependencies: Object.keys(pkg.dependencies ?? {}),
+      devDependencies: Object.keys(pkg.devDependencies ?? {}),
+    };
+  }
+
+  function deps(relFromRepoRoot: string): string[] {
+    const pkg = pkgDeps(relFromRepoRoot);
+    return [...pkg.dependencies, ...pkg.devDependencies];
   }
 
   it("the gateway package declares NO auth adapter dependency (it depends only on the kernel port)", () => {
@@ -1021,6 +1032,15 @@ describe("AC#1/#2 · structural: auth adapters live behind the provider set, not
     const providerSetDeps = deps("packages/provider-set-reference/package.json");
     expect(providerSetDeps).toContain("@gla/auth-authentik");
     expect(providerSetDeps).toContain("@gla/auth-webauthn");
+  });
+
+  it("app production dependencies name the provider set, not concrete auth adapters", () => {
+    const appDeps = pkgDeps("packages/app/package.json");
+    expect(appDeps.dependencies).toContain("@gla/provider-set-reference");
+    expect(appDeps.dependencies).not.toContain("@gla/auth-authentik");
+    expect(appDeps.dependencies).not.toContain("@gla/auth-webauthn");
+    expect(appDeps.devDependencies).toContain("@gla/auth-authentik");
+    expect(appDeps.devDependencies).toContain("@gla/auth-webauthn");
   });
 
   it("app runtime composition files do not import concrete auth adapters or authentik state types", () => {

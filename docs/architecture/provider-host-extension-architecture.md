@@ -220,4 +220,5 @@ The architecture is in place when these are true:
 (inversion of control and provider contract) · `docs/03-software-candidates.md` (layer inventory) ·
 `docs/architecture/catalog-dependency-bindings.md` (WPM receipt evidence) ·
 `docs/architecture/authentik-integration.md` (current auth adapter realization) ·
-`docs/architecture/kernel-contracts.md` (ports and narrow-waist contracts).
+`docs/architecture/kernel-contracts.md` (ports and narrow-waist contracts) ·
+`docs/architecture/provider-author-workflow.md` (concrete provider contribution and boundary rules).

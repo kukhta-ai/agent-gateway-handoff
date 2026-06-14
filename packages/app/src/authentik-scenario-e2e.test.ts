@@ -930,15 +930,16 @@ describe("GLA-076 AC#5 — the auth seam is full-capability: provider swap is co
   function deps(relFromRepoRoot: string): string[] {
     const pkg = JSON.parse(readFileSync(join(repoRoot(), relFromRepoRoot), "utf8")) as {
       dependencies?: Record<string, string>;
-      devDependencies?: Record<string, string>;
     };
-    return [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
+    return Object.keys(pkg.dependencies ?? {});
   }
 
-  it("package/runtime boundaries keep provider-specific code owned by app, not gateway or core", () => {
+  it("package/runtime boundaries keep provider-specific code owned by the provider set, not app/gateway/core", () => {
     expect(deps("packages/gateway/package.json")).not.toContain("@gla/auth-authentik");
     expect(deps("packages/kernel/package.json")).not.toContain("@gla/auth-authentik");
-    expect(deps("packages/app/package.json")).toContain("@gla/auth-authentik");
+    expect(deps("packages/app/package.json")).not.toContain("@gla/auth-authentik");
+    expect(deps("packages/app/package.json")).toContain("@gla/provider-set-reference");
+    expect(deps("packages/provider-set-reference/package.json")).toContain("@gla/auth-authentik");
   });
 });
 
