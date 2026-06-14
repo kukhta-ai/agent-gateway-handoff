@@ -195,3 +195,64 @@ with 64 files, 707 passed, 15 skipped.
 
 - The in-repo test remains a deterministic `FakeAuthentik` proof for GLA-side behavior; deployed real-authentik method/source proof remains recorded through WPM/deployment diagnostics.
 - The adapter now refreshes a non-injected remote JWKS resolver once after `bad_signature`, which is provider-neutral OIDC key-rotation behavior and does not change gateway/core authorization semantics.
+
+## GLA-094 - Reconcile CLI Runtime Contract With Documented Commands
+
+Workflow: `bmad-qa-generate-e2e-tests` / TEA review, spec-exists fallback
+
+Date: 2026-06-14
+
+### Scope
+
+This QA summary covers contract hardening for the agent-facing `gla` CLI. The implementation separates the
+current executable command surface from the future CLI roadmap, adds a machine-readable command registry,
+implements `gla schema`, command-scoped machine help, top-level field masks, stable deferred diagnostics, and
+connection-mode-aware version reporting.
+
+### Generated And Updated Tests
+
+- [x] `surfaces/cli/src/cli.test.ts` - adds GLA-094 contract tests for root help, command-scoped help, scoped schema, docs/help/schema drift, deferred surfaces, `--fields`, unknown, missing-value, and unexpected-value command-scoped flags with no-mutation behavior, documented field-mask snippet reuse, `--quiet`, endpoint override/unreachable daemon behavior, `session connector`, output/error channels, and version modes.
+- [x] `surfaces/cli/src/transport.test.ts` - existing endpoint-locality and daemon-shared-state coverage remains part of the focused validation set.
+
+### AC Coverage
+
+| AC | Coverage Evidence | Status |
+| --- | --- | --- |
+| AC1 | Root machine help and docs drift tests assert the current supported command inventory; parser coverage includes representative supported commands plus direct `session connector`. | Covered. |
+| AC2 | Deferred `policy mounts`, `events`, `audit list`, `auth login`, `auth logout`, `-o ndjson`, `--context`, `--trace-id`, and batch forms return `usage.unsupported` with `detail.status: "deferred"`. | Covered. |
+| AC3 | `gla schema` and scoped command help expose noun, verb, args, flags, output category, exit codes, and read/mutate/block effect from the registry. | Covered. |
+| AC4 | `--fields` trims top-level result fields, unknown fields fail before a mutating command runs, documented snippets parse masked JSON ids before reuse, and `--quiet` preserves JSON results/errors. | Covered. |
+| AC5 | Docs and tests cover no-endpoint in-process mode, `GLA_ENDPOINT`, `--endpoint` override, non-local endpoint refusal, and unreachable daemon dependency errors. | Covered. |
+| AC6 | Tests assert stdout remains result-only and stderr remains parseable errors in JSON/agent mode, including invalid/deferred/error paths and unsupported, missing-value, or unexpected-value command-scoped flags. Text mode remains documented separately. | Covered. |
+| AC7 | Version tests distinguish client-only, in-process, and daemon modes without inventing a server version. | Covered. |
+| AC8 | Contract tests fail on drift across docs/current contract, root help, scoped schema/help, global flags, field masks, endpoint errors, and deferred diagnostics. | Covered. |
+| AC9 | Docs preserve the future/target CLI tree and explicitly label deferred/future surfaces rather than deleting roadmap content. | Covered. |
+
+### Validation
+
+Focused validation:
+
+```bash
+pnpm run lint:fix
+pnpm exec vitest run surfaces/cli/src/cli.test.ts surfaces/cli/src/transport.test.ts --reporter=dot
+pnpm run typecheck
+```
+
+Result: passed. Biome checked 197 files with no fixes after the final pass. Focused CLI/transport tests
+passed with 80 tests. Typecheck passed.
+
+Full DoD validation:
+
+```bash
+pnpm run gate
+```
+
+Result: passed. Typecheck passed, Biome passed, browser/full-human-view preflight passed, and Vitest passed
+with 64 files, 726 passed, 15 skipped.
+
+### Coverage Notes
+
+- The task intentionally does not implement future `policy`, `events`, `audit`, `auth login/logout`, NDJSON,
+  context profiles, trace correlation, MCP parity, or batch operations.
+- `auth diagnostics` remains a current daemon/operator diagnostic extension and is explicitly separate from
+  deferred authenticated-agent login/logout.
