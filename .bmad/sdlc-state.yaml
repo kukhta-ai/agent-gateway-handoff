@@ -108,7 +108,7 @@ provider_graph_107_specialists:
   reviewer: {spawned: true, id: "019ec85b-6cde-7691-b01d-a58ee3f0d133", open: true, resumable: true, role: "TEA/test/security and independent story review for provider graph epic", last_skill: "GLA-109 story-automator-review adversarial cycles completed; scoped help/contract validation gaps fixed; final no blocking findings"}
   investigator: {spawned: true, id: "019ec85b-8959-70c0-be10-b8df6540447b", open: true, resumable: true, role: "root-cause analysis for graph validation, availability, diagnostics, and boundary regressions", last_skill: "bmad-investigate loaded/resolved; initialized for GLA-107..GLA-107.13"}
 
-gates_pending: ["human approval to push feature/provider-graph and open PR against dev"]
+gates_pending: ["human approval to open PR against dev"]
 retrospective_note: "bmad-retrospective loaded for GLA-107 closure, but the workflow is explicitly user-interactive with multiple WAIT gates; formal retrospective deferred to human-led gate rather than fabricated during unattended implementation."
 
 # Load-bearing decisions made at orientation (see memory: gla-stack-and-build-decisions,
