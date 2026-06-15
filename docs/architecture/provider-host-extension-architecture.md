@@ -135,6 +135,8 @@ operator/distribution-owned bundle of provider modules plus a selected profile:
 export interface AppProviderSet {
   moduleId: string;
   modules: readonly GlaProviderModule[];
+  profiles?: readonly ProviderProfileManifest[];
+  selectedProfileId?: string;
   profile: ProviderSelectionProfile;
   defaultConfig?(args: ProviderDefaultConfigArgs): Record<string, unknown> | undefined;
   defaultServices?(args: ProviderDefaultServicesArgs): Record<string, unknown> | undefined;
@@ -148,11 +150,10 @@ derives catalog content from `host.providerManifests()`, and derives wiring/read
 `host.providerDescriptor(id).moduleId`.
 
 `packages/app/src/index.ts` is the explicit reference/default distribution entrypoint. It imports
-`@gla/provider-set-reference`, defines today's default profile (`webauthn`, `launcher-process`,
-`connector-cdp`, `workspace-profile`, `entrypoint-novnc`, `url-watcher`, `channel-cli`), and supplies
-reference-only default config/service/asset mappings. This is the only generic-runtime source path allowed to
-select the reference set directly; the boundary scanner rejects reference-set imports from `composition.ts` and
-the narrow-waist packages.
+`@gla/provider-set-reference`, exposes its named provider-profile manifests (`local-dev`, `single-operator`,
+`scenario-01`, and `hardened-idp`), selects `scenario-01` by default, and supplies reference-only default
+config/service/asset mappings. This is the only generic-runtime source path allowed to select the reference set
+directly; the boundary scanner rejects reference-set imports from `composition.ts` and the narrow-waist packages.
 
 That is intentionally not dynamic hot-loading. The first goal is to remove provider-specific knowledge from app and
 runtime core while preserving a simple, testable modular monolith. Public ABI, third-party package loading, and

@@ -1,6 +1,7 @@
 import {
   type ProviderFamily,
   type ProviderManifest,
+  type ProviderProfileManifest,
   referenceWpmDependencyBindings,
 } from "@gla/catalog";
 import {
@@ -349,6 +350,26 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
   };
 }
 
+function fakeProviderProfile(id: string): ProviderProfileManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "ProviderProfile",
+    metadata: { name: id, version: "0.1.0" },
+    spec: {
+      lifecycle: { owner: "operator", apply: "boot", hotReload: false },
+      select: {
+        AuthProvider: "fake-auth",
+        Launcher: "fake-launcher",
+        Workspace: "fake-workspace",
+        HumanEntrypoint: "fake-entrypoint",
+        AgentConnector: "fake-connector",
+        CompletionDetector: "fake-detector",
+        ChannelAdapter: "fake-channel",
+      },
+    },
+  };
+}
+
 function captureThrown(run: () => unknown): unknown {
   try {
     run();
@@ -452,7 +473,11 @@ describe("provider-set agnostic app composition", () => {
 
   it("creates runtime ports, provider defaults, services, and assets through the same generic boot path", async () => {
     const records = fakeRecords();
-    const providerSet = fakeProviderSet(records);
+    const providerSet: AppProviderSet = {
+      ...fakeProviderSet(records),
+      profiles: [fakeProviderProfile("fake-scenario")],
+      selectedProfileId: "fake-scenario",
+    };
     const stack = createProvisioningBridge({
       providerSet,
       dependencyBindings: referenceWpmDependencyBindings(),
@@ -472,6 +497,7 @@ describe("provider-set agnostic app composition", () => {
     try {
       expect(stack.providerGraphDoctor).toMatchObject({
         status: "PASS",
+        profileId: "fake-scenario",
         selectedProviders: expect.objectContaining({
           Launcher: "fake-launcher",
           AgentConnector: "fake-connector",

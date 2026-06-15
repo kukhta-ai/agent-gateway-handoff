@@ -146,6 +146,10 @@ export interface AppProviderSet {
   moduleId: string;
   /** Trusted provider modules to register into Provider Host at boot. */
   modules: readonly GlaProviderModule[];
+  /** Named boot-time provider profiles exposed by this provider set. */
+  profiles?: readonly ProviderProfileManifest[];
+  /** Provider profile id selected by this distribution unless the operator overrides it at boot. */
+  selectedProfileId?: string;
   /** Default provider ids for this distribution/profile. */
   profile: ProviderSelectionProfile;
   /** Provider-set-owned defaults for compatibility options such as WebAuthn RP config or process-launcher mode. */
@@ -165,6 +169,8 @@ export interface ProviderCompositionOptions {
   providerSet?: AppProviderSet;
   /** Prebuilt trusted Provider Host, mainly for tests or external composition. */
   providerHost?: ProviderHost;
+  /** Named provider profile selected at operator boot time. */
+  providerProfileId?: string;
   /** Selected profile override layered over the provider set's profile. */
   providerProfile?: Partial<ProviderSelectionProfile>;
 }
@@ -192,12 +198,85 @@ function requireProviderHost(opts: ProviderCompositionOptions): ProviderHost {
   throw new Error("provider composition requires a providerSet or prebuilt providerHost");
 }
 
+function selectionProviderId(selection: unknown): string | undefined {
+  if (typeof selection === "string" && selection.length > 0) {
+    return selection;
+  }
+  if (
+    selection !== null &&
+    typeof selection === "object" &&
+    "providerId" in selection &&
+    typeof selection.providerId === "string" &&
+    selection.providerId.length > 0
+  ) {
+    return selection.providerId;
+  }
+  return undefined;
+}
+
+function providerSelectionFromManifest(
+  manifest: ProviderProfileManifest,
+): Partial<ProviderSelectionProfile> {
+  const select = manifest.spec.select ?? {};
+  const out: Partial<ProviderSelectionProfile> = {};
+  const auth = selectionProviderId(select.AuthProvider);
+  if (auth !== undefined) {
+    out.auth = auth;
+  }
+  const launcher = selectionProviderId(select.Launcher);
+  if (launcher !== undefined) {
+    out.launcher = launcher;
+  }
+  const connector = selectionProviderId(select.AgentConnector);
+  if (connector !== undefined) {
+    out.connector = connector;
+  }
+  const workspace = selectionProviderId(select.Workspace);
+  if (workspace !== undefined) {
+    out.workspace = workspace;
+  }
+  const entrypoint = selectionProviderId(select.HumanEntrypoint);
+  if (entrypoint !== undefined) {
+    out.entrypoint = entrypoint;
+  }
+  const detector = selectionProviderId(select.CompletionDetector);
+  if (detector !== undefined) {
+    out.detector = detector;
+  }
+  const channel = selectionProviderId(select.ChannelAdapter);
+  if (channel !== undefined) {
+    out.channel = channel;
+  }
+  return out;
+}
+
+function providerSetProfileManifest(
+  providerSet: AppProviderSet | undefined,
+  profileId: string | undefined,
+): ProviderProfileManifest | undefined {
+  if (providerSet === undefined || profileId === undefined) {
+    return undefined;
+  }
+  const manifest = providerSet.profiles?.find((profile) => profile.metadata.name === profileId);
+  if (manifest === undefined) {
+    throw new Error(
+      `provider set "${providerSet.moduleId}" does not expose profile "${profileId}"`,
+    );
+  }
+  return manifest;
+}
+
 function requireSelectedProfile(
   opts: ProviderCompositionOptions,
   overrides: Partial<ProviderSelectionProfile> = {},
 ): ProviderSelectionProfile {
+  const namedManifest = providerSetProfileManifest(
+    opts.providerSet,
+    opts.providerProfileId ?? opts.providerSet?.selectedProfileId,
+  );
   const merged = {
     ...(opts.providerSet?.profile ?? {}),
+    ...(namedManifest !== undefined ? providerSelectionFromManifest(namedManifest) : {}),
     ...(opts.providerProfile ?? {}),
     ...overrides,
   };
@@ -300,7 +379,10 @@ function hasEntries(value: Record<string, unknown> | undefined): value is Record
   return value !== undefined && Object.keys(value).length > 0;
 }
 
-function providerProfileManifest(profile: ProviderSelectionProfile): ProviderProfileManifest {
+function providerProfileManifest(
+  profile: ProviderSelectionProfile,
+  name = "selected-runtime-profile",
+): ProviderProfileManifest {
   const select: NonNullable<ProviderProfileManifest["spec"]["select"]> = {};
   for (const binding of PROVIDER_PROFILE_BINDINGS) {
     select[binding.profileFamily] = profile[binding.key];
@@ -308,12 +390,30 @@ function providerProfileManifest(profile: ProviderSelectionProfile): ProviderPro
   return {
     apiVersion: "gla.dev/v1",
     kind: "ProviderProfile",
-    metadata: { name: "selected-runtime-profile" },
+    metadata: { name },
     spec: {
       select,
       lifecycle: { owner: "operator", apply: "boot", hotReload: false },
     },
   };
+}
+
+function selectedProviderProfileManifest(
+  opts: ProviderCompositionOptions,
+  profile: ProviderSelectionProfile,
+  overrides: Partial<ProviderSelectionProfile> = {},
+): ProviderProfileManifest {
+  const profileId = opts.providerProfileId ?? opts.providerSet?.selectedProfileId;
+  const namedManifest = providerSetProfileManifest(opts.providerSet, profileId);
+  const hasRuntimeOverride =
+    Object.keys(opts.providerProfile ?? {}).length > 0 || Object.keys(overrides).length > 0;
+  if (namedManifest !== undefined && !hasRuntimeOverride) {
+    return structuredClone(namedManifest);
+  }
+  return providerProfileManifest(
+    profile,
+    profileId !== undefined ? `${profileId}+runtime-override` : undefined,
+  );
 }
 
 function providerSetDefaultConfig(
@@ -348,6 +448,7 @@ function providerGraphRuntimeContext(opts: {
   providerHost: ProviderHost;
   providerSet?: AppProviderSet | undefined;
   profile: ProviderSelectionProfile;
+  profileManifest?: ProviderProfileManifest | undefined;
   dependencyBindings?: DependencyBinding[] | undefined;
   runtimeAssemblyParams?: Record<string, Record<string, unknown>> | undefined;
   configValidationProviderIds?: readonly ProviderId[] | undefined;
@@ -365,7 +466,7 @@ function providerGraphRuntimeContext(opts: {
       templates: content.templates,
       ...(defaultConfig !== undefined ? { defaultConfig } : {}),
     },
-    baseProfile: providerProfileManifest(opts.profile),
+    baseProfile: opts.profileManifest ?? providerProfileManifest(opts.profile),
     ...(opts.dependencyBindings !== undefined
       ? { dependencyBindings: opts.dependencyBindings }
       : {}),
@@ -894,6 +995,7 @@ export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
     providerHost,
     providerSet: opts.providerSet,
     profile,
+    profileManifest: selectedProviderProfileManifest(opts, profile),
     dependencyBindings: opts.dependencyBindings,
     configValidationProviderIds: [],
   });
@@ -1124,7 +1226,7 @@ export function createProvisioningBridge(
   opts: CreateProvisioningBridgeOptions = {},
 ): ProvisioningStack {
   const providerHost = requireProviderHost(opts);
-  const profile = requireSelectedProfile(opts, {
+  const providerProfileOverrides: Partial<ProviderSelectionProfile> = {
     ...(opts.launcherProvider !== undefined ? { launcher: opts.launcherProvider } : {}),
     ...(opts.workspaceProvider !== undefined ? { workspace: opts.workspaceProvider } : {}),
     ...(opts.connectorProvider !== undefined ? { connector: opts.connectorProvider } : {}),
@@ -1132,7 +1234,8 @@ export function createProvisioningBridge(
     ...(opts.detectorProvider !== undefined ? { detector: opts.detectorProvider } : {}),
     ...(opts.channelProvider !== undefined ? { channel: opts.channelProvider } : {}),
     ...(opts.handoff?.authProvider !== undefined ? { auth: opts.handoff.authProvider } : {}),
-  });
+  };
+  const profile = requireSelectedProfile(opts, providerProfileOverrides);
   const state =
     opts.stateRoot !== undefined
       ? DaemonStateRoot.open({
@@ -1204,6 +1307,9 @@ export function createProvisioningBridge(
       opts.providerSet,
       "channel",
       channelProviderId,
+      {
+        ...(opts.handoff?.deliverySink !== undefined ? { delivery: "injected" } : {}),
+      },
     );
     const authBootConfig =
       opts.handoff !== undefined
@@ -1237,6 +1343,7 @@ export function createProvisioningBridge(
       providerHost,
       providerSet: opts.providerSet,
       profile,
+      profileManifest: selectedProviderProfileManifest(opts, profile, providerProfileOverrides),
       dependencyBindings: opts.dependencyBindings,
       runtimeAssemblyParams,
       configValidationProviderIds,
@@ -1952,6 +2059,9 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
       opts.providerSet,
       "channel",
       profile.channel,
+      {
+        ...(opts.deliverySink !== undefined ? { delivery: "injected" } : {}),
+      },
     ),
     identity,
     ...(opts.dependencyBindings !== undefined

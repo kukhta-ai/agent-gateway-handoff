@@ -5,14 +5,15 @@
 import {
   AUTH_WEBAUTHN_PROVIDER_ID,
   CHANNEL_CLI_PROVIDER_ID,
-  CONNECTOR_CDP_PROVIDER_ID,
   DETECTOR_URL_PROVIDER_ID,
-  ENTRYPOINT_NOVNC_PROVIDER_ID,
   LAUNCHER_PROCESS_PROVIDER_ID,
   PROVIDER_SET_REFERENCE_MODULE,
+  REFERENCE_PROFILE_SCENARIO_01_ID,
   WORKSPACE_PROFILE_PROVIDER_ID,
   referenceEntrypointClientAssetMounts,
   referenceProviderModules,
+  referenceProviderProfileManifests,
+  referenceProviderRuntimeProfile,
 } from "@gla/provider-set-reference";
 import {
   createApp as createGenericApp,
@@ -47,15 +48,9 @@ export { defaultBridgeEndpoint, endpointIsLocal, parseServeArgs };
 export type { DaemonHandle, ServeOptions };
 
 /** Default selected provider ids for the in-tree reference distribution. */
-export const referenceProviderProfile: ProviderSelectionProfile = {
-  auth: AUTH_WEBAUTHN_PROVIDER_ID,
-  launcher: LAUNCHER_PROCESS_PROVIDER_ID,
-  connector: CONNECTOR_CDP_PROVIDER_ID,
-  workspace: WORKSPACE_PROFILE_PROVIDER_ID,
-  entrypoint: ENTRYPOINT_NOVNC_PROVIDER_ID,
-  detector: DETECTOR_URL_PROVIDER_ID,
-  channel: CHANNEL_CLI_PROVIDER_ID,
-};
+export const referenceProviderProfile: ProviderSelectionProfile = referenceProviderRuntimeProfile(
+  REFERENCE_PROFILE_SCENARIO_01_ID,
+);
 
 function referenceDefaultConfig({
   family,
@@ -72,6 +67,9 @@ function referenceDefaultConfig({
     return legacy;
   }
   if (family === "detector" && providerId === DETECTOR_URL_PROVIDER_ID) {
+    return legacy;
+  }
+  if (family === "channel" && providerId === CHANNEL_CLI_PROVIDER_ID) {
     return legacy;
   }
   return undefined;
@@ -96,6 +94,8 @@ function referenceDefaultServices({
 export const referenceProviderSet: AppProviderSet = {
   moduleId: PROVIDER_SET_REFERENCE_MODULE,
   modules: referenceProviderModules,
+  profiles: referenceProviderProfileManifests,
+  selectedProfileId: REFERENCE_PROFILE_SCENARIO_01_ID,
   profile: referenceProviderProfile,
   defaultConfig: referenceDefaultConfig,
   defaultServices: referenceDefaultServices,
@@ -105,14 +105,9 @@ export const referenceProviderSet: AppProviderSet = {
 function withDefaultProviderSet<T extends ProviderCompositionOptions>(
   opts: T,
 ): T & ProviderCompositionOptions {
-  const providerSet = opts.providerSet ?? referenceProviderSet;
   return {
     ...opts,
-    providerSet,
-    providerProfile: {
-      ...providerSet.profile,
-      ...(opts.providerProfile ?? {}),
-    },
+    providerSet: opts.providerSet ?? referenceProviderSet,
   };
 }
 
