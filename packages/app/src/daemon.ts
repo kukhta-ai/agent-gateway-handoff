@@ -27,7 +27,7 @@ import {
 } from "node:net";
 import { dirname, isAbsolute } from "node:path";
 import type { AgentBridge } from "@gla/bridge";
-import type { DependencyBinding } from "@gla/catalog";
+import type { DependencyBinding, ProviderProfileManifest } from "@gla/catalog";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
 import { parsePublicBaseUrl, publicPath } from "@gla/gateway";
 import {
@@ -67,6 +67,8 @@ const deliveryToStdout: DeliverySink = {
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
 export interface ServeOptions extends ProviderCompositionOptions {
+  /** Named provider profile selected by the operator at daemon boot. */
+  providerProfileId?: string;
   /** The Access Gateway bind host — the PUBLIC entry. Default `0.0.0.0` (hermes-1, behind Caddy). */
   host?: string;
   /** The Access Gateway bind port. Default `3000` (the deploy target); tests pass `0` for an ephemeral port. */
@@ -265,8 +267,37 @@ export function authAssuranceProviderDiagnostic(opts: {
   return `${d.summary}; satisfies the selected policy`;
 }
 
+function selectedProviderProfileManifest(opts: ServeOptions): ProviderProfileManifest | undefined {
+  const profileId = opts.providerProfileId ?? opts.providerSet?.selectedProfileId;
+  if (profileId === undefined) {
+    return undefined;
+  }
+  return opts.providerSet?.profiles?.find((profile) => profile.metadata.name === profileId);
+}
+
+function selectionProviderId(selection: unknown): string | undefined {
+  if (typeof selection === "string" && selection.length > 0) {
+    return selection;
+  }
+  if (
+    selection !== null &&
+    typeof selection === "object" &&
+    "providerId" in selection &&
+    typeof selection.providerId === "string" &&
+    selection.providerId.length > 0
+  ) {
+    return selection.providerId;
+  }
+  return undefined;
+}
+
 function selectedServeAuthProvider(opts: ServeOptions): AuthProviderKind | undefined {
-  return opts.authProvider ?? opts.providerProfile?.auth ?? opts.providerSet?.profile.auth;
+  return (
+    opts.authProvider ??
+    opts.providerProfile?.auth ??
+    selectionProviderId(selectedProviderProfileManifest(opts)?.spec.select?.AuthProvider) ??
+    opts.providerSet?.profile.auth
+  );
 }
 
 function authDiagnosticsForRequest(
@@ -403,6 +434,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   const stack = createProvisioningBridge({
     ...(opts.providerSet !== undefined ? { providerSet: opts.providerSet } : {}),
     ...(opts.providerHost !== undefined ? { providerHost: opts.providerHost } : {}),
+    ...(opts.providerProfileId !== undefined ? { providerProfileId: opts.providerProfileId } : {}),
     ...(opts.providerProfile !== undefined ? { providerProfile: opts.providerProfile } : {}),
     ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
@@ -877,6 +909,7 @@ const SERVE_USAGE = `gla serve — run the long-running GLA daemon (the :3000 de
 Usage:
   gla serve [--port <n>] [--host <h>] [--endpoint <path|host:port>] [--public-base-url <url>]
             [--trust-forwarded-prefix <true|false>]
+            [--provider-profile <profile-id>]
             [--rp-id <id>] [--rp-name <name>] [--launcher <auto|full|headless>] [--workspace-root <dir>]
             [--state-root <dir>]
             [--auth-provider <provider-id>] [--auth-provider-config-json <json>]
@@ -897,7 +930,7 @@ Auth assurance (--auth-assurance-policy, default phishing-resistant): unset dema
   evidence; password-permitted is the explicit policy that admits password-grade evidence.
 
 Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_TRUST_FORWARDED_PREFIX,
-  GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_WORKSPACE_ROOT, GLA_STATE_ROOT,
+  GLA_PROVIDER_PROFILE, GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_WORKSPACE_ROOT, GLA_STATE_ROOT,
   GLA_AUTH_PROVIDER, GLA_AUTH_PROVIDER_CONFIG_JSON, GLA_AUTH_ASSURANCE_POLICY, GLA_AUTH_ENROLLMENT_POLICY_JSON,
   GLA_AUTH_DEPLOYMENT_ROLES_JSON, GLA_AUTH_EDGE_GUARD_ROLES_JSON,
   GLA_DEPENDENCY_BINDINGS_JSON.
@@ -910,8 +943,8 @@ Then drive it from another shell with the daemon's bridge endpoint:
 /**
  * Parse `gla serve` argv (after the `serve` token) into {@link ServeOptions}, layering flags over env defaults
  * (flags win). `--help`/`-h` returns `{ help: true }`. Recognized flags: `--port`, `--host`, `--endpoint`,
- * `--public-base-url`, `--trust-forwarded-prefix`, `--rp-id`, `--rp-name`, `--launcher`, `--workspace-root`,
- * `--state-root`.
+ * `--public-base-url`, `--trust-forwarded-prefix`, `--provider-profile`, `--rp-id`, `--rp-name`, `--launcher`,
+ * `--workspace-root`, `--state-root`.
  * Unknown flags are ignored (forward-compatible), an invalid `--port`/`--launcher`/boolean flag is a stable error
  * the caller surfaces.
  */
@@ -989,6 +1022,10 @@ export function parseServeArgs(
   const trustForwardedPrefix = bool("trust-forwarded-prefix", "GLA_TRUST_FORWARDED_PREFIX");
   if (trustForwardedPrefix !== undefined) {
     options.trustForwardedPrefix = trustForwardedPrefix;
+  }
+  const providerProfileId = str("provider-profile", "GLA_PROVIDER_PROFILE");
+  if (providerProfileId !== undefined) {
+    options.providerProfileId = providerProfileId;
   }
   const rpID = str("rp-id", "GLA_RP_ID");
   if (rpID !== undefined) {
@@ -1094,6 +1131,7 @@ function validateServeOptions(opts: ServeOptions): void {
   assertUsableServeOption("host", opts.host);
   assertUsableServeOption("bridgeEndpoint", opts.bridgeEndpoint);
   assertUsableServeOption("publicBaseUrl", opts.publicBaseUrl);
+  assertUsableServeOption("providerProfileId", opts.providerProfileId);
   assertUsableServeOption("authProvider", opts.authProvider);
   assertUsableServeOption("authProviderConfig", opts.authProviderConfig);
   assertUsableServeOption("authProviderConfigJson", opts.authProviderConfigJson);

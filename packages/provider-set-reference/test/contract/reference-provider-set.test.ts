@@ -1,8 +1,11 @@
 import {
   CatalogService,
   type ProviderManifest,
+  providerGraphDoctorReport,
   referenceWpmDependencyBindings,
+  resolveProviderGraphProjection,
   toAdmissionCatalog,
+  validateProviderProfileInputs,
 } from "@gla/catalog";
 import type {
   AgentConnectorPort,
@@ -31,11 +34,20 @@ import {
 } from "@gla/provider-host";
 import { describe, expect, it } from "vitest";
 import {
+  REFERENCE_PROFILE_HARDENED_IDP_ID,
+  REFERENCE_PROFILE_LOCAL_DEV_ID,
+  REFERENCE_PROFILE_SCENARIO_01_ID,
+  REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
   SECRET_STORE_REFERENCE_PROVIDER_ID,
   createReferenceProviderHost,
   createReferenceSecretStoreProvider,
   referenceProviderModules,
+  referenceProviderProfile,
+  referenceProviderProfileManifests,
+  referenceProviderProfiles,
+  referenceProviderRuntimeProfile,
   referenceProviderStoreContent,
+  referenceTemplateProviderDefaultsForProfile,
 } from "../../src/index.js";
 
 const fakeIdentity: IdentityPort = {
@@ -324,6 +336,112 @@ describe("referenceProviderModules", () => {
     expect(content.templates.map((template) => template.metadata.name)).toEqual([
       "browser-handoff",
     ]);
+  });
+
+  it("exposes named reference profiles with explicit posture selections and template defaults", () => {
+    const host = createReferenceProviderHost();
+    const content = referenceProviderStoreContent(host);
+
+    expect(referenceProviderProfiles.map((profile) => profile.id)).toEqual([
+      REFERENCE_PROFILE_LOCAL_DEV_ID,
+      REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
+      REFERENCE_PROFILE_SCENARIO_01_ID,
+      REFERENCE_PROFILE_HARDENED_IDP_ID,
+    ]);
+    expect(referenceProviderProfiles.map((profile) => profile.purpose).join("\n")).toContain(
+      "Scenario-01",
+    );
+    expect(
+      validateProviderProfileInputs({
+        profiles: referenceProviderProfileManifests,
+        providers: content.providers,
+      }),
+    ).toEqual({ ok: true, diagnostics: [] });
+
+    expect(referenceProviderRuntimeProfile(REFERENCE_PROFILE_LOCAL_DEV_ID)).toMatchObject({
+      auth: "webauthn",
+      detector: "user-done",
+      channel: "channel-cli",
+    });
+    expect(referenceProviderRuntimeProfile(REFERENCE_PROFILE_SCENARIO_01_ID)).toMatchObject({
+      auth: "webauthn",
+      detector: "url-watcher",
+    });
+    expect(referenceProviderRuntimeProfile(REFERENCE_PROFILE_HARDENED_IDP_ID)).toMatchObject({
+      auth: "authentik",
+      detector: "url-watcher",
+    });
+    expect(
+      referenceTemplateProviderDefaultsForProfile(REFERENCE_PROFILE_LOCAL_DEV_ID),
+    ).toMatchObject({
+      detector: "user-done",
+    });
+  });
+
+  it("validates named reference profiles through the provider graph with profile-specific diagnostics", () => {
+    const host = createReferenceProviderHost();
+    const dependencyBindings = referenceWpmDependencyBindings();
+
+    for (const profileId of [
+      REFERENCE_PROFILE_LOCAL_DEV_ID,
+      REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
+      REFERENCE_PROFILE_SCENARIO_01_ID,
+    ]) {
+      const content = referenceProviderStoreContent(
+        host,
+        referenceTemplateProviderDefaultsForProfile(profileId),
+      );
+      const graph = resolveProviderGraphProjection({
+        providerSet: {
+          id: "@gla/provider-set-reference",
+          providers: content.providers,
+          templates: content.templates,
+        },
+        baseProfile: referenceProviderProfile(profileId).manifest,
+        dependencyBindings,
+        configValidationMode: "factory",
+      });
+
+      expect(graph.ok).toBe(true);
+      expect(providerGraphDoctorReport(graph)).toMatchObject({
+        status: "PASS",
+        profileId,
+        selectedProviders: expect.objectContaining({
+          AuthProvider: "webauthn",
+          ChannelAdapter: "channel-cli",
+        }),
+      });
+    }
+
+    const hardenedContent = referenceProviderStoreContent(
+      host,
+      referenceTemplateProviderDefaultsForProfile(REFERENCE_PROFILE_HARDENED_IDP_ID),
+    );
+    const hardened = resolveProviderGraphProjection({
+      providerSet: {
+        id: "@gla/provider-set-reference",
+        providers: hardenedContent.providers,
+        templates: hardenedContent.templates,
+      },
+      baseProfile: referenceProviderProfile(REFERENCE_PROFILE_HARDENED_IDP_ID).manifest,
+      dependencyBindings,
+      configValidationMode: "factory",
+    });
+
+    expect(hardened.ok).toBe(false);
+    expect(hardened.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.config_invalid",
+          providerId: "authentik",
+        }),
+      ]),
+    );
+    expect(providerGraphDoctorReport(hardened)).toMatchObject({
+      status: "FAIL",
+      profileId: REFERENCE_PROFILE_HARDENED_IDP_ID,
+      selectedProviders: expect.objectContaining({ AuthProvider: "authentik" }),
+    });
   });
 
   it("applies operator-selected template defaults without embedding compatibility tables in the provider set", () => {

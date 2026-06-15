@@ -127,10 +127,10 @@ intended. The reference provider set may therefore expose multiple named profile
 | `scenario-01` | Product reference flow for same-session browser handoff | browser-handoff template with channel, auth, launcher, entrypoint, connector, workspace, and detector choices that are mutually compatible and available on the host. |
 | `hardened-idp` | Stronger external identity posture | delegated `AuthProvider` such as authentik or OIDC plus compatible edge, assurance, enrollment, and WPM bindings. |
 
-These names are illustrative until encoded as provider-profile manifests, but the rule is fixed: documentation and
-implementation must say which profile a "default" belongs to. If two docs disagree about WebAuthn vs authentik or
-process launcher vs Docker, that is not solved by a generic default; it is solved by naming the profile and then
-checking compatibility and availability inside that profile.
+These names are encoded as provider-profile manifests by the reference provider set, and the rule is fixed:
+documentation and implementation must say which profile a "default" belongs to. If two docs disagree about WebAuthn
+vs authentik or process launcher vs Docker, that is not solved by a generic default; it is solved by naming the
+profile and then checking compatibility and availability inside that profile.
 
 ## 5. Provider-Family Contract
 

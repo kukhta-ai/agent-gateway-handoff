@@ -10,6 +10,10 @@ import { fileURLToPath } from "node:url";
 import { AUTH_AUTHENTIK_MODULE } from "@gla/auth-authentik";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
+import {
+  DETECTOR_USER_DONE_PROVIDER_ID,
+  REFERENCE_PROFILE_LOCAL_DEV_ID,
+} from "@gla/provider-set-reference";
 import { describe, expect, it } from "vitest";
 import {
   authEnrollmentDiagnostics,
@@ -198,6 +202,26 @@ describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unc
       handoff: { ...ENROLL_BASE },
     });
     expect(stack.authModule).toBe(AUTH_WEBAUTHN_MODULE);
+  });
+
+  it("createProvisioningBridge() applies an explicit named reference provider profile at boot", async () => {
+    const stack = createProvisioningBridge({
+      providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      launcherMode: "headless",
+      handoff: { ...ENROLL_BASE },
+    });
+    try {
+      expect(stack.providerGraphDoctor).toMatchObject({
+        status: "PASS",
+        profileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+        selectedProviders: expect.objectContaining({
+          CompletionDetector: DETECTOR_USER_DONE_PROVIDER_ID,
+        }),
+      });
+    } finally {
+      await stack.close();
+    }
   });
 
   it("createApp().wiring.auth (the static default profile) still names @gla/auth-webauthn", async () => {
