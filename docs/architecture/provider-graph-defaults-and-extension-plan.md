@@ -263,8 +263,8 @@ Resolution order:
 6. Evaluate compatibility. Explicit `compatibleWith` entries are allowlists. If either side declares an allowlist for
    a peer family, the selected peer must match it by provider id, capability, or transport class. If a family
    contract marks compatibility as required and no applicable relation exists, the result is ambiguous and rejected.
-7. Validate provider config after defaults are merged. Unknown fields, type errors, policy-disallowed fields,
-   sensitive literals, and template-fixed overrides reject.
+7. Validate provider config after defaults are merged through the kernel Ajv-backed JSON Schema boundary. Unknown
+   fields, type errors, policy-disallowed fields, sensitive literals, and template-fixed overrides reject.
 8. Admission resolves an `AssemblySpec` only against this validated graph projection. It never reimplements a second
    availability or compatibility rule.
 

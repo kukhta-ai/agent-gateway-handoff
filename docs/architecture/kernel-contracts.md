@@ -320,9 +320,10 @@ The agent never produces the resolved spec — admission owns resolution (mutate
 ## §4 · Typed config_schema vocabulary (AC #4)
 
 The single mechanism that makes authoring **allowlist-by-construction** (`see docs/02 §3.1, docs/04 §3`): a
-provider declares the *typed set of options the agent may set*, and nothing off-schema is expressible. Validated
-**offline and early** (Terraform's provider-schema model). It is itself valid JSON Schema (the ingester checks
-that).
+provider declares the *typed set of options the agent may set*, and nothing off-schema is expressible. Validation
+runs through the kernel's Ajv-backed JSON Schema boundary **offline and early** (Terraform's provider-schema
+model). The schema is itself a conservative JSON Schema profile: the ingester checks it before it can constrain
+provider config, and runtime/factory/profile/template config all reuse the same `validateConfig` boundary.
 
 ```ts
 type ConfigSchemaType =
@@ -342,6 +343,7 @@ interface ConfigSchemaNode {
   dependencies?: Record<string, string[]>;
   allOf?: ConfigSchemaNode[]; anyOf?: ConfigSchemaNode[];
   oneOf?: ConfigSchemaNode[]; not?: ConfigSchemaNode;
+  if?: ConfigSchemaNode; then?: ConfigSchemaNode; else?: ConfigSchemaNode;
   default?: unknown;                 // graph/defaulting metadata, not validator mutation
   "x-gla-sensitive"?: boolean;       // redaction metadata, never a literal secret
 }
@@ -351,6 +353,11 @@ interface ConfigSchema extends ConfigSchemaNode {
   additionalProperties: false;
 }
 ```
+Ajv is configured fail-closed for this boundary: all discoverable errors are collected, unknown fields reject through
+`additionalProperties:false`, strict schema validation is on, and defaults/coercion/unknown-field removal are disabled
+so validation never mutates caller input. Sensitive metadata is diagnostic metadata only: invalid values and sensitive
+schema literals are not emitted in field-level defects.
+
 **Guarantees:** the trusted provider/template author draws the line once (which native knobs become options and
 their bounds); the untrusted agent only sets conforming values; off-menu input is rejected offline at admission.
 The same schema is surfaced three equivalent ways — `-f` file, `--set path=value`, and `gla schema`

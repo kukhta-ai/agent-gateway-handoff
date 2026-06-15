@@ -372,7 +372,15 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
           chromiumPath: { type: "string", minLength: 1 },
           startTimeoutMs: { type: "number", minimum: 1 },
         },
-        allOf: [{ not: { required: ["mode", "headless"] } }],
+        allOf: [
+          {
+            not: {
+              type: "object",
+              required: ["mode", "headless"],
+              properties: { mode: {}, headless: {} },
+            },
+          },
+        ],
       },
       // The browser-runtime host dependency (GLA-007 stands it up via WPM); not seeded as bound.
       requires: [

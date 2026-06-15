@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider graph follow-up tasks complete"
-branch: feature/provider-graph
+phase_name: "Autonomous build — corrected provider graph follow-up GLA-108 in progress"
+branch: feature/provider-graph-task-108-corrected
 epic: provider-graph-107
-active_story: null
+active_story: GLA-108
 review_cycle: 0
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "GLA-108 and GLA-109 Done and merged into feature/provider-graph."
-  note: "2026-06-15 user goal: implement backlog tasks GLA-108 through GLA-109 according to project SDLC, architecture, and vision. Reusing persistent provider-graph specialists first: architect James, UX Arendt, SM Lagrange, worker Avicenna, TEA/reviewer Planck, investigator Ampere. BMAD story-loop skills loaded; repo lacks BMAD sprint-status.yaml/story specs for automatic workflow execution, so Backlog.md/design-set fallback is explicit per Rule 3. GLA-108 completed with Planck re-review clean and pnpm gate passing with required browser E2E. GLA-109 completed with Planck re-review clean and pnpm gate passing with required browser E2E."
+  next_ready_sequence: "Corrected GLA-108 Done on feature/provider-graph-task-108-corrected; GLA-109 remains next."
+  note: "2026-06-15 corrected user goal: implement revised backlog tasks GLA-108 through GLA-109 according to project SDLC, architecture, and vision. Existing provider-graph persistent specialists reinitialized: architect James, SM Lagrange, worker Avicenna, TEA/reviewer Planck. Corrected GLA-108 requires Ajv-backed JSON Schema validation; corrected GLA-109 requires Commander-backed CLI parsing. Corrected GLA-108 completed with Planck re-review clean and pnpm gate passing with required browser E2E."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
 # (Redis-free path; postgres+server+worker); GLA's REAL adapter did a REAL OIDC round-trip -> finishEnrollment+verifyAssertion ->
@@ -104,8 +104,8 @@ provider_graph_107_specialists:
   architect: {spawned: true, id: "019ec85a-db50-7152-b34c-2847ef3d4c66", open: true, resumable: true, role: "provider-graph solution architecture and boundary review", last_skill: "GLA-107.02 bmad-create-architecture/docs-driven review completed; catalog-owned graph projection boundary and WPM evidence separation confirmed"}
   ux: {spawned: true, id: "019ec85a-fd4e-7622-a4c0-490465c56dda", open: true, resumable: true, role: "provider authoring, operator install/update, and runtime consumption UX design", last_skill: "GLA-107.13 bmad-ux docs-driven runtime consumption UX brief completed; catalog/schema/template/skill discovery and dry-run proposal flow shaped"}
   sm: {spawned: true, id: "019ec85b-24d5-7270-ad2a-3e4f1e50b613", open: true, resumable: true, role: "story sequencing and create-story evidence for provider graph epic", last_skill: "GLA-107.10 bmad-create-story loaded; sprint-status.yaml absent, docs/backlog fallback identified negative-capstone guardrails"}
-  worker: {spawned: true, id: "019ec85b-487b-7911-aef6-63cb08246ba2", open: true, resumable: true, role: "dev-story implementation and E2E/contract test generation for provider graph epic", last_skill: "GLA-109 bmad-create-story/dev-story/qa-generate-e2e-tests docs/backlog fallback executed; CLI contract parser and serve provider-profile policy fix implemented; pnpm gate passed"}
-  reviewer: {spawned: true, id: "019ec85b-6cde-7691-b01d-a58ee3f0d133", open: true, resumable: true, role: "TEA/test/security and independent story review for provider graph epic", last_skill: "GLA-109 story-automator-review adversarial cycles completed; scoped help/contract validation gaps fixed; final no blocking findings"}
+  worker: {spawned: true, id: "019ec85b-487b-7911-aef6-63cb08246ba2", open: true, resumable: true, role: "dev-story implementation and E2E/contract test generation for provider graph epic", last_skill: "Corrected GLA-108 bmad-create-story/dev-story/qa-generate-e2e-tests docs/backlog fallback executed; Ajv strict provider config validation strengthened; pnpm gate passed"}
+  reviewer: {spawned: true, id: "019ec85b-6cde-7691-b01d-a58ee3f0d133", open: true, resumable: true, role: "TEA/test/security and independent story review for provider graph epic", last_skill: "Corrected GLA-108 story-automator-review adversarial cycles completed; strict Ajv schema issue fixed; final no blocking findings"}
   investigator: {spawned: true, id: "019ec85b-8959-70c0-be10-b8df6540447b", open: true, resumable: true, role: "root-cause analysis for graph validation, availability, diagnostics, and boundary regressions", last_skill: "bmad-investigate loaded/resolved; initialized for GLA-107..GLA-107.13"}
 
 gates_pending: ["human approval to open PR against dev"]
@@ -137,4 +137,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-15T13:08:45Z"
+last_updated: "2026-06-15T14:00:00Z"
