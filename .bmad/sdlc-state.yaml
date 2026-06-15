@@ -12,7 +12,7 @@ review_cycle: 1
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "Corrected GLA-108 Done and merged into feature/provider-graph; corrected GLA-109 Done with all AC/DoD checked and ready for integration into feature/provider-graph."
+  next_ready_sequence: "Corrected GLA-108 and corrected GLA-109 are Done and merged into feature/provider-graph."
   note: "2026-06-15 corrected user goal: implement revised backlog tasks GLA-108 through GLA-109 according to project SDLC, architecture, and vision. Existing provider-graph persistent specialists reinitialized: architect James, SM Lagrange, worker Avicenna, TEA/reviewer Planck. Corrected GLA-108 requires Ajv-backed JSON Schema validation; corrected GLA-109 requires Commander-backed CLI parsing. Corrected GLA-108 completed with Planck re-review clean and pnpm gate passing with required browser E2E. Corrected GLA-109 completed with Commander-backed parser adapter derived from CLI_COMMANDS, process-entry preflight before daemon connection, Planck re-review APPROVE, and pnpm run gate passing with required browser E2E."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
@@ -137,4 +137,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-15T14:31:00Z"
+last_updated: "2026-06-15T14:34:00Z"
