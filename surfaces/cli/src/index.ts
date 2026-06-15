@@ -4,7 +4,7 @@
 
 import { AgentBridge } from "@gla/bridge";
 import { isGlaError, redactOperatorText } from "@gla/kernel";
-import { type CliServices, run } from "./cli.js";
+import { type CliServices, preflightUsage, run } from "./cli.js";
 import { ExitCode } from "./exit-codes.js";
 import { Output, type OutputMode } from "./output.js";
 import { DaemonBridgeClient, resolveClientEndpoint } from "./transport.js";
@@ -48,6 +48,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   const { argv: rest, endpoint: flagEndpoint } = extractEndpointFlag(argv);
   const mode = sniffOutputMode(rest);
   const out = new Output(mode);
+  const usageExit = preflightUsage(rest, out);
+  if (usageExit !== undefined) {
+    return usageExit;
+  }
   const endpoint = flagEndpoint ?? resolveClientEndpoint();
   if (endpoint === undefined) {
     // In-process profile (no daemon): compose a fresh bridge per invocation (the default behaviour).

@@ -10,11 +10,15 @@ export interface CliCommandSpec {
   summary: string;
   args: string[];
   flags: string[];
+  /** Long flag names that may be supplied more than once, preserving input order. */
+  repeatableFlags?: string[];
   output: string;
   fields: string[];
   exitCodes: number[];
   effect: CliCommandEffect;
 }
+
+type PublicCliCommandSpec = Omit<CliCommandSpec, "repeatableFlags">;
 
 /** Machine-readable contract for a documented but intentionally deferred CLI surface. */
 export interface DeferredCliSurface {
@@ -421,6 +425,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
       "--mount <host>:<target>:<ro|rw>",
       "--dry-run",
     ],
+    repeatableFlags: ["entrypoint", "detector", "mount"],
     output: "session-create-result",
     fields: ["decision", "dry_run", "session_id", "state", "task_id", "capsule", "connector"],
     exitCodes: [
@@ -610,22 +615,40 @@ export function schemaPayload(noun?: string, verb?: string): Record<string, unkn
       command: "gla",
       current_contract: "GLA-094 current executable CLI surface",
       global_flags: [...CURRENT_GLOBAL_FLAGS],
-      commands: CLI_COMMANDS,
+      commands: publicCommandSpecs(CLI_COMMANDS),
       deferred_surfaces: DEFERRED_CLI_SURFACES,
       exit_codes: exitCodePayload(),
     };
   }
+  const found = verb === undefined ? undefined : findCommandSpec(noun, verb);
   const scoped =
-    verb === undefined ? commandSpecsForNoun(noun) : [findCommandSpec(noun, verb)].filter(Boolean);
+    verb === undefined ? commandSpecsForNoun(noun) : found === undefined ? [] : [found];
   return {
     command: ["gla", noun, verb].filter(Boolean).join(" "),
     global_flags: [...CURRENT_GLOBAL_FLAGS],
-    commands: scoped,
+    commands: publicCommandSpecs(scoped),
     deferred_surfaces: DEFERRED_CLI_SURFACES.filter(
       (d) => d.surface === noun || d.surface.startsWith(`${noun} `),
     ),
     exit_codes: exitCodePayload(),
   };
+}
+
+function publicCommandSpecs(commands: readonly CliCommandSpec[]): PublicCliCommandSpec[] {
+  return commands.map((command) => {
+    const { noun, verb, summary, args, flags, output, fields, exitCodes, effect } = command;
+    return {
+      noun,
+      ...(verb === undefined ? {} : { verb }),
+      summary,
+      args,
+      flags,
+      output,
+      fields,
+      exitCodes,
+      effect,
+    };
+  });
 }
 
 /** Stable exit-code taxonomy exposed through help/schema. */
