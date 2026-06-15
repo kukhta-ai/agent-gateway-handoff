@@ -61,6 +61,7 @@ import {
 } from "./provider-profile.js";
 
 export * from "./manifests.js";
+export * from "./provider-authoring.js";
 export * from "./provider-profile.js";
 
 /** Stable package-identity marker (used by the `app` composition root's wiring record). */
