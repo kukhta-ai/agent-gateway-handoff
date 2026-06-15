@@ -951,6 +951,7 @@ Then drive it from another shell with the daemon's bridge endpoint:
 export function parseServeArgs(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
+  compositionDefaults: ProviderCompositionOptions = {},
 ): { help: true } | { help: false; options: ServeOptions } {
   const flags = new Map<string, string | true>();
   for (let i = 0; i < argv.length; i++) {
@@ -1067,7 +1068,7 @@ export function parseServeArgs(
     options.authEnrollmentPolicyJson = authEnrollmentPolicyJson;
     options.authEnrollmentPolicy = parseAuthEnrollmentPolicyJson(
       authEnrollmentPolicyJson,
-      options.authProvider ?? "webauthn",
+      selectedServeAuthProvider({ ...compositionDefaults, ...options }) ?? "webauthn",
     );
   }
   const authDeploymentRolesJson =
@@ -1164,7 +1165,7 @@ export async function runServe(
   const log = (line: string): void => void process.stderr.write(`${line}\n`);
   let parsed: { help: true } | { help: false; options: ServeOptions };
   try {
-    parsed = parseServeArgs(argv, env);
+    parsed = parseServeArgs(argv, env, compositionDefaults);
   } catch (e) {
     log(`error: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`);
     log(SERVE_USAGE);

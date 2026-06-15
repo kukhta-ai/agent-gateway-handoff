@@ -32,6 +32,8 @@ describe("provider install/update UX documentation", () => {
       "WPM bundle metadata",
       "DependencyBinding",
       "gla doctor provider-graph",
+      "not the current executable `gla` CLI contract",
+      "deferred",
       "public-edge transport evidence",
       "rollback snapshot",
       "ready-to-apply",

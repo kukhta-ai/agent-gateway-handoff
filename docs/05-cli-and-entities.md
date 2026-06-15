@@ -88,6 +88,7 @@ gla
 ├── schema [<noun> [<verb>]]
 ├── version
 ├── catalog list [--kind <k>] [--available]
+├── catalog show <id>
 ├── template list [--available]
 ├── template show <id>
 ├── skill list [--for <template>]
@@ -123,6 +124,11 @@ Current deferred surfaces and diagnostics:
 | Surface | Current behavior | Future direction |
 |---|---|---|
 | `policy mounts` | `usage.unsupported` | policy inspection for host-mount planning |
+| provider authoring commands | `usage.unsupported` | `provider scaffold/validate/test/inspect` |
+| template-package authoring commands | `usage.unsupported` | `template-package scaffold/validate` |
+| profile install/update commands | `usage.unsupported` | `profile list/show/validate` and overlay validation |
+| provider-set install/update commands | `usage.unsupported` | `provider-set inspect/plan/apply/rollback` |
+| `doctor provider-graph` | `usage.unsupported` | CLI exposure for the provider graph doctor report |
 | `events [--follow]` | `usage.unsupported` | NDJSON state-change and handoff lifecycle stream |
 | `audit list` | `usage.unsupported` | redacted audit browsing and trace correlation |
 | `auth login/logout` | `usage.unsupported`; local profile remains credential-free | authenticated-agent profiles |
@@ -217,6 +223,7 @@ One row per leaf command. The **Group** column is blank when it carries from the
 |  | `gla schema [<noun> [<verb>]]` | 1. Emit the machine-readable surface — every command, its args/flags with types, output schema, and exit codes<br>2. Scope to a noun/verb when given<br>3. *Read-only*; the agent introspects instead of reading docs |
 |  | `gla version` | 1. Print the client version + the connected server's version/build<br>2. *Read-only* |
 | `catalog` | `gla catalog list [--kind <k>] [--available]` | 1. Query the Catalog index<br>2. Filter by entity `--kind`; `--available` drops entities whose dependencies are unbound<br>3. Print entities with system-derived availability<br>4. *Read-only* |
+|  | `gla catalog show <id>` | 1. Read one provider/template catalog entity from the active graph<br>2. Print family, capability, system-derived availability, config schema, dependency evidence, and diagnostics<br>3. Exit 5 if unknown<br>4. *Read-only* |
 | `policy` | `gla policy mounts` | 1. Print the host-mount policy this install applies to the agent — the allowed-set (permitted roots), the catastrophic denylist, and the default mode<br>2. *Read-only*; the agent composes mounts within this bound |
 | `template` | `gla template list` | 1. List `CapsuleTemplate` entities from the Catalog index<br>2. *Read-only* |
 |  | `gla template show <id>` | 1. Resolve the template<br>2. Print its required parts (entrypoint / connector / workspace / detector options), compatible providers derived from registered provider manifests, each backing provider/family, each provider's dependency binding status, and template-level dependency evidence such as `edge-proxy`<br>3. Exit 5 if unknown<br>4. *Read-only* |

@@ -6,7 +6,7 @@
 //   connect()         → trigger→admit→anchor: issue the agent-authority anchor (capability svc)
 //   whoami()          → identity + allowed ops, by VERIFYING the anchor (never trusting bytes)
 //   templateList/Show → the assemblable menu + each part's backing dependency binding status
-//   skillList/Show    → procedural knowledge ; catalogList → only available entities (system-derived)
+//   skillList/Show    → procedural knowledge ; catalogList/Show → system-derived catalog facts
 // Slice 2 — propose + admit (scenario-01 Phase 2; GLA-018/019/020/021):
 //   taskCreate/Get/List → open a Task + mint its `task` capability (attenuated from agent-authority)
 //   sessionCreate       → resolve task → ADMIT (mutate→validate) → dry-run accept/reject OR dispatch a
@@ -28,6 +28,7 @@ import {
 } from "@gla/capability";
 import {
   type Availability,
+  type CatalogProviderInfo,
   CatalogService,
   type IndexedEntity,
   type TemplateShowResult,
@@ -82,6 +83,17 @@ export interface ConnectResult {
   /** The set of operations the anchor allows (the `allowed-ops` caveat). */
   allowed_ops: string[];
 }
+
+/** Rich catalog detail returned by `catalog show`: the index row plus provider/template facts. */
+export type CatalogShowResult =
+  | (IndexedEntity &
+      Partial<
+        Pick<
+          CatalogProviderInfo,
+          "dependencies" | "diagnostics" | "config_schema" | "authAssurance"
+        >
+      >)
+  | (IndexedEntity & Partial<TemplateShowResult>);
 
 /** Construction options for the Agent Bridge. */
 export interface AgentBridgeOptions {
@@ -252,6 +264,35 @@ export class AgentBridge {
    */
   catalogList(filter?: { kind?: string; available?: boolean }): IndexedEntity[] {
     return this.catalog.list(filter);
+  }
+
+  /** `catalog show <id>`: read one provider/template catalog entity with graph diagnostics. Read-only. */
+  catalogShow(id: string): CatalogShowResult {
+    const entity = this.catalog.show(id);
+    if (entity === undefined) {
+      throw glaError("catalog.unknown", `unknown catalog entity: "${id}"`, { detail: { id } });
+    }
+    if (entity.kind === "CapsuleTemplate" || entity.family === "template") {
+      const template = this.catalog.templateShow(id);
+      return {
+        ...entity,
+        ...template,
+        name: entity.name,
+        kind: entity.kind,
+        family: entity.family,
+        summary: entity.summary,
+        requires: template.dependencies,
+      };
+    }
+    const provider = this.catalog.providerShow(id);
+    if (provider !== undefined) {
+      return {
+        ...entity,
+        ...provider,
+        requires: provider.dependencies,
+      };
+    }
+    return entity;
   }
 
   /**

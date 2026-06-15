@@ -43,6 +43,8 @@ describe("provider authoring UX documentation", () => {
       "Contract-test failures",
       "operator install/update",
       "not as the journey structure",
+      "not the current executable `gla` CLI contract",
+      "deferred",
     ]) {
       expect(doc).toContain(requiredPhrase);
     }

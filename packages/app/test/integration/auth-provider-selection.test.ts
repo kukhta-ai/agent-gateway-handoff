@@ -12,6 +12,7 @@ import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
 import {
   DETECTOR_USER_DONE_PROVIDER_ID,
+  REFERENCE_PROFILE_HARDENED_IDP_ID,
   REFERENCE_PROFILE_LOCAL_DEV_ID,
 } from "@gla/provider-set-reference";
 import { describe, expect, it } from "vitest";
@@ -25,6 +26,7 @@ import {
   type AuthProviderConfig,
   createEnrollmentStack,
   createProvisioningBridge,
+  referenceProviderSet,
 } from "../../src/index.js";
 
 const AUTHENTIK: AuthProviderConfig = {
@@ -388,6 +390,27 @@ describe("AC#6 · daemon parseServeArgs threads opaque provider ids and provider
         "webauthn-passkey",
         "oauth:github",
       ]);
+    }
+  });
+
+  it("parses enrollment policy JSON against a provider selected by provider profile", () => {
+    const parsed = parseServeArgs(
+      ["--provider-profile", REFERENCE_PROFILE_HARDENED_IDP_ID],
+      {
+        GLA_AUTH_ENROLLMENT_POLICY_JSON: JSON.stringify({
+          declared: true,
+          credentialSetupStages: [],
+          externalSources: [],
+          mfaRecoveryMethods: [],
+          requiredMethods: [],
+          optionalRecipientChoices: [],
+        }),
+      } as NodeJS.ProcessEnv,
+      { providerSet: referenceProviderSet },
+    );
+    expect(parsed.help).toBe(false);
+    if (!parsed.help) {
+      expect(parsed.options.authEnrollmentPolicy?.provider).toBe("authentik");
     }
   });
 
