@@ -90,6 +90,10 @@ function referenceDefaultServices({
   return undefined;
 }
 
+const referenceTemplateProbes: NonNullable<AppProviderSet["templateProbes"]> = {
+  "browser-handoff": () => "available",
+};
+
 /** Trusted provider set used by the default `@gla/app` package entrypoint. */
 export const referenceProviderSet: AppProviderSet = {
   moduleId: PROVIDER_SET_REFERENCE_MODULE,
@@ -100,6 +104,7 @@ export const referenceProviderSet: AppProviderSet = {
   defaultConfig: referenceDefaultConfig,
   defaultServices: referenceDefaultServices,
   entrypointClientAssets: referenceEntrypointClientAssetMounts,
+  templateProbes: referenceTemplateProbes,
 };
 
 function withDefaultProviderSet<T extends ProviderCompositionOptions>(

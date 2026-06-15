@@ -116,6 +116,63 @@ describe("CatalogService.list — WPM receipt-derived availability (GLA-082)", (
     expect(cat.list({ available: true }).map((e) => e.name)).not.toContain("launcher-process");
   });
 
+  it("requires a declared current probe for host-touching provider and template dependencies", () => {
+    const providerContent = defaultStoreContent();
+    const launcher = providerContent.providers.find(
+      (candidate) => candidate.metadata.name === "launcher-process",
+    );
+    if (launcher === undefined) {
+      throw new Error("missing launcher fixture");
+    }
+    const { probe: _launcherProbe, ...launcherSpec } = launcher.spec;
+    launcher.spec = launcherSpec;
+
+    const providerCatalog = new CatalogService({
+      content: providerContent,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+    expect(providerCatalog.show("launcher-process")).toMatchObject({
+      available: false,
+      availability: "unavailable",
+      requires: [
+        expect.objectContaining({
+          dependency: "browser-runtime",
+          status: "bound",
+          diagnostics: { install: "available", runtime: "unavailable" },
+        }),
+      ],
+    });
+
+    const templateContent = defaultStoreContent();
+    const template = templateContent.templates.find(
+      (candidate) => candidate.metadata.name === "browser-handoff",
+    );
+    if (template === undefined) {
+      throw new Error("missing browser-handoff fixture");
+    }
+    const { probe: _templateProbe, ...templateSpec } = template.spec;
+    template.spec = templateSpec;
+
+    const templateShow = new CatalogService({
+      content: templateContent,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    }).templateShow("browser-handoff");
+    expect(templateShow).toMatchObject({
+      available: false,
+      availability: "unavailable",
+      dependencies: [
+        expect.objectContaining({
+          dependency: "edge-proxy",
+          status: "bound",
+          diagnostics: { install: "available", runtime: "unavailable" },
+          publicEdgeTransport: expect.objectContaining({
+            currentReachability: { result: "unavailable" },
+          }),
+        }),
+      ],
+    });
+  });
+
   it("missing structured receipt evidence cannot make a host dependency available", () => {
     const bindings = referenceWpmDependencyBindings();
     replaceReceipt(
@@ -461,6 +518,26 @@ describe("CatalogService.templateShow (GLA-082 diagnostics)", () => {
           gatewayUpstream: { kind: "uri-ref", ref: "http://127.0.0.1:3000" },
         },
       },
+      publicEdgeTransport: {
+        dependency: "edge-proxy",
+        publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/" },
+        basePath: "/",
+        accessGatewayUpstream: { kind: "uri-ref", ref: "http://127.0.0.1:3000" },
+        routeMode: "manual-route",
+        acceptedReceipt: {
+          source: "wpm-receipt",
+          bundleId: "edge-proxy",
+          bundleVersion: "0.1.0",
+          taskId: "edge-proxy-3",
+        },
+        logRedaction: {
+          queryString: "redacted",
+          cookie: "redacted",
+          authorization: "redacted",
+          secWebSocketProtocol: "redacted",
+        },
+        currentReachability: { result: "available" },
+      },
     });
     const launcherPart = show.parts.find((p) => p.part === "launcher");
     expect(launcherPart?.provider).toBe("launcher-process");
@@ -533,12 +610,17 @@ describe("CatalogService.templateShow (GLA-082 diagnostics)", () => {
 
   it("accepts custom-base and subpath public-edge refs as transport dependency evidence", () => {
     const bindings = referenceWpmDependencyBindings();
-    receipt(bindings, "edge-proxy").connection = {
+    const edge = receipt(bindings, "edge-proxy");
+    edge.connection = {
       refs: {
         publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/team-a/" },
         gatewayUpstream: { kind: "uri-ref", ref: "http://127.0.0.1:3000" },
       },
     };
+    if (edge.publicEdge === undefined) {
+      throw new Error("missing edge public evidence fixture");
+    }
+    edge.publicEdge.basePath = "/team-a/";
 
     const show = new CatalogService({ dependencyBindings: bindings }).templateShow(
       "browser-handoff",
@@ -552,6 +634,68 @@ describe("CatalogService.templateShow (GLA-082 diagnostics)", () => {
         refs: {
           publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/team-a/" },
         },
+      },
+      publicEdgeTransport: {
+        basePath: "/team-a/",
+        publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/team-a/" },
+      },
+    });
+  });
+
+  it("requires complete public-edge mode and log-redaction evidence", () => {
+    const missingEvidence = referenceWpmDependencyBindings();
+    receipt(missingEvidence, "edge-proxy").publicEdge = {
+      basePath: "/",
+      routeMode: "manual-route",
+      logRedaction: {
+        queryString: "redacted",
+        cookie: "redacted",
+        authorization: "redacted",
+      },
+    } as never;
+
+    const missing = new CatalogService({ dependencyBindings: missingEvidence }).templateShow(
+      "browser-handoff",
+    );
+    expect(missing.available).toBe(false);
+    expect(missing.dependencies[0]).toMatchObject({
+      dependency: "edge-proxy",
+      status: "unbound",
+      missingEvidence: expect.arrayContaining(["publicEdge.logRedaction.secWebSocketProtocol"]),
+    });
+
+    const mismatchedBase = referenceWpmDependencyBindings();
+    const edge = receipt(mismatchedBase, "edge-proxy");
+    edge.connection = {
+      refs: {
+        publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/team-a/" },
+        gatewayUpstream: { kind: "uri-ref", ref: "http://127.0.0.1:3000" },
+      },
+    };
+
+    const mismatch = new CatalogService({ dependencyBindings: mismatchedBase }).templateShow(
+      "browser-handoff",
+    );
+    expect(mismatch.available).toBe(false);
+    expect(mismatch.dependencies[0]?.missingEvidence).toContain(
+      "publicEdge.basePath.publicBaseUrl",
+    );
+  });
+
+  it("reports public-edge reachability as current runtime health, not WPM install evidence", () => {
+    const show = new CatalogService({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      probes: { "browser-handoff": () => "degraded" },
+    }).templateShow("browser-handoff");
+
+    expect(show.available).toBe(false);
+    expect(show.availability).toBe("degraded");
+    expect(show.dependencies[0]).toMatchObject({
+      dependency: "edge-proxy",
+      status: "bound",
+      diagnostics: { install: "available", runtime: "degraded" },
+      publicEdgeTransport: {
+        currentReachability: { result: "degraded" },
       },
     });
   });

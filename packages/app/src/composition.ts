@@ -22,6 +22,7 @@ import {
   type CatalogServiceOptions,
   type DependencyBinding,
   type IndexedDependencyBinding,
+  type Probe,
   type ProviderGraphDiagnostic,
   type ProviderGraphDoctorReport,
   type ProviderGraphProjectionResult,
@@ -161,6 +162,8 @@ export interface AppProviderSet {
     host: ProviderHost,
     providerIds: readonly ProviderId[],
   ): EntrypointClientAssetMount[];
+  /** Provider-set-owned template reachability probes, keyed by template `spec.probe`. */
+  templateProbes?: Readonly<Record<string, Probe>>;
 }
 
 /** App options that can receive a trusted provider set or a prebuilt host plus selected profile. */
@@ -173,6 +176,8 @@ export interface ProviderCompositionOptions {
   providerProfileId?: string;
   /** Selected profile override layered over the provider set's profile. */
   providerProfile?: Partial<ProviderSelectionProfile>;
+  /** Template reachability probes supplied by external composition when no provider set owns them. */
+  templateProbes?: Readonly<Record<string, Probe>>;
 }
 
 /** The composed application handle. `listen()` boots the real long-running daemon (the `:3000` deployable). */
@@ -452,6 +457,7 @@ function providerGraphRuntimeContext(opts: {
   dependencyBindings?: DependencyBinding[] | undefined;
   runtimeAssemblyParams?: Record<string, Record<string, unknown>> | undefined;
   configValidationProviderIds?: readonly ProviderId[] | undefined;
+  templateProbes?: Readonly<Record<string, Probe>> | undefined;
 }): ProviderGraphRuntimeContext {
   const content = providerStoreContent(opts.providerHost, opts.profile);
   const catalogOptions: CatalogServiceOptions = { content };
@@ -485,7 +491,21 @@ function providerGraphRuntimeContext(opts: {
       provider.dependencies,
     ]),
   );
-  const probes = opts.providerHost.providerProbeRegistry(dependencyBindingsByProvider);
+  const probes = {
+    ...opts.providerHost.providerProbeRegistry(dependencyBindingsByProvider),
+    ...(opts.providerSet?.templateProbes ?? {}),
+    ...(opts.templateProbes ?? {}),
+  };
+  for (const provider of content.providers) {
+    if (provider.spec.probe !== undefined && probes[provider.spec.probe] === undefined) {
+      probes[provider.spec.probe] = () => "unavailable";
+    }
+  }
+  for (const template of content.templates) {
+    if (template.spec.probe !== undefined && probes[template.spec.probe] === undefined) {
+      probes[template.spec.probe] = () => "unavailable";
+    }
+  }
   catalogOptions.probes = probes;
   const graphInput: Parameters<typeof resolveProviderGraphProjection>[0] = {
     ...graphInputBase,
@@ -998,6 +1018,7 @@ export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
     profileManifest: selectedProviderProfileManifest(opts, profile),
     dependencyBindings: opts.dependencyBindings,
     configValidationProviderIds: [],
+    templateProbes: opts.templateProbes,
   });
   const catalogOptions = graphContext.catalogOptions;
   const catalog = new CatalogService(catalogOptions);
@@ -1347,6 +1368,7 @@ export function createProvisioningBridge(
       dependencyBindings: opts.dependencyBindings,
       runtimeAssemblyParams,
       configValidationProviderIds,
+      templateProbes: opts.templateProbes,
     });
     const catalogOptions = graphContext.catalogOptions;
     const catalog = new CatalogService(catalogOptions);

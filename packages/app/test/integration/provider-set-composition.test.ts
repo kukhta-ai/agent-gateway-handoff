@@ -347,6 +347,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
       records.assetProviderIds = [...providerIds];
       return [{ ref: "fake-client", root: process.cwd() }];
     },
+    templateProbes: { "browser-handoff": () => "available" },
   };
 }
 
@@ -415,6 +416,38 @@ describe("provider-set agnostic app composition", () => {
         expect.objectContaining({ part: "connector", provider: "fake-connector" }),
         expect.objectContaining({ part: "workspace", provider: "fake-workspace" }),
         expect.objectContaining({ part: "detector", provider: "fake-detector" }),
+      ]),
+    );
+  });
+
+  it("does not treat public-edge WPM evidence as reachable without a template probe", () => {
+    const { templateProbes: _templateProbes, ...providerSet } = fakeProviderSet(fakeRecords());
+
+    const bridge = createBridge({
+      providerSet,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+    const show = bridge.templateShow("browser-handoff");
+
+    expect(show.available).toBe(false);
+    expect(show.availability).toBe("unavailable");
+    expect(show.dependencies[0]).toMatchObject({
+      dependency: "edge-proxy",
+      status: "bound",
+      diagnostics: { install: "available", runtime: "unavailable" },
+      publicEdgeTransport: expect.objectContaining({
+        currentReachability: { result: "unavailable" },
+      }),
+    });
+    expect(show.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "template.dependency_unavailable",
+          dependency: "edge-proxy",
+          dependencyScope: "template",
+          install: "available",
+          runtime: "unavailable",
+        }),
       ]),
     );
   });

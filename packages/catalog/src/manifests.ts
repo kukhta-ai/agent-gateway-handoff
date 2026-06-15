@@ -72,6 +72,8 @@ export interface DependencyRequirement {
   hostTouching?: boolean;
   /** Named connection references the WPM receipt must expose for this dependency to be usable. */
   connectionRefs?: string[];
+  /** True when this dependency proves public transport to Access Gateway, not authorization semantics. */
+  publicEdge?: boolean;
   /** Deterministic bundle evidence for the dependency, if the dependency is WPM-managed. */
   bundle?: WpmBundleEvidence;
 }
@@ -116,6 +118,30 @@ export interface DependencyConnectionRef {
 export interface DependencyConnectionEvidence {
   /** Named connection references, such as `endpoint`, `chromium`, `clientSecret`, or `socket`. */
   refs: Record<string, DependencyConnectionRef>;
+}
+
+/** Public-edge route operation mode recorded by WPM for the edge proxy dependency. */
+export type PublicEdgeRouteMode = "route-programming" | "manual-route";
+
+/** Accepted log handling posture for sensitive public-edge carrier fields. */
+export type PublicEdgeLogRedactionState = "redacted" | "not-logged";
+
+/** Public-edge log posture for carrier fields that may contain grants or bearer material. */
+export interface PublicEdgeLogRedactionPosture {
+  queryString: PublicEdgeLogRedactionState;
+  cookie: PublicEdgeLogRedactionState;
+  authorization: PublicEdgeLogRedactionState;
+  secWebSocketProtocol: PublicEdgeLogRedactionState;
+}
+
+/** WPM-recorded public-edge transport evidence. It is transport proof, not auth proof. */
+export interface PublicEdgeTransportEvidence {
+  /** Public base path configured on the edge, e.g. `/` or `/team-a/`. */
+  basePath: string;
+  /** Whether GLA can program routes or the operator maintains them manually. */
+  routeMode: PublicEdgeRouteMode;
+  /** Redaction posture for public-edge logs carrying handoff URLs or stream tickets. */
+  logRedaction: PublicEdgeLogRedactionPosture;
 }
 
 /** Probe evidence captured at a specific point in time. */
@@ -179,6 +205,8 @@ export interface DependencyBinding {
   receipt: DependencyReceiptEvidence;
   /** Connection references GLA may use; secrets must be secret refs. */
   connection?: DependencyConnectionEvidence;
+  /** Public-edge transport evidence when the dependency exposes Access Gateway publicly. */
+  publicEdge?: PublicEdgeTransportEvidence;
   /** Legacy compatibility flag from the earlier binding sketch; structured `state` is authoritative. */
   installed?: boolean;
   /** Last WPM install-time verification probe. */
@@ -202,6 +230,8 @@ export interface IndexedDependencyBinding extends DependencyRequirement {
   state?: DependencyState;
   /** Sanitized connection references. */
   connection?: DependencyConnectionEvidence;
+  /** Accepted public-edge transport descriptor, if this dependency is the selected edge transport. */
+  publicEdgeTransport?: PublicEdgeTransportDescriptor;
   /** WPM receipt metadata. */
   receipt?: DependencyReceiptEvidence;
   /** WPM install-time probe evidence. */
@@ -219,6 +249,21 @@ export interface IndexedDependencyBinding extends DependencyRequirement {
     install: ProbeResult;
     runtime: ProbeResult;
   };
+}
+
+/** Public-edge transport descriptor projected to catalog, doctor, and graph read models. */
+export interface PublicEdgeTransportDescriptor extends PublicEdgeTransportEvidence {
+  dependency: string;
+  publicBaseUrl: DependencyConnectionRef;
+  accessGatewayUpstream: DependencyConnectionRef;
+  acceptedReceipt: {
+    source: "wpm-receipt";
+    bundleId: string;
+    bundleVersion: string;
+    taskId: string;
+    refs?: string[];
+  };
+  currentReachability: DependencyProbeEvidence;
 }
 
 /** A skill a provider/template ships (docs/02 §3). The body is emitted by `gla skill show`. */
@@ -528,6 +573,7 @@ export const BROWSER_HANDOFF_TEMPLATE: TemplateManifest = {
         dependency: "edge-proxy",
         hostTouching: true,
         connectionRefs: ["publicBaseUrl", "gatewayUpstream"],
+        publicEdge: true,
         bundle: {
           id: "edge-proxy",
           version: "0.1.0",
