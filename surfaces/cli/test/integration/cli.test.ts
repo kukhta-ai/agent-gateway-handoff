@@ -9,6 +9,7 @@ import { CatalogService, defaultStoreContent, referenceWpmDependencyBindings } f
 import { glaError } from "@gla/kernel";
 import { describe, expect, it, vi } from "vitest";
 import { CLI_VERSION, type CliServices, run } from "../../src/cli.js";
+import { DEFERRED_CLI_SURFACES } from "../../src/contract.js";
 import { ExitCode } from "../../src/exit-codes.js";
 import { main } from "../../src/index.js";
 import { Output, type OutputStreams } from "../../src/output.js";
@@ -79,6 +80,17 @@ describe("gla exit codes", () => {
   it("unknown/invalid flag exits 2 (usage)", async () => {
     const c = capture(false);
     expect(await run(["-o", "yaml", "version"], c.out, services())).toBe(ExitCode.USAGE);
+  });
+
+  it("command-scoped flags without a command fail instead of falling through to root help", async () => {
+    for (const argv of [["--bogus"], ["--endpoint"]]) {
+      const c = capture(false);
+      expect(await run(argv, c.out, services())).toBe(ExitCode.USAGE);
+      expect(c.stdout()).toBe("");
+      const err = JSON.parse(c.stderr()).error;
+      expect(err.code).toBe("usage.bad_flag");
+      expect(err.detail.flags).toEqual([argv[0]]);
+    }
   });
 
   it("treats `--` as end-of-options so `pnpm gla -- version` works (exit 0)", async () => {
@@ -245,6 +257,7 @@ describe("gla current contract/schema/help (GLA-094)", () => {
         "version",
         "schema",
         "catalog list",
+        "catalog show",
         "template list",
         "template show",
         "skill list",
@@ -335,11 +348,16 @@ describe("gla current contract/schema/help (GLA-094)", () => {
   });
 
   it("deferred nouns, deferred auth login/logout, and ndjson fail with stable unsupported diagnostics", async () => {
+    const documentedSurfaces = new Set(DEFERRED_CLI_SURFACES.map((surface) => surface.surface));
     for (const argv of [
       ["policy", "mounts"],
       ["events"],
       ["audit", "list"],
       ["auth", "login"],
+      ["provider", "scaffold", "--family", "auth", "--id", "oidc-acme"],
+      ["profile", "list"],
+      ["provider-set", "plan", "--profile", "scenario-01"],
+      ["doctor", "provider-graph"],
       ["-o", "ndjson", "version"],
       ["--context", "prod", "version"],
       ["--trace-id", "trace-1", "version"],
@@ -351,8 +369,64 @@ describe("gla current contract/schema/help (GLA-094)", () => {
       const err = JSON.parse(c.stderr()).error;
       expect(err.code).toBe("usage.unsupported");
       expect(err.detail.surface).toBeTruthy();
+      expect(documentedSurfaces).toContain(err.detail.surface);
       expect(err.detail.status).toBe("deferred");
     }
+  });
+
+  it("`--help` does not mask unknown or deferred command scopes", async () => {
+    const unknown = capture(false);
+    expect(await run(["frobnicate", "--help"], unknown.out, services())).toBe(ExitCode.USAGE);
+    expect(unknown.stdout()).toBe("");
+    expect(JSON.parse(unknown.stderr()).error.code).toBe("usage.unknown_command");
+
+    const deferred = capture(false);
+    expect(await run(["provider", "scaffold", "--help"], deferred.out, services())).toBe(
+      ExitCode.USAGE,
+    );
+    expect(deferred.stdout()).toBe("");
+    expect(JSON.parse(deferred.stderr()).error.code).toBe("usage.unsupported");
+  });
+
+  it("`gla help` is a strict root-help alias and does not mask bad inputs", async () => {
+    for (const [argv, expectedCode] of [
+      [["help", "--bogus"], "usage.bad_flag"],
+      [["help", "task", "create", "--bogus"], "usage.bad_flag"],
+      [["help", "--fields", "missing"], "usage.bad_field"],
+      [["help", "task", "create"], "usage.bad_argument"],
+    ] as const) {
+      const c = capture(false);
+      expect(await run(argv, c.out, services())).toBe(ExitCode.USAGE);
+      expect(c.stdout()).toBe("");
+      expect(JSON.parse(c.stderr()).error.code).toBe(expectedCode);
+    }
+  });
+
+  it("scoped `--help` still validates command-contract flags, fields, and extra args", async () => {
+    for (const [argv, expectedCode] of [
+      [["version", "--bogus", "--help"], "usage.bad_flag"],
+      [["task", "create", "--intent", "--help"], "usage.bad_flag"],
+      [["task", "create", "unexpected", "--help"], "usage.bad_argument"],
+      [["task", "create", "--fields", "missing", "--help"], "usage.bad_field"],
+    ] as const) {
+      const c = capture(false);
+      expect(await run(argv, c.out, services())).toBe(ExitCode.USAGE);
+      expect(c.stdout()).toBe("");
+      expect(JSON.parse(c.stderr()).error.code).toBe(expectedCode);
+    }
+
+    const help = capture(false);
+    expect(await run(["catalog", "show", "--help"], help.out, services())).toBe(ExitCode.OK);
+    expect(JSON.parse(help.stdout()).command).toBe("gla catalog show");
+  });
+
+  it("schema scoped `--help` validates field masks against the schema command contract", async () => {
+    const c = capture(false);
+    expect(
+      await run(["schema", "handoff", "wait", "--fields", "missing", "--help"], c.out, services()),
+    ).toBe(ExitCode.USAGE);
+    expect(c.stdout()).toBe("");
+    expect(JSON.parse(c.stderr()).error.code).toBe("usage.bad_field");
   });
 
   it("--fields trims successful JSON results and --quiet does not suppress results", async () => {
@@ -426,6 +500,35 @@ describe("gla current contract/schema/help (GLA-094)", () => {
     const list = capture(false);
     await run(["task", "list"], list.out, services(bridge));
     expect(JSON.parse(list.stdout())).toEqual([]);
+  });
+
+  it("extra positional arguments fail from the command contract before changing bridge state", async () => {
+    const bridge = new AgentBridge();
+    const bad = capture(false);
+    expect(
+      await run(["task", "create", "unexpected", "--intent", "x"], bad.out, services(bridge)),
+    ).toBe(ExitCode.USAGE);
+    expect(bad.stdout()).toBe("");
+    const err = JSON.parse(bad.stderr()).error;
+    expect(err.code).toBe("usage.bad_argument");
+    expect(err.detail.command).toBe("gla task create");
+    expect(err.detail.expected).toEqual([]);
+
+    const list = capture(false);
+    await run(["task", "list"], list.out, services(bridge));
+    expect(JSON.parse(list.stdout())).toEqual([]);
+  });
+
+  it("schema scoped help rejects too many positionals from the schema command contract", async () => {
+    const c = capture(false);
+    expect(await run(["schema", "handoff", "wait", "extra"], c.out, services())).toBe(
+      ExitCode.USAGE,
+    );
+    expect(c.stdout()).toBe("");
+    const err = JSON.parse(c.stderr()).error;
+    expect(err.code).toBe("usage.bad_argument");
+    expect(err.detail.command).toBe("gla schema");
+    expect(err.detail.expected).toEqual(["[noun]", "[verb]"]);
   });
 
   it("value-bearing command flags without values fail before changing bridge state", async () => {
@@ -697,6 +800,31 @@ describe("gla catalog list (GLA-017 AC#3)", () => {
     expect(JSON.parse(c.stdout()).map((e: { name: string }) => e.name)).toEqual([
       "launcher-process",
     ]);
+  });
+
+  it("`catalog show <provider-id>` returns provider detail with graph facts", async () => {
+    const c = capture(false);
+    expect(await run(["catalog", "show", "launcher-process"], c.out, services())).toBe(ExitCode.OK);
+    const show = JSON.parse(c.stdout());
+    expect(show).toMatchObject({
+      name: "launcher-process",
+      family: "launcher",
+      available: true,
+    });
+    expect(show.config_schema).toBeDefined();
+    expect(show.requires[0]).toMatchObject({ dependency: "browser-runtime" });
+    expect(show.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "provider.available" })]),
+    );
+  });
+
+  it("`catalog show <unknown>` exits 5 with a JSON error on stderr", async () => {
+    const c = capture(false);
+    expect(await run(["catalog", "show", "does-not-exist"], c.out, services())).toBe(
+      ExitCode.NOT_FOUND,
+    );
+    expect(c.stdout()).toBe("");
+    expect(JSON.parse(c.stderr()).error.code).toBe("catalog.unknown");
   });
 });
 

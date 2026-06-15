@@ -20,9 +20,10 @@ running daemon. Those belong to later flows. The authoring UX answers one questi
 
 ## 2. Entry Points
 
-The first tooling surface should be command-first because provider authors work in a repository and need generated
-files, tests, and validation output. A UI may wrap these commands later, but it should preserve the same state model
-and diagnostics.
+The target tooling surface is command-first because provider authors work in a repository and need generated files,
+tests, and validation output. These are UX command names, not the current executable `gla` CLI contract; today's CLI
+must report this command group as deferred until the provider-authoring surface is implemented. A UI may wrap these
+commands later, but it should preserve the same state model and diagnostics.
 
 | Entry point | Purpose | Primary output |
 |---|---|---|
@@ -33,7 +34,8 @@ and diagnostics.
 | `gla provider test <path>` | Run the package contract harness. | Test report with failures mapped back to package files and recovery steps. |
 | `gla provider inspect <path>` | Show the package as the operator/reviewer will see it. | Read-only summary of family, capabilities, schemas, requirements, skills/docs, tests, and handoff readiness. |
 
-The exact command names can evolve, but the UX contract is fixed: scaffold, validate, test, inspect, then hand off.
+The exact target command names can evolve, but the UX contract is fixed: scaffold, validate, test, inspect, then hand
+off.
 
 ## 3. Package Inputs
 

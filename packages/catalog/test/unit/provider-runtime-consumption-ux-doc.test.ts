@@ -37,6 +37,7 @@ describe("provider runtime consumption UX documentation", () => {
       "gla session create ...",
       "connector descriptor",
       "hands back to task execution",
+      "current executable CLI commands",
     ]) {
       expect(doc).toContain(requiredPhrase);
     }

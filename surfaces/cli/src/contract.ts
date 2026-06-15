@@ -23,6 +23,19 @@ export interface DeferredCliSurface {
   followUp: string;
 }
 
+interface DeferredCliSurfaceContract extends DeferredCliSurface {
+  nouns: readonly string[];
+  verbs?: readonly string[];
+  matchesBare?: boolean;
+  matchesAnyVerb?: boolean;
+  message: string;
+}
+
+export interface DeferredCliUnsupported {
+  surface: string;
+  message: string;
+}
+
 /** Supported global flags for the current executable contract. */
 export const CURRENT_GLOBAL_FLAGS = [
   "-o/--output json|text",
@@ -33,54 +46,159 @@ export const CURRENT_GLOBAL_FLAGS = [
   "-h/--help",
 ] as const;
 
-/** Documented future/deferred surfaces that must fail with stable unsupported diagnostics today. */
-export const DEFERRED_CLI_SURFACES: readonly DeferredCliSurface[] = [
+const DEFERRED_CLI_SURFACE_CONTRACTS: readonly DeferredCliSurfaceContract[] = [
+  {
+    surface: "provider authoring commands",
+    reason:
+      "provider scaffold/validate/test/inspect are UX-specified target commands, not part of the current executable CLI contract",
+    followUp: "future provider authoring CLI surface",
+    nouns: ["provider"],
+    matchesAnyVerb: true,
+    message:
+      "provider scaffold/validate/test/inspect are planned UX command names, not current executable commands",
+  },
+  {
+    surface: "template-package authoring commands",
+    reason:
+      "template-package scaffold is a UX-specified target command, not part of the current executable CLI contract",
+    followUp: "future template-package authoring CLI surface",
+    nouns: ["template-package"],
+    matchesAnyVerb: true,
+    message:
+      "template-package scaffold is a planned UX command name, not a current executable command",
+  },
+  {
+    surface: "profile install/update commands",
+    reason:
+      "profile list/show/validate/overlay validation are UX-specified target commands, not part of the current executable CLI contract",
+    followUp: "future provider install/update CLI surface",
+    nouns: ["profile"],
+    matchesAnyVerb: true,
+    message:
+      "profile list/show/validate/overlay validation are planned UX command names, not current executable commands",
+  },
+  {
+    surface: "provider-set install/update commands",
+    reason:
+      "provider-set inspect/plan/apply/rollback are UX-specified target commands, not part of the current executable CLI contract",
+    followUp: "future provider install/update CLI surface",
+    nouns: ["provider-set"],
+    matchesAnyVerb: true,
+    message:
+      "provider-set inspect/plan/apply/rollback are planned UX command names, not current executable commands",
+  },
+  {
+    surface: "doctor provider-graph",
+    reason:
+      "provider graph doctor output exists in app composition but is not exposed as an executable CLI command yet",
+    followUp: "future provider graph doctor CLI surface",
+    nouns: ["doctor"],
+    verbs: ["provider-graph"],
+    matchesBare: true,
+    message: "provider graph doctor is planned for CLI exposure but is not executable yet",
+  },
   {
     surface: "policy mounts",
     reason: "policy inspection is planned but not part of the current executable agent CLI slice",
     followUp: "future CLI policy surface",
+    nouns: ["policy"],
+    verbs: ["mounts"],
+    matchesBare: true,
+    message: "policy inspection is deferred for the current CLI contract",
   },
   {
     surface: "events",
     reason: "event streaming and NDJSON follow mode are planned but not implemented in this slice",
     followUp: "future CLI events stream",
+    nouns: ["events"],
+    matchesAnyVerb: true,
+    message: "event streaming is deferred for the current CLI contract",
   },
   {
     surface: "audit list",
     reason: "audit browsing is planned but not implemented in this slice",
     followUp: "future CLI audit browser",
+    nouns: ["audit"],
+    verbs: ["list"],
+    matchesBare: true,
+    message: "audit browsing is deferred for the current CLI contract",
   },
   {
     surface: "auth login/logout",
     reason:
       "authenticated-agent profiles are future work; the current local profile is credential-free",
     followUp: "future authenticated Agent Bridge profile",
+    nouns: ["auth"],
+    verbs: ["login", "logout"],
+    message:
+      "authenticated-agent login/logout is deferred; the current local profile is credential-free",
   },
   {
     surface: "output ndjson",
     reason: "streaming output is reserved for future events/audit surfaces",
     followUp: "future CLI streaming contract",
+    nouns: [],
+    message: "ndjson output is deferred until streaming commands exist",
   },
   {
     surface: "--context",
     reason:
       "multi-install context selection is planned; current endpoint selection uses GLA_ENDPOINT or --endpoint",
     followUp: "future CLI context profiles",
+    nouns: [],
+    message:
+      "context selection is deferred; use GLA_ENDPOINT or --endpoint for the current local profile",
   },
   {
     surface: "--trace-id",
     reason: "trace correlation is planned with audit/event work",
     followUp: "future CLI trace/audit correlation",
+    nouns: [],
+    message: "trace correlation is deferred until audit/event support is implemented",
   },
   {
     surface: "batch operations",
     reason:
       "bulk task/session operations are planned only after single-operation semantics are stable",
     followUp: "future CLI batch contract",
+    nouns: ["batch"],
+    matchesAnyVerb: true,
+    message: "batch operations are deferred for the current CLI contract",
   },
 ] as const;
 
-/** The current executable leaf command contract. Keep this in lockstep with the parser in cli.ts. */
+/** Documented future/deferred surfaces that must fail with stable unsupported diagnostics today. */
+export const DEFERRED_CLI_SURFACES: readonly DeferredCliSurface[] =
+  DEFERRED_CLI_SURFACE_CONTRACTS.map(({ surface, reason, followUp }) => ({
+    surface,
+    reason,
+    followUp,
+  }));
+
+/** Find a documented deferred surface by parsed noun/verb. */
+export function findDeferredCliSurface(
+  noun: string,
+  verb: string | undefined,
+): DeferredCliUnsupported | undefined {
+  const match = DEFERRED_CLI_SURFACE_CONTRACTS.find((surface) => {
+    if (!surface.nouns.includes(noun)) {
+      return false;
+    }
+    if (surface.matchesAnyVerb === true) {
+      return true;
+    }
+    if (verb === undefined) {
+      return surface.matchesBare === true;
+    }
+    return surface.verbs?.includes(verb) === true;
+  });
+  if (match === undefined) {
+    return undefined;
+  }
+  return { surface: match.surface, message: match.message };
+}
+
+/** The current executable leaf command contract. The parser consumes this contract rather than duplicating arity/flag metadata. */
 export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   {
     noun: "whoami",
@@ -121,6 +239,28 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     output: "entity[]",
     fields: ["id", "name", "kind", "family", "status", "available", "dependencies"],
     exitCodes: [ExitCode.OK, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "catalog",
+    verb: "show",
+    summary: "show one provider/template catalog entity with graph availability and diagnostics",
+    args: ["id"],
+    flags: [],
+    output: "entity",
+    fields: [
+      "id",
+      "name",
+      "kind",
+      "family",
+      "status",
+      "available",
+      "availability",
+      "dependencies",
+      "config_schema",
+      "diagnostics",
+    ],
+    exitCodes: [ExitCode.OK, ExitCode.NOT_FOUND, ExitCode.USAGE, ExitCode.INTERNAL],
     effect: "read",
   },
   {

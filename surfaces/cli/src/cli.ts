@@ -3,7 +3,7 @@
 //   gla whoami
 //   gla template list | template show <id>
 //   gla skill list | skill show <id>
-//   gla catalog list [--kind <k>] [--available]
+//   gla catalog list [--kind <k>] [--available] | catalog show <id>
 //   gla version | help
 // Output contract (docs/05 §1/§4): JSON to stdout by default (text only at a TTY, via the Output
 // helper); stderr carries a JSON `{error:{...}}`. Exit codes (docs/05 §5): 0 success, 2 usage,
@@ -26,6 +26,7 @@ import {
   commandSpecsForNoun,
   currentNouns,
   findCommandSpec,
+  findDeferredCliSurface,
   schemaPayload,
   usageText,
 } from "./contract.js";
@@ -254,8 +255,29 @@ export async function run(
 
   const [noun, verb] = parsed.positionals;
 
+  if (noun === undefined) {
+    const rootInputError = validateNoCommandInputs(parsed, out, "gla");
+    if (rootInputError !== undefined) {
+      return rootInputError;
+    }
+  }
+  if (noun === "help") {
+    const helpAliasError = validateHelpAlias(parsed, out);
+    if (helpAliasError !== undefined) {
+      return helpAliasError;
+    }
+  }
+
   // `gla --help` / `gla -h` / `gla help` / bare `gla` → usage on stdout, success.
   if (parsed.help || noun === undefined || noun === "help") {
+    const helpScopeError = validateHelpScope(parsed, out, noun, verb);
+    if (helpScopeError !== undefined) {
+      return helpScopeError;
+    }
+    const helpContractError = validateHelpContractInputs(parsed, out, noun, verb);
+    if (helpContractError !== undefined) {
+      return helpContractError;
+    }
     const scopeNoun = noun === "help" ? undefined : noun;
     out.emit(schemaPayload(scopeNoun, scopeNoun === undefined ? undefined : verb), () =>
       usageText(scopeNoun, scopeNoun === undefined ? undefined : verb),
@@ -264,9 +286,13 @@ export async function run(
   }
 
   try {
-    const deferred = deferredSurface(noun, verb);
+    const deferred = findDeferredCliSurface(noun, verb);
     if (deferred !== undefined) {
       return unsupportedError(out, deferred.surface, deferred.message);
+    }
+    const argError = validateCommandArgs(parsed, out, noun, verb);
+    if (argError !== undefined) {
+      return argError;
     }
     const flagError = validateCommandFlags(parsed, out, noun, verb);
     if (flagError !== undefined) {
@@ -312,19 +338,31 @@ export async function run(
       }
 
       case "catalog": {
-        if (verb !== "list")
-          return usageError(out, "usage: gla catalog list [--kind <k>] [--available]");
-        const filter: { kind?: string; available?: boolean } = {};
-        const kind = parsed.flags.get("kind");
-        if (typeof kind === "string") filter.kind = kind;
-        if (parsed.flags.get("available") === true) filter.available = true;
-        return emitCommandResult(
-          parsed,
-          out,
-          "catalog",
-          "list",
-          await services.bridge.catalogList(filter),
-        );
+        if (verb === "list") {
+          const filter: { kind?: string; available?: boolean } = {};
+          const kind = parsed.flags.get("kind");
+          if (typeof kind === "string") filter.kind = kind;
+          if (parsed.flags.get("available") === true) filter.available = true;
+          return emitCommandResult(
+            parsed,
+            out,
+            "catalog",
+            "list",
+            await services.bridge.catalogList(filter),
+          );
+        }
+        if (verb === "show") {
+          const id = parsed.positionals[2];
+          if (id === undefined) return usageError(out, "usage: gla catalog show <id>");
+          return emitCommandResult(
+            parsed,
+            out,
+            "catalog",
+            "show",
+            await services.bridge.catalogShow(id),
+          );
+        }
+        return usageError(out, "usage: gla catalog (list [--kind <k>] [--available] | show <id>)");
       }
 
       case "template": {
@@ -648,44 +686,6 @@ function schemaScopeExists(noun: string, verb?: string): boolean {
   return commandSpecsForNoun(noun).length > 0;
 }
 
-function deferredSurface(
-  noun: string,
-  verb: string | undefined,
-): { surface: string; message: string } | undefined {
-  if (noun === "policy" && (verb === undefined || verb === "mounts")) {
-    return {
-      surface: "policy mounts",
-      message: "policy inspection is deferred for the current CLI contract",
-    };
-  }
-  if (noun === "events") {
-    return {
-      surface: "events",
-      message: "event streaming is deferred for the current CLI contract",
-    };
-  }
-  if (noun === "audit" && (verb === undefined || verb === "list")) {
-    return {
-      surface: "audit list",
-      message: "audit browsing is deferred for the current CLI contract",
-    };
-  }
-  if (noun === "auth" && (verb === "login" || verb === "logout")) {
-    return {
-      surface: `auth ${verb}`,
-      message:
-        "authenticated-agent login/logout is deferred; the current local profile is credential-free",
-    };
-  }
-  if (noun === "batch") {
-    return {
-      surface: "batch operations",
-      message: "batch operations are deferred for the current CLI contract",
-    };
-  }
-  return undefined;
-}
-
 function unsupportedError(out: Output, surface: string, message: string): number {
   out.fail({
     code: "usage.unsupported",
@@ -709,6 +709,181 @@ function versionPayload(services: CliServices): Record<string, unknown> {
   return payload;
 }
 
+function validateNoCommandInputs(
+  parsed: ParsedArgs,
+  out: Output,
+  command: string,
+): number | undefined {
+  const flags = [...parsed.flags.keys(), ...parsed.repeated.keys()];
+  if (flags.length > 0) {
+    out.fail({
+      code: "usage.bad_flag",
+      message: `command-scoped flag(s) require a command: ${flags.map((f) => `--${f}`).join(", ")}`,
+      detail: {
+        flags: flags.map((f) => `--${f}`),
+        ...(parsed.missingValueFlags.length > 0
+          ? { missing_values: parsed.missingValueFlags.map((f) => `--${f}`) }
+          : {}),
+      },
+      skill: "interpret-gla-rejections",
+      retryable: false,
+    });
+    return ExitCode.USAGE;
+  }
+  if (parsed.fields !== undefined && parsed.fields.length > 0) {
+    out.fail({
+      code: "usage.bad_field",
+      message: `--fields is not supported on ${command} without a current executable command scope`,
+      detail: { fields: parsed.fields, allowed_fields: [] },
+      skill: "interpret-gla-rejections",
+      retryable: false,
+    });
+    return ExitCode.USAGE;
+  }
+  return undefined;
+}
+
+function validateHelpAlias(parsed: ParsedArgs, out: Output): number | undefined {
+  const inputError = validateNoCommandInputs(parsed, out, "gla help");
+  if (inputError !== undefined) {
+    return inputError;
+  }
+  const supplied = parsed.positionals.slice(1);
+  if (supplied.length === 0) {
+    return undefined;
+  }
+  out.fail({
+    code: "usage.bad_argument",
+    message: "bad arguments for gla help: expected gla help",
+    detail: {
+      command: "gla help",
+      expected: [],
+      supplied,
+      min_args: 0,
+      max_args: 0,
+    },
+    skill: "interpret-gla-rejections",
+    retryable: false,
+  });
+  return ExitCode.USAGE;
+}
+
+function validateHelpScope(
+  parsed: ParsedArgs,
+  out: Output,
+  noun: string | undefined,
+  verb: string | undefined,
+): number | undefined {
+  if (noun === undefined || noun === "help") {
+    return undefined;
+  }
+  const deferred = findDeferredCliSurface(noun, verb);
+  if (deferred !== undefined) {
+    return unsupportedError(out, deferred.surface, deferred.message);
+  }
+  if (noun === "schema") {
+    const schemaNoun = verb;
+    const schemaVerb = parsed.positionals[2];
+    if (schemaNoun !== undefined && !schemaScopeExists(schemaNoun, schemaVerb)) {
+      return usageError(
+        out,
+        `unknown schema scope: ${schemaNoun}${schemaVerb ? ` ${schemaVerb}` : ""}`,
+      );
+    }
+    return undefined;
+  }
+  const nounCommands = commandSpecsForNoun(noun);
+  if (nounCommands.length === 0) {
+    return usageError(out, `unknown command: '${noun}'`);
+  }
+  if (verb !== undefined && findCommandSpec(noun, verb) === undefined) {
+    return usageError(out, `unknown command: '${noun} ${verb}'`);
+  }
+  return undefined;
+}
+
+function validateHelpContractInputs(
+  parsed: ParsedArgs,
+  out: Output,
+  noun: string | undefined,
+  verb: string | undefined,
+): number | undefined {
+  if (noun === undefined || noun === "help") {
+    return undefined;
+  }
+  const argError = validateCommandArgs(parsed, out, noun, verb, { allowMissingRequired: true });
+  if (argError !== undefined) {
+    return argError;
+  }
+  const flagError = validateCommandFlags(parsed, out, noun, verb);
+  if (flagError !== undefined) {
+    return flagError;
+  }
+  return validateFieldMask(parsed, out, noun, verb);
+}
+
+function commandSpecForParsedArgs(
+  noun: string,
+  verb: string | undefined,
+): { spec: CliCommandSpec; argStart: number; command: string } | undefined {
+  if (noun === "schema") {
+    const spec = findCommandSpec("schema", undefined);
+    return spec === undefined ? undefined : { spec, argStart: 1, command: "gla schema" };
+  }
+  const spec = findCommandSpec(noun, verb);
+  if (spec === undefined) {
+    return undefined;
+  }
+  return {
+    spec,
+    argStart: spec.verb === undefined ? 1 : 2,
+    command: ["gla", spec.noun, spec.verb].filter(Boolean).join(" "),
+  };
+}
+
+function requiredArgCount(spec: CliCommandSpec): number {
+  return spec.args.filter((arg) => !arg.startsWith("[")).length;
+}
+
+function usageTextForSpec(spec: CliCommandSpec): string {
+  return ["gla", spec.noun, spec.verb, ...spec.args].filter(Boolean).join(" ");
+}
+
+function validateCommandArgs(
+  parsed: ParsedArgs,
+  out: Output,
+  noun: string,
+  verb: string | undefined,
+  opts: { allowMissingRequired?: boolean } = {},
+): number | undefined {
+  const command = commandSpecForParsedArgs(noun, verb);
+  if (command === undefined) {
+    return undefined;
+  }
+  const supplied = parsed.positionals.slice(command.argStart);
+  const min = requiredArgCount(command.spec);
+  const max = command.spec.args.length;
+  const minimumSatisfied = opts.allowMissingRequired === true || supplied.length >= min;
+  if (minimumSatisfied && supplied.length <= max) {
+    return undefined;
+  }
+  const detail: Record<string, unknown> = {
+    command: command.command,
+    expected: command.spec.args,
+    supplied,
+    min_args: min,
+    max_args: max,
+  };
+  out.fail({
+    code: "usage.bad_argument",
+    message: `bad arguments for ${command.command}: expected ${usageTextForSpec(command.spec)}`,
+    detail,
+    skill: "interpret-gla-rejections",
+    retryable: false,
+  });
+  return ExitCode.USAGE;
+}
+
 function validateFieldMask(
   parsed: ParsedArgs,
   out: Output,
@@ -719,7 +894,8 @@ function validateFieldMask(
   if (fields === undefined || fields.length === 0) {
     return undefined;
   }
-  const spec = findCommandSpec(noun, verb);
+  const spec =
+    noun === "schema" ? findCommandSpec("schema", undefined) : findCommandSpec(noun, verb);
   if (spec === undefined) {
     return undefined;
   }

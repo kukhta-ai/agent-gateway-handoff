@@ -18,6 +18,7 @@
 
 import { type Socket, connect as ipcConnect } from "node:net";
 import type {
+  CatalogShowResult,
   HandoffView,
   ProvisionResult,
   SessionView,
@@ -54,6 +55,7 @@ export interface BridgeLike {
     kind?: string;
     available?: boolean;
   }): IndexedEntity[] | Promise<IndexedEntity[]>;
+  catalogShow(id: string): CatalogShowResult | Promise<CatalogShowResult>;
   taskCreate(input: { intent?: string; recipient?: string }): Promise<TaskView>;
   taskGet(id: string): TaskView | Promise<TaskView>;
   taskList(filter?: { state?: string }): TaskView[] | Promise<TaskView[]>;
@@ -353,6 +355,9 @@ export class DaemonBridgeClient implements BridgeLike {
   catalogList(filter?: { kind?: string; available?: boolean }): Promise<IndexedEntity[]> {
     return this.call("catalogList", [filter]);
   }
+  catalogShow(id: string): Promise<CatalogShowResult> {
+    return this.call("catalogShow", [id]);
+  }
   taskCreate(input: { intent?: string; recipient?: string }): Promise<TaskView> {
     return this.call("taskCreate", [input]);
   }
@@ -429,6 +434,7 @@ const KNOWN_OPS: ReadonlySet<string> = new Set([
   "skillList",
   "skillShow",
   "catalogList",
+  "catalogShow",
   "taskCreate",
   "taskGet",
   "taskList",

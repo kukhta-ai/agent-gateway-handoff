@@ -32,15 +32,15 @@ agent should be able to recover from interruption by re-reading the same entitie
 | `gla catalog show <provider-id>` | Inspect one registered provider before selecting or overriding it. | Provider manifest projection, family, capabilities, compatibility, dependency/probe status, typed `config_schema`, and skill links. |
 | `gla template list [--available]` | Find assemblable capsule templates in the active graph. | Template ids, purpose, dependency posture, and availability. |
 | `gla template show <id>` | Inspect a template before composing a session. | Required parts, fixed parts, open parameters, compatible providers, defaults, and dependency status. |
-| `gla schema [session create]` / `gla schema [catalog provider]` | Load the machine-readable input/output and error contract. | `AssemblySpec` shape, command flags, provider-detail schema bounds, exit codes, and stable error codes. |
+| `gla schema [session create]` | Load the machine-readable input/output and error contract for session proposal. | `AssemblySpec` shape, command flags, exit codes, and stable error codes. |
 | `gla skill list [--for <template>]` | Discover procedural knowledge relevant to the selected surface. | Skill ids and summaries keyed to templates/providers. |
 | `gla skill show <id>` | Load recovery and use instructions for the task. | Skill body with provider/template usage and recovery guidance. |
 | `gla session create ... --dry-run` | Check admission without provisioning a capsule. | Accepted/rejected outcome with stable diagnostics and recovery pointers. |
 | `gla session create ...` | Submit the same accepted proposal for provisioning. | Session id, state, capsule descriptor, and connector descriptor with secret refs. |
 | `gla session get <id>` / `gla session connector <id>` | Resume after interruption. | Current session state and connector descriptor for a live capsule. |
 
-The exact command names may evolve with the CLI roadmap, but the UX contract is fixed: discover, inspect, compose,
-dry-run, submit, and resume.
+The entry points above are current executable CLI commands unless this document explicitly marks a target command name.
+The UX contract is fixed: discover, inspect, compose, dry-run, submit, and resume.
 
 ## 3. Read Surfaces
 

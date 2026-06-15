@@ -19,9 +19,11 @@ trying to create package source or run a runtime session proposal. The UX answer
 
 ## 2. Entry Points
 
-The primary surface should be command-first because install/update touches files, WPM receipts, daemon boot, and
-doctor evidence. A UI can wrap these commands later, but it must preserve the same plan -> verify -> apply -> doctor
-state model.
+The target surface should be command-first because install/update touches files, WPM receipts, daemon boot, and doctor
+evidence. These are UX command names, not the current executable `gla` CLI contract; today's CLI must report the
+provider-set, profile, and provider-graph doctor command groups as deferred until the install/update surface is
+implemented. A UI can wrap these commands later, but it must preserve the same plan -> verify -> apply -> doctor state
+model.
 
 | Entry point | Purpose | Primary output |
 |---|---|---|
@@ -36,8 +38,8 @@ state model.
 | `gla doctor provider-graph` | Verify current boot-time registration, dependency evidence, and probes. | PASS/DEGRADED/FAIL report for install convergence and runtime health. |
 | `gla provider-set rollback <snapshot>` | Return to a previous selected provider graph when the update fails. | Restored profile/config where possible plus explicit manual repair limits. |
 
-The exact command names can evolve. The UX contract is fixed: inspect profiles, validate overlays, plan, satisfy WPM,
-apply with snapshot, doctor, then hand off to runtime consumption.
+The exact target command names can evolve. The UX contract is fixed: inspect profiles, validate overlays, plan,
+satisfy WPM, apply with snapshot, doctor, then hand off to runtime consumption.
 
 ## 3. Inputs
 
@@ -152,7 +154,8 @@ host changes whose WPM bundle did not record a safe inverse operation.
 
 ## 9. Success State And Handoff
 
-The install/update flow is successful when `gla doctor provider-graph` returns PASS for the selected profile:
+The install/update flow is successful when the provider graph doctor report returns PASS for the selected profile
+(target CLI name: `gla doctor provider-graph`):
 
 - named profile and overlays applied;
 - provider modules registered at boot;
