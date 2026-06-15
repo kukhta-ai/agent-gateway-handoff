@@ -29,6 +29,7 @@ import {
   CHANNEL_CLI_MANIFEST,
   type DependencyBinding,
   type DependencyConnectionEvidence,
+  type DependencyConnectionRef,
   type DependencyDecisionNote,
   type DependencyInverseOperation,
   type DependencyProbeEvidence,
@@ -41,6 +42,11 @@ import {
   type ProbeResult,
   type ProviderFamily,
   type ProviderManifest,
+  type PublicEdgeLogRedactionPosture,
+  type PublicEdgeLogRedactionState,
+  type PublicEdgeRouteMode,
+  type PublicEdgeTransportDescriptor,
+  type PublicEdgeTransportEvidence,
   type SkillManifest,
   type TemplateManifest,
   type WpmBundleEvidence,
@@ -79,6 +85,7 @@ export type Probe = () => Availability;
 
 /** The default probe for an in-tree part with all dependencies bound: `available`. */
 const ALWAYS_AVAILABLE: Probe = () => "available";
+const ALWAYS_UNAVAILABLE: Probe = () => "unavailable";
 
 /** Structured WPM dependency binding input accepted by the catalog. */
 export type DependencyBindingSource =
@@ -259,6 +266,24 @@ function validProbe(
   return !missing.some((m) => m.startsWith(`${evidencePath}.`));
 }
 
+function requirementNeedsCurrentProbe(
+  requirements: readonly DependencyRequirement[] | undefined,
+): boolean {
+  return (requirements ?? []).some((requirement) => requirement.hostTouching === true);
+}
+
+function currentProbeEvidence(
+  probes: ProbeRegistry | undefined,
+  probeId: string | undefined,
+  required: boolean,
+): DependencyProbeEvidence {
+  if (probeId === undefined && required) {
+    return { result: ALWAYS_UNAVAILABLE() };
+  }
+  const probe = probeId !== undefined ? probes?.[probeId] : undefined;
+  return { result: (probe ?? ALWAYS_AVAILABLE)() };
+}
+
 function validConnection(
   connection: unknown,
   requirement: DependencyRequirement,
@@ -310,6 +335,130 @@ function validConnection(
     }
   }
   return !missing.some((m) => m.startsWith("connection."));
+}
+
+function isDependencyConnectionRef(value: unknown): value is DependencyConnectionRef {
+  return isRecord(value) && hasText(value.kind) && hasText(value.ref);
+}
+
+function publicBasePath(
+  publicBaseUrl: DependencyConnectionRef,
+  missing: string[],
+): string | undefined {
+  if (publicBaseUrl.kind !== "uri-ref") {
+    missing.push("publicEdge.publicBaseUrl.uri-ref");
+    return undefined;
+  }
+  try {
+    const url = new URL(publicBaseUrl.ref);
+    return url.pathname.length > 0 ? url.pathname : "/";
+  } catch {
+    missing.push("publicEdge.publicBaseUrl.uri");
+    return undefined;
+  }
+}
+
+function validPublicEdgeRouteMode(value: unknown): value is PublicEdgeRouteMode {
+  return value === "route-programming" || value === "manual-route";
+}
+
+function validPublicEdgeLogRedactionState(value: unknown): value is PublicEdgeLogRedactionState {
+  return value === "redacted" || value === "not-logged";
+}
+
+function validPublicEdgeLogRedaction(
+  value: unknown,
+  missing: string[],
+): value is PublicEdgeLogRedactionPosture {
+  if (!isRecord(value)) {
+    missing.push("publicEdge.logRedaction");
+    return false;
+  }
+  let valid = true;
+  for (const field of ["queryString", "cookie", "authorization", "secWebSocketProtocol"] as const) {
+    if (!validPublicEdgeLogRedactionState(value[field])) {
+      missing.push(`publicEdge.logRedaction.${field}`);
+      valid = false;
+    }
+  }
+  return valid;
+}
+
+function validPublicEdgeEvidence(
+  value: unknown,
+  publicBaseUrl: DependencyConnectionRef | undefined,
+  missing: string[],
+): value is PublicEdgeTransportEvidence {
+  if (!isRecord(value)) {
+    missing.push("publicEdge");
+    return false;
+  }
+  let valid = true;
+  if (!hasSafeOperatorText(value.basePath) || !value.basePath.startsWith("/")) {
+    missing.push("publicEdge.basePath");
+    valid = false;
+  } else if (publicBaseUrl !== undefined) {
+    const path = publicBasePath(publicBaseUrl, missing);
+    if (path !== undefined && path !== value.basePath) {
+      missing.push("publicEdge.basePath.publicBaseUrl");
+      valid = false;
+    }
+  }
+  if (!validPublicEdgeRouteMode(value.routeMode)) {
+    missing.push("publicEdge.routeMode");
+    valid = false;
+  }
+  valid = validPublicEdgeLogRedaction(value.logRedaction, missing) && valid;
+  return valid;
+}
+
+function publicEdgeTransportDescriptor(
+  requirement: DependencyRequirement,
+  binding: DependencyBinding,
+  currentProbe: DependencyProbeEvidence,
+  missing: string[],
+): PublicEdgeTransportDescriptor | undefined {
+  if (requirement.publicEdge !== true) {
+    return undefined;
+  }
+  const publicBaseUrl = binding.connection?.refs.publicBaseUrl;
+  const accessGatewayUpstream = binding.connection?.refs.gatewayUpstream;
+  if (!isDependencyConnectionRef(publicBaseUrl)) {
+    missing.push("publicEdge.publicBaseUrl");
+  }
+  if (!isDependencyConnectionRef(accessGatewayUpstream)) {
+    missing.push("publicEdge.gatewayUpstream");
+  } else if (accessGatewayUpstream.kind !== "uri-ref") {
+    missing.push("publicEdge.gatewayUpstream.uri-ref");
+  }
+  if (
+    !isDependencyConnectionRef(publicBaseUrl) ||
+    !isDependencyConnectionRef(accessGatewayUpstream)
+  ) {
+    validPublicEdgeEvidence(binding.publicEdge, undefined, missing);
+    return undefined;
+  }
+  if (!validPublicEdgeEvidence(binding.publicEdge, publicBaseUrl, missing)) {
+    return undefined;
+  }
+  return {
+    dependency: requirement.dependency,
+    publicBaseUrl: operatorSafeClone(publicBaseUrl),
+    basePath: binding.publicEdge.basePath,
+    accessGatewayUpstream: operatorSafeClone(accessGatewayUpstream),
+    routeMode: binding.publicEdge.routeMode,
+    logRedaction: operatorSafeClone(binding.publicEdge.logRedaction),
+    acceptedReceipt: {
+      source: "wpm-receipt",
+      bundleId: binding.bundle.id,
+      bundleVersion: binding.bundle.version,
+      taskId: binding.receipt.taskId,
+      ...(binding.receipt.refs !== undefined
+        ? { refs: operatorSafeClone(binding.receipt.refs) }
+        : {}),
+    },
+    currentReachability: operatorSafeClone(currentProbe),
+  };
 }
 
 function validInverseOperation(
@@ -402,6 +551,7 @@ function evaluateRequirement(
   currentProbe: DependencyProbeEvidence,
 ): IndexedDependencyBinding {
   const missingEvidence: string[] = [];
+  let publicEdgeTransport: PublicEdgeTransportDescriptor | undefined;
   if (requirement.hostTouching !== true) {
     return {
       ...requirement,
@@ -449,6 +599,14 @@ function evaluateRequirement(
     if (binding.ownershipMode !== "disabled") {
       validConnection(binding.connection, requirement, missingEvidence);
     }
+    if (binding.ownershipMode !== "disabled" && requirement.publicEdge === true) {
+      publicEdgeTransport = publicEdgeTransportDescriptor(
+        requirement,
+        binding,
+        currentProbe,
+        missingEvidence,
+      );
+    }
     if (binding.ownershipMode === "managed" && binding.inverseOp === undefined) {
       missingEvidence.push("inverseOp");
     } else if (binding.inverseOp !== undefined) {
@@ -486,6 +644,9 @@ function evaluateRequirement(
   const connection = sanitizedConnection(binding.connection);
   if (connection !== undefined) {
     out.connection = connection;
+  }
+  if (publicEdgeTransport !== undefined && status !== "unbound") {
+    out.publicEdgeTransport = publicEdgeTransport;
   }
   if (binding.inverseOp !== undefined) {
     out.inverseOp = operatorSafeClone(binding.inverseOp) as DependencyInverseOperation;
@@ -631,6 +792,10 @@ export interface CatalogDiagnostic {
   part?: string;
   family?: string;
   dependency?: string;
+  dependencyScope?: "provider" | "template";
+  dependencyStatus?: BindingStatus;
+  install?: ProbeResult;
+  runtime?: ProbeResult;
   detail?: Record<string, unknown>;
 }
 
@@ -737,6 +902,10 @@ function templateDiagnostics(
         code: "template.dependency_unavailable",
         message: `template dependency "${dep.dependency}" is not available`,
         dependency: dep.dependency,
+        dependencyScope: "template",
+        dependencyStatus: dep.status,
+        install: dep.diagnostics.install,
+        runtime: dep.diagnostics.runtime,
         detail: { dependency: dep },
       });
     }
@@ -775,8 +944,6 @@ function ingest(
   const templates = new Map<string, TemplateManifest>();
   const skills = new Map<string, SkillManifest>();
 
-  const probeFor = (name: string | undefined): Probe => (name && probes[name]) || ALWAYS_AVAILABLE;
-
   const registerSkills = (list: SkillManifest[] | undefined): void => {
     for (const s of list ?? []) {
       skills.set(s.id, s);
@@ -797,7 +964,11 @@ function ingest(
         );
       }
     }
-    const currentProbe: DependencyProbeEvidence = { result: probeFor(m.spec.probe)() };
+    const currentProbe = currentProbeEvidence(
+      probes,
+      m.spec.probe,
+      requirementNeedsCurrentProbe(m.spec.requires),
+    );
     const requires = (m.spec.requires ?? []).map((requirement) =>
       evaluateRequirement(requirement, bindingFor(bindings, requirement.dependency), currentProbe),
     );
@@ -827,7 +998,11 @@ function ingest(
     }
     templates.set(t.metadata.name, t);
     // A template is available iff its template-level dependencies, own probe, and every required part are available.
-    const currentProbe: DependencyProbeEvidence = { result: probeFor(t.spec.probe)() };
+    const currentProbe = currentProbeEvidence(
+      probes,
+      t.spec.probe,
+      requirementNeedsCurrentProbe(t.spec.requires),
+    );
     const requires = (t.spec.requires ?? []).map((requirement) =>
       evaluateRequirement(requirement, bindingFor(bindings, requirement.dependency), currentProbe),
     );
@@ -1003,6 +1178,16 @@ export function referenceWpmDependencyBindings(): DependencyBinding[] {
         refs: {
           publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/" },
           gatewayUpstream: { kind: "uri-ref", ref: "http://127.0.0.1:3000" },
+        },
+      },
+      publicEdge: {
+        basePath: "/",
+        routeMode: "manual-route",
+        logRedaction: {
+          queryString: "redacted",
+          cookie: "redacted",
+          authorization: "redacted",
+          secWebSocketProtocol: "redacted",
         },
       },
       lastProbe: { at: "2026-06-13T00:00:00.000Z", result: "available" },
@@ -1382,6 +1567,10 @@ export interface ProviderGraphDiagnostic {
   family?: string;
   template?: string;
   dependency?: string;
+  dependencyScope?: "provider" | "template";
+  dependencyStatus?: BindingStatus;
+  install?: ProbeResult;
+  runtime?: ProbeResult;
   detail?: Record<string, unknown>;
 }
 
@@ -1804,16 +1993,20 @@ function resolveProviderConfig(
 function currentProbeFor(
   probes: ProbeRegistry | undefined,
   probeId: string | undefined,
+  required: boolean,
 ): DependencyProbeEvidence {
-  const probe = probeId !== undefined ? probes?.[probeId] : undefined;
-  return { result: probe?.() ?? "available" };
+  return currentProbeEvidence(probes, probeId, required);
 }
 
 function providerAvailability(
   provider: ProviderManifest,
   input: ResolveProviderGraphProjectionInput,
 ): { availability: Availability; dependencies: IndexedDependencyBinding[] } {
-  const currentProbe = currentProbeFor(input.probes, provider.spec.probe);
+  const currentProbe = currentProbeFor(
+    input.probes,
+    provider.spec.probe,
+    requirementNeedsCurrentProbe(provider.spec.requires),
+  );
   const dependencies = (provider.spec.requires ?? []).map((requirement) =>
     evaluateRequirement(
       requirement,
@@ -1833,7 +2026,11 @@ function templateAvailability(
   providerAvailabilityById: ReadonlyMap<string, Availability>,
   input: ResolveProviderGraphProjectionInput,
 ): { availability: Availability; dependencies: IndexedDependencyBinding[] } {
-  const currentProbe = currentProbeFor(input.probes, template.spec.probe);
+  const currentProbe = currentProbeFor(
+    input.probes,
+    template.spec.probe,
+    requirementNeedsCurrentProbe(template.spec.requires),
+  );
   const dependencies = (template.spec.requires ?? []).map((requirement) =>
     evaluateRequirement(
       requirement,
@@ -2123,6 +2320,10 @@ function addDependencyDiagnostics(
       code: "graph.dependency_unavailable",
       message: `dependency "${dependency.dependency}" is not available`,
       dependency: dependency.dependency,
+      dependencyScope: owner.template !== undefined ? "template" : "provider",
+      dependencyStatus: dependency.status,
+      install: dependency.diagnostics.install,
+      runtime: dependency.diagnostics.runtime,
       ...(owner.providerId !== undefined ? { providerId: owner.providerId } : {}),
       ...(owner.template !== undefined ? { template: owner.template } : {}),
       detail: { dependency },
@@ -2303,6 +2504,14 @@ function graphDiagnosticsAsCatalog(
       ...(filter.part !== undefined ? { part: filter.part } : {}),
       ...(diagnostic.family !== undefined ? { family: diagnostic.family } : {}),
       ...(diagnostic.dependency !== undefined ? { dependency: diagnostic.dependency } : {}),
+      ...(diagnostic.dependencyScope !== undefined
+        ? { dependencyScope: diagnostic.dependencyScope }
+        : {}),
+      ...(diagnostic.dependencyStatus !== undefined
+        ? { dependencyStatus: diagnostic.dependencyStatus }
+        : {}),
+      ...(diagnostic.install !== undefined ? { install: diagnostic.install } : {}),
+      ...(diagnostic.runtime !== undefined ? { runtime: diagnostic.runtime } : {}),
       ...(diagnostic.detail !== undefined ? { detail: diagnostic.detail } : {}),
     }));
 }

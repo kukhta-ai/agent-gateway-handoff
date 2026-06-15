@@ -310,6 +310,131 @@ describe("provider graph projection", () => {
     expect(launcher?.config).not.toHaveProperty("receipt");
   });
 
+  it("distinguishes provider and template dependency health in graph diagnostics", () => {
+    const graph = resolveProviderGraphProjection({
+      providerSet: {
+        providers: PROVIDERS,
+        templates: [structuredClone(BROWSER_HANDOFF_TEMPLATE)],
+      },
+      baseProfile: BASE_PROFILE,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      probes: {
+        "launcher-process": () => "unavailable",
+        "browser-handoff": () => "degraded",
+      },
+    });
+
+    expect(graph.ok).toBe(false);
+    expect(graph.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.dependency_unavailable",
+          providerId: "launcher-process",
+          dependency: "browser-runtime",
+          dependencyScope: "provider",
+          dependencyStatus: "bound",
+          install: "available",
+          runtime: "unavailable",
+        }),
+        expect.objectContaining({
+          code: "graph.dependency_unavailable",
+          template: "browser-handoff",
+          dependency: "edge-proxy",
+          dependencyScope: "template",
+          dependencyStatus: "bound",
+          install: "available",
+          runtime: "degraded",
+        }),
+      ]),
+    );
+    expect(
+      toAdmissionCatalogFromProviderGraphProjection(graph).provider("launcher-process"),
+    ).toMatchObject({
+      available: false,
+      availability: "unavailable",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          dependencyScope: "provider",
+          install: "available",
+          runtime: "unavailable",
+        }),
+      ]),
+    });
+    expect(providerGraphDoctorReport(graph)).toMatchObject({
+      status: "FAIL",
+      providers: expect.arrayContaining([
+        expect.objectContaining({
+          providerId: "launcher-process",
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({
+              dependencyScope: "provider",
+              install: "available",
+              runtime: "unavailable",
+            }),
+          ]),
+        }),
+      ]),
+      templates: expect.arrayContaining([
+        expect.objectContaining({
+          templateId: "browser-handoff",
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({
+              dependencyScope: "template",
+              install: "available",
+              runtime: "degraded",
+            }),
+          ]),
+        }),
+      ]),
+    });
+  });
+
+  it("fails closed when host-touching graph inputs omit current probe declarations", () => {
+    const providers = structuredClone(PROVIDERS);
+    const launcher = providers.find((provider) => provider.metadata.name === "launcher-process");
+    if (launcher === undefined) {
+      throw new Error("missing launcher fixture");
+    }
+    const { probe: _launcherProbe, ...launcherSpec } = launcher.spec;
+    launcher.spec = launcherSpec;
+    const template = structuredClone(BROWSER_HANDOFF_TEMPLATE);
+    const { probe: _templateProbe, ...templateSpec } = template.spec;
+    template.spec = templateSpec;
+
+    const graph = resolveProviderGraphProjection({
+      providerSet: {
+        providers,
+        templates: [template],
+      },
+      baseProfile: BASE_PROFILE,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+
+    expect(graph.ok).toBe(false);
+    expect(graph.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.dependency_unavailable",
+          providerId: "launcher-process",
+          dependency: "browser-runtime",
+          dependencyScope: "provider",
+          dependencyStatus: "bound",
+          install: "available",
+          runtime: "unavailable",
+        }),
+        expect.objectContaining({
+          code: "graph.dependency_unavailable",
+          template: "browser-handoff",
+          dependency: "edge-proxy",
+          dependencyScope: "template",
+          dependencyStatus: "bound",
+          install: "available",
+          runtime: "unavailable",
+        }),
+      ]),
+    );
+  });
+
   it("feeds admission and doctor from the same graph projection as catalog reads", () => {
     const dependencyBindings = referenceWpmDependencyBindings().filter(
       (binding) => binding.dependency !== "edge-proxy",

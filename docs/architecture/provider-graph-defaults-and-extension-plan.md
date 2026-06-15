@@ -312,11 +312,15 @@ available only when all of these are true:
 - the last WPM install-time probe is `available`;
 - the current GLA runtime probe is `available`.
 
+If a provider or template has any host-touching requirement, omitting its current `spec.probe` fails closed as
+`unavailable`. The legacy no-probe default is only for pure in-tree entries with no host dependency.
+
 Pure in-tree providers with no host-touching dependency can be available from their own current probe alone.
 
 ### Public Edge Transport
 
-Public edge remains dependency/transport evidence. A route-transport dependency descriptor must cover at least:
+Public edge remains dependency/transport evidence. A route-transport dependency descriptor is projected as
+`publicEdgeTransport` on the accepted dependency binding and must cover at least:
 
 - dependency id, such as `edge-proxy`;
 - public base URL and configured base path refs;
@@ -325,6 +329,10 @@ Public edge remains dependency/transport evidence. A route-transport dependency 
 - ownership mode and accepted WPM receipt id;
 - log-redaction posture for query strings, `Cookie`, `Authorization`, and `Sec-WebSocket-Protocol`;
 - current probe showing the public path reaches Access Gateway.
+
+App composition must supply the template reachability probe through the selected provider set or explicit composition
+options. If a template or provider declares a probe that the app graph cannot register, the graph treats that current
+probe as `unavailable`; accepted WPM receipt evidence is not enough by itself.
 
 Caddy, nginx, Traefik, or a manual proxy can satisfy this transport descriptor, but none can satisfy recipient
 binding, grant verification, revocation, enrollment, or auth-assurance checks. Those remain Access Gateway and
