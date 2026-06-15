@@ -5,14 +5,14 @@
 
 phase: 5
 phase_name: "Autonomous build — provider graph defaults and horizontal extension epic"
-branch: feature/provider-graph-task-GLA-107.02
+branch: feature/provider-graph
 epic: provider-graph-107
-active_story: GLA-107.02
-review_cycle: 1
+active_story: null
+review_cycle: 0
 follow_on_scope:
   tasks: "GLA-107..GLA-107.13"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "GLA-107.02 is Done on the story branch; integration to feature/provider-graph pending, then GLA-107.03 is ready"
+  next_ready_sequence: "GLA-107.01, GLA-107.02, GLA-107.11, GLA-107.12, and GLA-107.13 are Done; GLA-107.03 is ready next"
   note: "2026-06-14 user goal: implement backlog tasks GLA-107 through GLA-107.13 according to project SDLC, architecture, and vision. Persistent specialists initialized first for provider-graph epic: architect James, UX Arendt, SM Lagrange, worker Avicenna, TEA/reviewer Planck, investigator Ampere."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
@@ -136,4 +136,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-15T00:17:00Z"
+last_updated: "2026-06-15T00:19:14Z"
