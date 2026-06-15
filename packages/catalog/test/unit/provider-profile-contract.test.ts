@@ -284,6 +284,50 @@ describe("ProviderProfile and ProviderProfileOverlay contracts", () => {
     );
   });
 
+  it("rejects overlay selections that name unregistered providers", () => {
+    const result = validateProviderProfileInputs({
+      providers: INSTALLED_PROVIDERS,
+      profiles: [
+        {
+          apiVersion: "gla.dev/v1",
+          kind: "ProviderProfile",
+          metadata: { name: "local-dev", version: "0.1.0" },
+          spec: {
+            select: {
+              AuthProvider: "auth-webauthn",
+            },
+          },
+        },
+      ],
+      overlays: [
+        {
+          apiVersion: "gla.dev/v1",
+          kind: "ProviderProfileOverlay",
+          metadata: { name: "unregistered-override" },
+          spec: {
+            extends: "local-dev",
+            select: {
+              AuthProvider: "auth-unregistered",
+            },
+          },
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          code: "profile.unknown_provider",
+          profile: "unregistered-override",
+          providerId: "auth-unregistered",
+          family: "AuthProvider",
+          path: "spec.select.AuthProvider",
+        }),
+      ]),
+    });
+  });
+
   it("rejects overlay inheritance cycles and unknown bases", () => {
     const result = validateProviderProfileInputs({
       providers: INSTALLED_PROVIDERS,

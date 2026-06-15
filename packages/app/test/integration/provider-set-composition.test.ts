@@ -27,7 +27,11 @@ import {
   encodeRuntimeHandle,
 } from "@gla/kernel";
 import { POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
-import type { GlaProviderModule, ProviderRegistrationContext } from "@gla/provider-host";
+import {
+  type GlaProviderModule,
+  ProviderHost,
+  type ProviderRegistrationContext,
+} from "@gla/provider-host";
 import { describe, expect, it } from "vitest";
 import {
   type AppProviderSet,
@@ -467,6 +471,62 @@ describe("provider-set agnostic app composition", () => {
         }),
       ]),
     );
+  });
+
+  it("keeps the runtime bridge closed to providers registered after boot composition", async () => {
+    const records = fakeRecords();
+    const providerSet = fakeProviderSet(records);
+    const providerHost = new ProviderHost().registerModules(providerSet.modules);
+    const bridge = createBridge({
+      providerHost,
+      providerProfile: providerSet.profile,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      templateProbes: providerSet.templateProbes ?? {},
+    });
+
+    expect(bridge.catalogList().map((entity) => entity.name)).not.toContain("late-entrypoint");
+    expect(() => bridge.skillShow("use-late-entrypoint")).toThrowError(/unknown skill/i);
+
+    providerHost.registerModule(
+      moduleFor(
+        providerManifest({
+          id: "late-entrypoint",
+          kind: "HumanEntrypoint",
+          family: "entrypoint",
+          summary: "late entrypoint",
+        }),
+        "@fake/late-entrypoint",
+        (ctx) =>
+          ctx.registerHumanEntrypoint("late-entrypoint", {
+            create: () => new FakeEntrypoint(),
+          }),
+      ),
+    );
+
+    expect(providerHost.providerManifest("late-entrypoint")).toBeDefined();
+    expect(bridge.catalogList().map((entity) => entity.name)).not.toContain("late-entrypoint");
+    const compatibleEntrypoints =
+      bridge.templateShow("browser-handoff").compatibleProviders?.entrypoint ?? [];
+    expect(compatibleEntrypoints).not.toContain("late-entrypoint");
+    expect(() => bridge.skillShow("use-late-entrypoint")).toThrowError(/unknown skill/i);
+    await expect(
+      bridge.sessionCreate({
+        proposal: {
+          intent: "try a provider registered after daemon boot",
+          template: "browser-handoff",
+          recipient: "tg:user:123",
+          entrypoints: [{ use: "late-entrypoint" }],
+        },
+        dryRun: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "policy.denied",
+      detail: {
+        part: "entrypoint",
+        use: "late-entrypoint",
+        compatibleWith: ["fake-entrypoint"],
+      },
+    });
   });
 
   it("fails closed through Provider Host diagnostics when a selected provider is unknown", () => {
