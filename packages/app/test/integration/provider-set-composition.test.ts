@@ -210,7 +210,9 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "Launcher",
         family: "launcher",
         summary: "fake launcher",
-        configSchema: { mode: { type: "enum", enum: ["auto", "headless"], required: true } },
+        configSchema: {
+          mode: { type: "enum", enum: ["auto", "headless"], required: false, default: "headless" },
+        },
       }),
       "@fake/launcher",
       (ctx) =>
@@ -254,6 +256,14 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "HumanEntrypoint",
         family: "entrypoint",
         summary: "fake entrypoint",
+        configSchema: {
+          clientTheme: {
+            type: "enum",
+            required: false,
+            enum: ["light", "dark"],
+            default: "light",
+          },
+        },
         capability: {
           clientAssets: [{ ref: "fake-entrypoint.fake-client", kind: "fake-client" }],
         },
@@ -540,8 +550,36 @@ describe("provider-set agnostic app composition", () => {
         profileId: "fake-scenario",
         selectedProviders: expect.objectContaining({
           Launcher: "fake-launcher",
+          HumanEntrypoint: "fake-entrypoint",
           AgentConnector: "fake-connector",
         }),
+        providers: expect.arrayContaining([
+          expect.objectContaining({
+            providerId: "fake-entrypoint",
+            selected: true,
+            diagnostics: expect.arrayContaining([
+              expect.objectContaining({ code: "provider.available" }),
+            ]),
+          }),
+        ]),
+      });
+      expect(stack.bridge.catalogList().map((entity) => entity.name)).toContain("fake-entrypoint");
+      expect(stack.bridge.skillShow("use-fake-entrypoint")).toMatchObject({
+        id: "use-fake-entrypoint",
+        for: "fake-entrypoint",
+      });
+      await expect(
+        stack.bridge.sessionCreate({
+          proposal: {
+            intent: "exercise fake provider set",
+            template: "browser-handoff",
+            recipient: "tg:user:123",
+          },
+          dryRun: true,
+        }),
+      ).resolves.toMatchObject({
+        decision: "accept",
+        dry_run: true,
       });
       expect(stack.authModule).toBe("@fake/auth");
       expect(stack.entrypoint).toBeDefined();

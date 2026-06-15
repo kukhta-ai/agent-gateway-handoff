@@ -7,6 +7,7 @@ import {
   type ProviderFamily,
   type ProviderManifest,
   type ProviderProfileManifest,
+  type ProviderProfileOverlayManifest,
   type TemplateManifest,
   type TemplatePackageManifest,
   providerGraphDoctorReport,
@@ -14,6 +15,8 @@ import {
   resolveProviderGraphProjection,
   toAdmissionCatalog,
   toAdmissionCatalogFromProviderGraphProjection,
+  validateProviderPackageAuthoring,
+  validateTemplatePackageAuthoring,
 } from "../../src/index.js";
 
 function provider(
@@ -752,5 +755,248 @@ describe("provider graph projection", () => {
         }),
       ]),
     );
+  });
+
+  it("proves a non-reference human-entrypoint package projects through profile, catalog, doctor, and admission", () => {
+    const entrypointSharelink: ProviderManifest = {
+      apiVersion: "gla.dev/v1",
+      kind: "HumanEntrypoint",
+      metadata: { name: "entrypoint-sharelink", version: "0.1.0" },
+      spec: {
+        family: "entrypoint",
+        capability: {
+          summary: "share-link human entrypoint for a hosted browser view",
+          client: { kind: "share-link", ref: "entrypoint-sharelink.client" },
+        },
+        config_schema: {
+          theme: { type: "enum", required: false, enum: ["light", "dark"], default: "light" },
+        },
+        probe: "entrypoint-sharelink",
+        skills: [
+          {
+            id: "use-entrypoint-sharelink",
+            for: "entrypoint-sharelink",
+            body: "# use-entrypoint-sharelink\nOpen the provider-owned share-link human view.",
+          },
+        ],
+      },
+    };
+    const sharelinkTemplate: TemplateManifest = {
+      apiVersion: "gla.dev/v1",
+      kind: "CapsuleTemplate",
+      metadata: { name: "sharelink-handoff", version: "0.1.0" },
+      spec: {
+        family: "template",
+        capability: { summary: "browser handoff with the share-link human entrypoint" },
+        requiredParts: {
+          launcher: "launcher-process",
+          entrypoint: "entrypoint-sharelink",
+          connector: "connector-cdp",
+          workspace: "workspace-profile",
+          detector: "url-watcher",
+        },
+        openParts: ["entrypoint", "connector", "detector"],
+        compatibleProviders: {
+          entrypoint: ["entrypoint-sharelink"],
+          connector: ["connector-cdp"],
+          detector: ["url-watcher", "user-done"],
+        },
+        openParams: {
+          recipient: { type: "string", required: true, min: 1 },
+        },
+        probe: "sharelink-handoff",
+        skills: [
+          {
+            id: "sharelink-handoff",
+            for: "sharelink-handoff",
+            body: "# sharelink-handoff\nUse the share-link entrypoint variant.",
+          },
+        ],
+      },
+    };
+    const sharelinkTemplatePackage: TemplatePackageManifest = {
+      apiVersion: "gla.dev/v1",
+      kind: "TemplatePackage",
+      metadata: { name: "sharelink-handoff-package", version: "0.1.0" },
+      spec: {
+        templates: [sharelinkTemplate],
+        schema: { recipient: { type: "string", required: true, min: 1 } },
+        defaults: {
+          "sharelink-handoff": {
+            HumanEntrypoint: "entrypoint-sharelink",
+            AgentConnector: "connector-cdp",
+            CompletionDetector: "url-watcher",
+          },
+        },
+        compatibility: {
+          openParts: ["entrypoint", "connector", "detector"],
+        },
+        docs: ["templates/sharelink-handoff/README.md"],
+        tests: ["packages/catalog/test/unit/provider-graph-projection.test.ts"],
+      },
+    };
+    const overlay: ProviderProfileOverlayManifest = {
+      apiVersion: "gla.dev/v1",
+      kind: "ProviderProfileOverlay",
+      metadata: { name: "operator-sharelink-entrypoint", version: "0.1.0" },
+      spec: {
+        extends: "local-dev",
+        select: { HumanEntrypoint: "entrypoint-sharelink" },
+        config: { "entrypoint-sharelink": { theme: "dark" } },
+      },
+    };
+    const providers = [...PROVIDERS, entrypointSharelink];
+
+    expect(
+      validateProviderPackageAuthoring({
+        manifest: entrypointSharelink,
+        module: {
+          providerId: "entrypoint-sharelink",
+          family: "entrypoint",
+          registersFactory: true,
+          registersProbe: true,
+        },
+        docs: ["adapters/entrypoint-sharelink/README.md"],
+        contractTests: ["packages/catalog/test/unit/provider-graph-projection.test.ts"],
+        changedFiles: [
+          "adapters/entrypoint-sharelink/src/index.ts",
+          "packages/provider-set-sharelink/src/index.ts",
+        ],
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateTemplatePackageAuthoring({
+        manifest: sharelinkTemplatePackage,
+        providers,
+      }).ok,
+    ).toBe(true);
+    const redactionCheck = validateProviderPackageAuthoring({
+      manifest: entrypointSharelink,
+      module: {
+        providerId: "entrypoint-sharelink",
+        family: "entrypoint",
+        registersFactory: true,
+        registersProbe: true,
+      },
+      docs: ["https://operator.example/setup?token=entrypoint-token-canary"],
+      contractTests: ["packages/catalog/test/unit/provider-graph-projection.test.ts"],
+    });
+    expect(redactionCheck.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "provider_author.redaction_violation" }),
+      ]),
+    );
+    expect(JSON.stringify(redactionCheck.diagnostics)).not.toContain("entrypoint-token-canary");
+
+    const graph = resolveProviderGraphProjection({
+      providerSet: {
+        id: "sharelink-provider-set",
+        providers,
+      },
+      baseProfile: BASE_PROFILE,
+      overlays: [overlay],
+      templatePackages: [templatePackage(), sharelinkTemplatePackage],
+      dependencyBindings: referenceWpmDependencyBindings(),
+      runtimeAssemblyParams: {
+        "entrypoint-sharelink": { theme: "dark" },
+        "url-watcher": { complete_on: "/dashboard" },
+      },
+      probes: {
+        "entrypoint-sharelink": () => "available",
+        "sharelink-handoff": () => "available",
+      },
+    });
+
+    if (!graph.ok) {
+      throw new Error(`expected sharelink graph to pass: ${JSON.stringify(graph.diagnostics)}`);
+    }
+    expect(graph.projection.selectedProviders.HumanEntrypoint).toBe("entrypoint-sharelink");
+    expect(
+      graph.projection.providers.find((provider) => provider.providerId === "entrypoint-sharelink"),
+    ).toMatchObject({
+      providerId: "entrypoint-sharelink",
+      family: "HumanEntrypoint",
+      runtimeFamily: "entrypoint",
+      available: true,
+      config: { theme: "dark" },
+    });
+
+    const catalog = new CatalogService({
+      content: { providers, templates: [sharelinkTemplate] },
+      dependencyBindings: referenceWpmDependencyBindings(),
+      probes: { "entrypoint-sharelink": () => "available", "sharelink-handoff": () => "available" },
+      providerGraph: graph,
+    });
+    expect(catalog.show("entrypoint-sharelink")).toMatchObject({
+      name: "entrypoint-sharelink",
+      family: "entrypoint",
+      availability: "available",
+    });
+    expect(catalog.skillShow("use-entrypoint-sharelink")).toMatchObject({
+      id: "use-entrypoint-sharelink",
+      for: "entrypoint-sharelink",
+    });
+    expect(catalog.templateShow("sharelink-handoff")).toMatchObject({
+      id: "sharelink-handoff",
+      available: true,
+      parts: expect.arrayContaining([
+        expect.objectContaining({ part: "entrypoint", provider: "entrypoint-sharelink" }),
+      ]),
+    });
+
+    const admission = toAdmissionCatalogFromProviderGraphProjection(graph);
+    expect(admission.provider("entrypoint-sharelink")).toMatchObject({
+      name: "entrypoint-sharelink",
+      available: true,
+      family: "entrypoint",
+      config_schema: expect.objectContaining({
+        theme: expect.objectContaining({ type: "enum" }),
+      }),
+    });
+    expect(admission.templateDefaults("sharelink-handoff")).toMatchObject({
+      available: true,
+      entrypoints: [{ use: "entrypoint-sharelink" }],
+      compatibleProviders: expect.objectContaining({
+        entrypoint: expect.arrayContaining(["entrypoint-sharelink"]),
+      }),
+    });
+    expect(providerGraphDoctorReport(graph)).toMatchObject({
+      status: "PASS",
+      selectedProviders: expect.objectContaining({ HumanEntrypoint: "entrypoint-sharelink" }),
+      providers: expect.arrayContaining([
+        expect.objectContaining({
+          providerId: "entrypoint-sharelink",
+          selected: true,
+          available: true,
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({ code: "provider.available" }),
+          ]),
+        }),
+      ]),
+    });
+
+    const unavailableGraph = resolveProviderGraphProjection({
+      providerSet: { id: "sharelink-provider-set", providers },
+      baseProfile: BASE_PROFILE,
+      overlays: [overlay],
+      templatePackages: [templatePackage(), sharelinkTemplatePackage],
+      dependencyBindings: referenceWpmDependencyBindings(),
+      probes: {
+        "entrypoint-sharelink": () => "unavailable",
+        "sharelink-handoff": () => "available",
+      },
+    });
+    expect(providerGraphDoctorReport(unavailableGraph)).toMatchObject({
+      status: "FAIL",
+      providers: expect.arrayContaining([
+        expect.objectContaining({
+          providerId: "entrypoint-sharelink",
+          availability: "unavailable",
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({ code: "provider.unavailable" }),
+          ]),
+        }),
+      ]),
+    });
   });
 });
