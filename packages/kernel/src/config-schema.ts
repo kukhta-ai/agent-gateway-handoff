@@ -50,6 +50,9 @@ export interface ConfigSchemaNode {
   anyOf?: ConfigSchemaNode[];
   oneOf?: ConfigSchemaNode[];
   not?: ConfigSchemaNode;
+  if?: ConfigSchemaNode;
+  then?: ConfigSchemaNode;
+  else?: ConfigSchemaNode;
   default?: unknown;
   examples?: unknown[];
   "x-gla-sensitive"?: boolean;
@@ -91,13 +94,15 @@ const MAX_SCHEMA_ARRAY_ITEMS = 512;
 
 const ajv = new Ajv({
   allErrors: true,
+  allowUnionTypes: true,
   coerceTypes: false,
   messages: true,
   removeAdditional: false,
-  strictRequired: false,
+  strict: true,
+  strictRequired: true,
   strictSchema: true,
-  strictTuples: false,
-  strictTypes: false,
+  strictTuples: true,
+  strictTypes: true,
   useDefaults: false,
   validateFormats: false,
 });
@@ -249,12 +254,12 @@ function profileDefects(schema: unknown): ConfigDefect[] {
     );
   }
 
-  const walk = (node: unknown, path: string): void => {
+  const walk = (node: unknown, path: string, requireClosedObjects = true): void => {
     if (!isRecord(node)) {
       pushDefect(defects, path, "policy.denied", "config_schema node must be an object");
       return;
     }
-    if (nodeDeclaresObject(node) && node.additionalProperties !== false) {
+    if (requireClosedObjects && nodeDeclaresObject(node) && node.additionalProperties !== false) {
       pushDefect(
         defects,
         `${path}.additionalProperties`,
@@ -298,7 +303,12 @@ function profileDefects(schema: unknown): ConfigDefect[] {
       }
     }
     if (node.not !== undefined) {
-      walk(node.not, `${path}.not`);
+      walk(node.not, `${path}.not`, false);
+    }
+    for (const key of ["if", "then", "else"] as const) {
+      if (node[key] !== undefined) {
+        walk(node[key], `${path}.${key}`, false);
+      }
     }
     if (node.dependencies !== undefined && !isRecord(node.dependencies)) {
       pushDefect(
@@ -390,8 +400,40 @@ function validationField(error: ErrorObject): string {
   return pointerToField(error.instancePath);
 }
 
-function validationMessage(error: ErrorObject, field: string): string {
+function schemaNodeForInstancePath(
+  schema: ConfigSchema,
+  pointer: string,
+): ConfigSchemaNode | undefined {
+  let node: ConfigSchemaNode | undefined = schema;
+  for (const rawPart of pointer.split("/").slice(1)) {
+    if (node === undefined) {
+      return undefined;
+    }
+    const part = rawPart.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (/^[0-9]+$/.test(part)) {
+      node = node.items;
+    } else {
+      node = node.properties?.[part];
+    }
+  }
+  return node;
+}
+
+function sensitiveSchemaError(error: ErrorObject, schema: ConfigSchema): boolean {
+  return (
+    (isRecord(error.parentSchema) && error.parentSchema["x-gla-sensitive"] === true) ||
+    schemaNodeForInstancePath(schema, error.instancePath)?.["x-gla-sensitive"] === true
+  );
+}
+
+function validationMessage(error: ErrorObject, field: string, schema: ConfigSchema): string {
   const params = error.params as Record<string, unknown>;
+  if (
+    sensitiveSchemaError(error, schema) &&
+    (error.keyword === "enum" || error.keyword === "const" || error.keyword === "pattern")
+  ) {
+    return `field "${field}" does not match its sensitive config_schema constraint`;
+  }
   switch (error.keyword) {
     case "required":
       return `required field "${field}" is missing`;
@@ -430,13 +472,16 @@ function validationMessage(error: ErrorObject, field: string): string {
   }
 }
 
-function validationErrors(errors: ErrorObject[] | null | undefined): ConfigDefect[] {
+function validationErrors(
+  schema: ConfigSchema,
+  errors: ErrorObject[] | null | undefined,
+): ConfigDefect[] {
   return (errors ?? []).map((error) => {
     const field = validationField(error);
     return {
       field,
       code: "policy.denied",
-      message: validationMessage(error, field),
+      message: validationMessage(error, field, schema),
     };
   });
 }
@@ -455,7 +500,7 @@ export function validateConfig(
     return validator;
   }
   const ok = validator(params);
-  return ok ? { ok: true } : { ok: false, defects: validationErrors(validator.errors) };
+  return ok ? { ok: true } : { ok: false, defects: validationErrors(schema, validator.errors) };
 }
 
 /**
