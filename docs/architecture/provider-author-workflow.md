@@ -51,6 +51,23 @@ For providers that need non-provider services, such as an identity service for a
 detector, the selected provider set supplies those service bindings. Generic app composition may pass provider-neutral
 services it owns, but it must not know provider-specific service keys beyond the selected provider-set contract.
 
+## Authoring Validation Surface
+
+Provider and template authoring is a developer/operator-agent UX, separate from operator install/update and runtime
+catalog consumption. The catalog package exposes pure authoring helpers for that UX:
+
+- `createProviderPackageSkeleton` and `validateProviderPackageAuthoring` produce or validate provider package
+  manifests, module registration evidence, probe evidence, skills/docs, contract-test refs, dependency declarations,
+  WPM skeleton requirements, and narrow-waist file boundaries.
+- `createTemplatePackageSkeleton` and `validateTemplatePackageAuthoring` produce or validate `TemplatePackage`
+  manifests, catalog `CapsuleTemplate` entries, schemas, defaults, compatibility declarations, skills/docs, and
+  template-level dependencies.
+
+These reports use stable diagnostic codes and redact secret-shaped values. A successful authoring report is not an
+availability claim: it reports `availability: "not-evaluated"` and hands the package to the operator install/update
+UX, where WPM receipts, selected profiles, and restart validation are handled. Runtime consumption then reads the
+resolved catalog/provider graph after install and boot probes have produced current evidence.
+
 ## What WPM Owns
 
 Host dependencies belong to WPM packages and their install receipts. A provider manifest declares `requires`; WPM
