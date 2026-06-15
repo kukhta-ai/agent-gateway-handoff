@@ -539,7 +539,16 @@ export const AUTH_WEBAUTHN_PROVIDER_MANIFEST: ProviderManifest = {
   metadata: { name: AUTH_WEBAUTHN_PROVIDER_ID, version: "0.1.0" },
   spec: {
     family: "auth",
-    capability: { summary: "in-tree WebAuthn/passkey auth provider" },
+    capability: {
+      summary: "in-tree WebAuthn/passkey auth provider",
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "none",
+        diagnostics: ["missing-user-verification", "assertion-verification-failed"],
+      },
+    },
     config_schema: {
       rpID: { type: "string", required: true, min: 1 },
       rpName: { type: "string", required: false, min: 1 },
@@ -567,7 +576,21 @@ export const AUTH_AUTHENTIK_PROVIDER_MANIFEST: ProviderManifest = {
   metadata: { name: AUTH_AUTHENTIK_PROVIDER_ID, version: "0.1.0" },
   spec: {
     family: "auth",
-    capability: { summary: "delegated authentik OIDC auth provider" },
+    capability: {
+      summary: "delegated authentik OIDC auth provider",
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "password",
+        diagnostics: [
+          "missing-user-verification",
+          "method-unresolved",
+          "ambiguous-provider-evidence",
+          "password-grade-proof",
+        ],
+      },
+    },
     config_schema: {
       issuerUrl: { type: "string", required: true, min: 1 },
       clientId: { type: "string", required: true, min: 1 },

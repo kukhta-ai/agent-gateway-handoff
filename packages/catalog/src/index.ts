@@ -23,6 +23,7 @@ import {
   validateSchemaShape,
 } from "@gla/kernel";
 import {
+  type AuthProviderAssuranceCapability,
   BROWSER_HANDOFF_TEMPLATE,
   type BindingStatus,
   CHANNEL_CLI_MANIFEST,
@@ -603,6 +604,8 @@ export interface IndexedEntity extends CatalogEntity {
   availability: Availability;
   /** The evaluated dependency diagnostics backing this provider (empty for pure in-tree parts). */
   requires: IndexedDependencyBinding[];
+  /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
+  authAssurance?: AuthProviderAssuranceCapability;
 }
 
 /** Stable catalog/provider diagnostic surfaced by template, catalog, and admission reads. */
@@ -799,6 +802,7 @@ function ingest(
       evaluateRequirement(requirement, bindingFor(bindings, requirement.dependency), currentProbe),
     );
     const availability = deriveAvailability(requires, currentProbe);
+    const authAssurance = authAssuranceCapabilityOf(m);
     entities.set(m.metadata.name, {
       name: m.metadata.name,
       kind: m.kind,
@@ -807,6 +811,7 @@ function ingest(
       availability,
       available: availability === "available",
       requires,
+      ...(authAssurance !== undefined ? { authAssurance } : {}),
     });
     registerSkills(m.spec.skills);
   }
@@ -1210,6 +1215,8 @@ export interface CatalogProviderInfo {
   diagnostics: CatalogDiagnostic[];
   dependencies: IndexedDependencyBinding[];
   config_schema?: ConfigSchema;
+  /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
+  authAssurance?: AuthProviderAssuranceCapability;
 }
 
 /** A launcher's declared mount capability (kernel `MountCapability`-shaped). */
@@ -1246,6 +1253,18 @@ function mountCapabilityOf(
     directory: hostPaths.includes("directory"),
     modes: mounts.modes ?? [],
   };
+}
+
+function authAssuranceCapabilityOf(
+  m: ProviderManifest | undefined,
+): AuthProviderAssuranceCapability | undefined {
+  if (m === undefined || m.spec.family !== "auth") {
+    return undefined;
+  }
+  const capability = m.spec.capability as { authAssurance?: AuthProviderAssuranceCapability };
+  return capability.authAssurance !== undefined
+    ? structuredClone(capability.authAssurance)
+    : undefined;
 }
 
 /**
@@ -1325,6 +1344,9 @@ export function toAdmissionCatalog(
       if (manifest?.spec.config_schema !== undefined) {
         info.config_schema = manifest.spec.config_schema;
       }
+      if (entity.authAssurance !== undefined) {
+        info.authAssurance = structuredClone(entity.authAssurance);
+      }
       return info;
     },
     launcherMountCapability(launcher: string): CatalogLauncherMountCapability | undefined {
@@ -1399,6 +1421,8 @@ export interface ProviderGraphResolvedProvider {
   available: boolean;
   availability: Availability;
   dependencies: IndexedDependencyBinding[];
+  /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
+  authAssurance?: AuthProviderAssuranceCapability;
   config: Record<string, unknown>;
   configLayers: ProviderGraphConfigLayer[];
 }
@@ -1411,6 +1435,8 @@ export interface ProviderGraphProviderFact {
   available: boolean;
   availability: Availability;
   dependencies: IndexedDependencyBinding[];
+  /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
+  authAssurance?: AuthProviderAssuranceCapability;
 }
 
 /** Resolved template facts in the graph projection. */
@@ -2144,6 +2170,7 @@ export function resolveProviderGraphProjection(
     }
     const dependencies = dependenciesById.get(provider.metadata.name) ?? [];
     const availability = availabilityById.get(provider.metadata.name) ?? "unavailable";
+    const authAssurance = authAssuranceCapabilityOf(provider);
     providerFacts.push({
       providerId: provider.metadata.name,
       runtimeFamily: provider.spec.family,
@@ -2151,6 +2178,7 @@ export function resolveProviderGraphProjection(
       available: availability === "available",
       availability,
       dependencies: structuredClone(dependencies),
+      ...(authAssurance !== undefined ? { authAssurance } : {}),
     });
   }
 
@@ -2166,6 +2194,7 @@ export function resolveProviderGraphProjection(
     const availability = availabilityById.get(providerId) ?? "unavailable";
     addDependencyDiagnostics(diagnostics, { providerId }, dependencies);
     const config = resolveProviderConfig(input, providerId, manifest, diagnostics);
+    const authAssurance = authAssuranceCapabilityOf(manifest);
     selectedProviders.push({
       family,
       runtimeFamily: PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY[family],
@@ -2174,6 +2203,7 @@ export function resolveProviderGraphProjection(
       available: availability === "available",
       availability,
       dependencies: structuredClone(dependencies),
+      ...(authAssurance !== undefined ? { authAssurance } : {}),
       config: config.config,
       configLayers: config.layers,
     });
@@ -2389,6 +2419,9 @@ function entityWithProviderGraph(
     availability,
     available: availability === "available",
     ...(graphProvider !== undefined ? { requires: graphProvider.dependencies } : {}),
+    ...(graphProvider?.authAssurance !== undefined
+      ? { authAssurance: structuredClone(graphProvider.authAssurance) }
+      : {}),
   };
 }
 
@@ -2534,6 +2567,9 @@ export function toAdmissionCatalogFromProviderGraphProjection(
       if (provider.manifest.spec.config_schema !== undefined) {
         info.config_schema = provider.manifest.spec.config_schema;
       }
+      if (provider.authAssurance !== undefined) {
+        info.authAssurance = structuredClone(provider.authAssurance);
+      }
       return info;
     },
     launcherMountCapability(launcher: string): CatalogLauncherMountCapability | undefined {
@@ -2552,6 +2588,8 @@ export interface ProviderGraphDoctorProvider {
   availability: Availability;
   dependencies: IndexedDependencyBinding[];
   diagnostics: CatalogDiagnostic[];
+  /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
+  authAssurance?: AuthProviderAssuranceCapability;
 }
 
 export interface ProviderGraphDoctorTemplate {
@@ -2604,6 +2642,9 @@ export function providerGraphDoctorReport(
         ...providerDiagnosticsFromGraphFact(provider, provider.providerId, []),
         ...graphDiagnostics,
       ],
+      ...(provider.authAssurance !== undefined
+        ? { authAssurance: structuredClone(provider.authAssurance) }
+        : {}),
     };
   });
   const templates = projection.templates.map((template) => {

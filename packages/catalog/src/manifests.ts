@@ -9,7 +9,12 @@
 // each with static dependency requirements. Dynamic DependencyBinding receipts are supplied by WPM
 // at runtime; manifests must never imply host software is already installed.
 
-import type { ConfigSchema } from "@gla/kernel";
+import type {
+  AuthAssuranceDiagnostic,
+  AuthAssuranceLevel,
+  AuthAssuranceProfile,
+  ConfigSchema,
+} from "@gla/kernel";
 
 /** The pluggable provider families (docs/02 §3) this slice seeds. */
 export type ProviderFamily =
@@ -69,6 +74,34 @@ export interface DependencyRequirement {
   connectionRefs?: string[];
   /** Deterministic bundle evidence for the dependency, if the dependency is WPM-managed. */
   bundle?: WpmBundleEvidence;
+}
+
+/** Provider-neutral proof fields an AuthProvider can emit for assurance enforcement. */
+export type AuthProviderAssuranceEvidenceField =
+  | "methodResolvable"
+  | "userPresent"
+  | "userVerified"
+  | "recipientBound"
+  | "replayResistant";
+
+/**
+ * AuthProvider assurance capability declared in provider manifests.
+ *
+ * This is static read-model metadata: it tells operators and graph/doctor surfaces which provider-neutral
+ * assurance policies the provider can satisfy and which common evidence fields are required. Runtime enforcement
+ * still uses the actual {@link AuthAssuranceEvidence} returned by the provider for each ceremony.
+ */
+export interface AuthProviderAssuranceCapability {
+  /** Operator-facing policies this provider can satisfy when runtime evidence proves the required facts. */
+  supportedPolicies: readonly AuthAssuranceProfile[];
+  /** Highest provider-neutral assurance tier this provider can emit. */
+  maxLevel: AuthAssuranceLevel;
+  /** Evidence fields required before this provider can satisfy phishing-resistant policy. */
+  requiredEvidence: readonly AuthProviderAssuranceEvidenceField[];
+  /** Safe floor for valid but missing, ambiguous, or provider-specific evidence. */
+  degradesTo?: AuthAssuranceLevel;
+  /** Redacted diagnostic reasons this provider may emit when evidence degrades or fails. */
+  diagnostics?: readonly AuthAssuranceDiagnostic[];
 }
 
 /** A reference to a connection fact. Sensitive facts must be secret refs, never literal values. */

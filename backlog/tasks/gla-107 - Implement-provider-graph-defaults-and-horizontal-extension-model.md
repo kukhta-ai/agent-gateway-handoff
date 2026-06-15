@@ -4,7 +4,7 @@ title: Implement provider graph defaults and horizontal extension model
 status: To Do
 assignee: []
 created_date: '2026-06-14 22:49'
-updated_date: '2026-06-14 22:51'
+updated_date: '2026-06-15 01:44'
 labels:
   - provider-graph
   - epic
@@ -39,6 +39,8 @@ Epic for making the provider graph direction implementable: default providers ar
 Planned from docs/architecture/provider-graph-defaults-and-extension-plan.md after independent architect adversarial review. BMAD create-epics-and-stories was loaded; its first step is user-confirmation gated, so this uses the project docs-driven fallback and Backlog.md CLI only.
 
 Epic parent is intentionally dependent on GLA-107.10 so backlog sequencing treats the child stories as implementation work and the parent as the final closure record.
+
+2026-06-15 UX clarification: the epic carries three separate UX design tasks, not one authority-mode thesis: GLA-107.11 covers developer/provider authoring, GLA-107.12 covers operator install/update, and GLA-107.13 covers runtime discovery/consumption. The same physical agent may perform all three on an operator VPS, but the design boundary is the UX journey and handoff, with write/read restrictions treated as constraints inside each journey.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

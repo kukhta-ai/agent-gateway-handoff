@@ -289,6 +289,10 @@ authorization semantics, cannot be overridden by an `AssemblySpec`.
 Selecting an `AuthProvider` changes the mechanism, not gateway semantics. Each auth provider declares what
 provider-neutral `AuthAssuranceEvidence` it can produce. Its adapter maps native claims, methods, stages, WebAuthn
 flags, OIDC fields, or IdP-specific proof into the common evidence shape from `components/identity-and-auth.md`.
+The manifest/read-model contract for this is `capability.authAssurance`: `supportedPolicies`, `maxLevel`,
+`requiredEvidence`, optional `degradesTo`, and stable redacted `diagnostics`. This is static capability metadata for
+catalog, doctor, authoring, and install/update surfaces. Runtime authorization still depends on the actual neutral
+assurance evidence returned by the selected provider for the ceremony.
 
 The selected `AuthProvider` must be compatible with the selected `AuthAssurancePolicy`. Unknown, missing, ambiguous,
 or provider-specific evidence degrades to the lowest safe tier or returns `ok:false`; it never silently maps upward

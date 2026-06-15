@@ -41,7 +41,16 @@ const AUTH_WEBAUTHN: ProviderManifest = {
   metadata: { name: "auth-webauthn", version: "0.1.0" },
   spec: {
     family: "auth",
-    capability: { summary: "WebAuthn auth provider" },
+    capability: {
+      summary: "WebAuthn auth provider",
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "none",
+        diagnostics: ["missing-user-verification"],
+      },
+    },
     config_schema: {
       rpID: { type: "string", required: false, default: "localhost", min: 1 },
     },
@@ -167,6 +176,18 @@ describe("provider graph projection", () => {
       (selected) => selected.providerId === "auth-webauthn",
     );
     expect(auth?.config).toEqual({ rpID: "operator.example" });
+    expect(auth?.authAssurance).toMatchObject({
+      supportedPolicies: ["phishing-resistant", "password-permitted"],
+      maxLevel: "phishing-resistant",
+      requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+      degradesTo: "none",
+    });
+    expect(
+      result.projection.providerFacts.find((provider) => provider.providerId === "auth-webauthn")
+        ?.authAssurance,
+    ).toMatchObject({
+      supportedPolicies: ["phishing-resistant", "password-permitted"],
+    });
     expect(result.projection.templates[0]).toMatchObject({
       templateId: "browser-handoff",
       available: true,
@@ -328,6 +349,17 @@ describe("provider graph projection", () => {
     expect(graphAdmission.provider("launcher-process")).toMatchObject(
       classicAdmission.provider("launcher-process") ?? {},
     );
+    expect(classicAdmission.provider("auth-webauthn")?.authAssurance).toMatchObject({
+      maxLevel: "phishing-resistant",
+      requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+    });
+    expect(graphAdmission.provider("auth-webauthn")?.authAssurance).toMatchObject({
+      maxLevel: "phishing-resistant",
+      requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+    });
+    expect(catalog.show("auth-webauthn")?.authAssurance).toMatchObject({
+      supportedPolicies: ["phishing-resistant", "password-permitted"],
+    });
     expect(graphAdmission.provider("user-done")).toMatchObject({
       name: "user-done",
       available: true,
@@ -342,6 +374,14 @@ describe("provider graph projection", () => {
           availability: "unavailable",
         }),
       ],
+    });
+    expect(
+      providerGraphDoctorReport(graph).providers.find(
+        (provider) => provider.providerId === "auth-webauthn",
+      )?.authAssurance,
+    ).toMatchObject({
+      supportedPolicies: ["phishing-resistant", "password-permitted"],
+      maxLevel: "phishing-resistant",
     });
   });
 

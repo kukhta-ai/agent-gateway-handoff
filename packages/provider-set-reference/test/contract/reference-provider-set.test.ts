@@ -5,6 +5,7 @@ import {
   referenceWpmDependencyBindings,
   resolveProviderGraphProjection,
   toAdmissionCatalog,
+  toAdmissionCatalogFromProviderGraphProjection,
   validateProviderProfileInputs,
 } from "@gla/catalog";
 import type {
@@ -34,6 +35,8 @@ import {
 } from "@gla/provider-host";
 import { describe, expect, it } from "vitest";
 import {
+  AUTH_AUTHENTIK_PROVIDER_ID,
+  AUTH_WEBAUTHN_PROVIDER_ID,
   REFERENCE_PROFILE_HARDENED_IDP_ID,
   REFERENCE_PROFILE_LOCAL_DEV_ID,
   REFERENCE_PROFILE_SCENARIO_01_ID,
@@ -336,6 +339,75 @@ describe("referenceProviderModules", () => {
     expect(content.templates.map((template) => template.metadata.name)).toEqual([
       "browser-handoff",
     ]);
+  });
+
+  it("exposes provider-neutral auth assurance capability through reference graph read models", () => {
+    const host = createReferenceProviderHost();
+    const content = referenceProviderStoreContent(host);
+    const webauthnManifest = content.providers.find(
+      (provider) => provider.metadata.name === AUTH_WEBAUTHN_PROVIDER_ID,
+    );
+    const authentikManifest = content.providers.find(
+      (provider) => provider.metadata.name === AUTH_AUTHENTIK_PROVIDER_ID,
+    );
+
+    expect(webauthnManifest?.spec.capability).toMatchObject({
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "none",
+      },
+    });
+    expect(authentikManifest?.spec.capability).toMatchObject({
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "password",
+        diagnostics: expect.arrayContaining([
+          "missing-user-verification",
+          "method-unresolved",
+          "ambiguous-provider-evidence",
+          "password-grade-proof",
+        ]),
+      },
+    });
+
+    const graph = resolveProviderGraphProjection({
+      providerSet: {
+        id: "@gla/provider-set-reference",
+        providers: content.providers,
+        templates: content.templates,
+      },
+      baseProfile: referenceProviderProfile(REFERENCE_PROFILE_SINGLE_OPERATOR_ID).manifest,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      configValidationMode: "factory",
+    });
+    const catalog = new CatalogService({
+      content,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      providerGraph: graph,
+    });
+
+    expect(catalog.show(AUTH_WEBAUTHN_PROVIDER_ID)?.authAssurance).toMatchObject({
+      maxLevel: "phishing-resistant",
+      requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+    });
+    expect(
+      toAdmissionCatalogFromProviderGraphProjection(graph).provider(AUTH_WEBAUTHN_PROVIDER_ID)
+        ?.authAssurance,
+    ).toMatchObject({
+      supportedPolicies: ["phishing-resistant", "password-permitted"],
+    });
+    expect(
+      providerGraphDoctorReport(graph).providers.find(
+        (provider) => provider.providerId === AUTH_WEBAUTHN_PROVIDER_ID,
+      )?.authAssurance,
+    ).toMatchObject({
+      maxLevel: "phishing-resistant",
+      degradesTo: "none",
+    });
   });
 
   it("exposes named reference profiles with explicit posture selections and template defaults", () => {
