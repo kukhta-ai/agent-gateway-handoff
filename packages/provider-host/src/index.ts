@@ -72,6 +72,7 @@ export type ProviderHostDiagnosticCode =
   | "provider.factory_missing"
   | "provider.service_missing"
   | "provider.state_unavailable"
+  | "provider.state_namespace"
   | "provider.async_unsupported";
 
 /** A redacted, stable diagnostic suitable for operator and agent-facing surfaces. */
@@ -83,9 +84,62 @@ export interface ProviderHostDiagnostic {
   detail?: Record<string, unknown>;
 }
 
+/** Provider-owned state sensitivity classification used in diagnostics and recovery metadata. */
+export type ProviderStateSensitivity =
+  | "secret"
+  | "sensitive"
+  | "critical-operational"
+  | "non-sensitive";
+
+/** Provider-owned state migration posture; unknown versions always fail closed until an explicit path exists. */
+export type ProviderStateMigrationBehavior = "fail-closed" | "manual";
+
+/** Provider-owned durable-state slot declaration. */
+export interface ProviderStateSlotSchema {
+  /** Legacy boolean retained for provider declarations and catalog-friendly summaries. */
+  sensitive?: boolean;
+  /** Explicit sensitivity classification for this slot; defaults from `sensitive` or the namespace. */
+  sensitivity?: ProviderStateSensitivity;
+  /** Non-secret operator/agent-facing summary of the slot. */
+  summary?: string;
+}
+
 /** Provider-owned durable-state slot declarations. */
 export interface ProviderStateSchema {
-  slots: Record<string, { sensitive?: boolean; summary?: string }>;
+  /** Provider-owned state schema version. Version 1 is the only supported version today. */
+  schemaVersion?: number;
+  /** Namespace-level sensitivity classification. Defaults to `sensitive`. */
+  sensitivity?: ProviderStateSensitivity;
+  /** Migration posture for this schema version. Defaults to `fail-closed`. */
+  migration?: ProviderStateMigrationBehavior;
+  /** Slot declarations keyed by provider-owned slot name. */
+  slots: Record<string, ProviderStateSlotSchema>;
+}
+
+/** Resolved provider-owned durable-state schema after host defaults and validation. */
+export interface ResolvedProviderStateSchema {
+  /** Provider-owned state schema version. Version 1 is the only supported version today. */
+  schemaVersion: number;
+  /** Namespace-level sensitivity classification. */
+  sensitivity: ProviderStateSensitivity;
+  /** Migration posture for this schema version. */
+  migration: ProviderStateMigrationBehavior;
+  /** Slot declarations keyed by provider-owned slot name. */
+  slots: Record<string, ProviderStateSlotSchema & { sensitivity: ProviderStateSensitivity }>;
+}
+
+/** Metadata attached to a provider-owned state namespace. */
+export interface ProviderStateNamespaceMetadata {
+  /** Provider id that owns this namespace. */
+  readonly providerId: ProviderId;
+  /** Provider-owned state schema version used by this namespace. */
+  readonly schemaVersion: number;
+  /** Namespace-level sensitivity classification. */
+  readonly sensitivity: ProviderStateSensitivity;
+  /** Migration posture for this namespace. */
+  readonly migration: ProviderStateMigrationBehavior;
+  /** Redacted diagnostics that describe namespace resolution without stored values. */
+  readonly diagnostics: readonly ProviderHostDiagnostic[];
 }
 
 /** Minimal key-value store shape exposed inside a provider-owned namespace. */
@@ -96,13 +150,16 @@ export interface ProviderKvStore<T> {
 }
 
 /** Opaque provider state namespace. App code names only provider id + slot, never provider-owned types. */
-export interface ProviderStateNamespace {
+export interface ProviderStateNamespace extends ProviderStateNamespaceMetadata {
   kv<T>(slot: string): ProviderKvStore<T>;
 }
 
 /** Root state backend used by the host to allocate one namespace per provider id. */
 export interface ProviderStateRoot {
-  namespace(providerId: ProviderId): ProviderStateNamespace;
+  namespace(
+    providerId: ProviderId,
+    metadata?: ProviderStateNamespaceMetadata,
+  ): ProviderStateNamespace;
 }
 
 /** Default in-memory provider state root used by tests and non-persistent host instances. */
@@ -110,10 +167,13 @@ export class InMemoryProviderStateRoot implements ProviderStateRoot {
   private readonly namespaces = new Map<ProviderId, InMemoryProviderStateNamespace>();
 
   /** Return the provider-owned namespace for the supplied provider id. */
-  namespace(providerId: ProviderId): ProviderStateNamespace {
+  namespace(
+    providerId: ProviderId,
+    metadata: ProviderStateNamespaceMetadata = defaultStateNamespaceMetadata(providerId),
+  ): ProviderStateNamespace {
     let namespace = this.namespaces.get(providerId);
     if (namespace === undefined) {
-      namespace = new InMemoryProviderStateNamespace(providerId);
+      namespace = new InMemoryProviderStateNamespace(metadata);
       this.namespaces.set(providerId, namespace);
     }
     return namespace;
@@ -123,9 +183,17 @@ export class InMemoryProviderStateRoot implements ProviderStateRoot {
 class InMemoryProviderStateNamespace implements ProviderStateNamespace {
   private readonly slots = new Map<string, Map<string, unknown>>();
   readonly providerId: ProviderId;
+  readonly schemaVersion: number;
+  readonly sensitivity: ProviderStateSensitivity;
+  readonly migration: ProviderStateMigrationBehavior;
+  readonly diagnostics: readonly ProviderHostDiagnostic[];
 
-  constructor(providerId: ProviderId) {
-    this.providerId = providerId;
+  constructor(metadata: ProviderStateNamespaceMetadata) {
+    this.providerId = metadata.providerId;
+    this.schemaVersion = metadata.schemaVersion;
+    this.sensitivity = metadata.sensitivity;
+    this.migration = metadata.migration;
+    this.diagnostics = metadata.diagnostics.map((diagnostic) => structuredClone(diagnostic));
   }
 
   kv<T>(slot: string): ProviderKvStore<T> {
@@ -259,7 +327,7 @@ export interface ProviderDescriptor {
   readonly providerId: ProviderId;
   readonly moduleId: string;
   readonly manifest: ProviderManifest;
-  readonly stateSchema?: ProviderStateSchema;
+  readonly stateSchema?: ResolvedProviderStateSchema;
 }
 
 /** Registration surface exposed only to trusted provider modules. */
@@ -332,7 +400,7 @@ function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
 interface ProviderRegistrationStaging {
   factories: Map<RuntimeProviderFamily, Map<ProviderId, ProviderFactory<unknown>>>;
   probes: Map<ProviderId, ProviderProbe>;
-  stateSchemas: Map<ProviderId, ProviderStateSchema>;
+  stateSchemas: Map<ProviderId, ResolvedProviderStateSchema>;
 }
 
 function registrationStaging(): ProviderRegistrationStaging {
@@ -351,6 +419,115 @@ function redactingDiagnostics(sink: ProviderDiagnostics): ProviderDiagnostics {
   return {
     emit: (diagnostic) => sink.emit(redactDiagnostic(diagnostic)),
   };
+}
+
+const SUPPORTED_PROVIDER_STATE_SCHEMA_VERSION = 1;
+const PROVIDER_STATE_SENSITIVITIES: ReadonlySet<ProviderStateSensitivity> = new Set([
+  "secret",
+  "sensitive",
+  "critical-operational",
+  "non-sensitive",
+]);
+const PROVIDER_STATE_MIGRATIONS: ReadonlySet<ProviderStateMigrationBehavior> = new Set([
+  "fail-closed",
+  "manual",
+]);
+
+function defaultStateNamespaceMetadata(
+  providerId: ProviderId,
+  schema: ResolvedProviderStateSchema = {
+    schemaVersion: SUPPORTED_PROVIDER_STATE_SCHEMA_VERSION,
+    sensitivity: "sensitive",
+    migration: "fail-closed",
+    slots: {},
+  },
+): ProviderStateNamespaceMetadata {
+  return {
+    providerId,
+    schemaVersion: schema.schemaVersion,
+    sensitivity: schema.sensitivity,
+    migration: schema.migration,
+    diagnostics: [
+      {
+        code: "provider.state_namespace",
+        providerId,
+        message: `provider "${providerId}" state namespace resolved`,
+        detail: {
+          schemaVersion: schema.schemaVersion,
+          sensitivity: schema.sensitivity,
+          migration: schema.migration,
+          slots: Object.keys(schema.slots).sort(),
+        },
+      },
+    ],
+  };
+}
+
+function normalizeProviderStateSchema(
+  providerId: ProviderId,
+  family: RuntimeProviderFamily,
+  schema: ProviderStateSchema,
+): ResolvedProviderStateSchema {
+  const schemaVersion = schema.schemaVersion ?? SUPPORTED_PROVIDER_STATE_SCHEMA_VERSION;
+  if (
+    !Number.isInteger(schemaVersion) ||
+    schemaVersion < 1 ||
+    schemaVersion !== SUPPORTED_PROVIDER_STATE_SCHEMA_VERSION
+  ) {
+    throwDiagnostic({
+      code: "provider.schema_invalid",
+      providerId,
+      family,
+      message: `provider "${providerId}" declares unsupported state schema version "${schemaVersion}"`,
+      detail: { schemaVersion, supportedSchemaVersions: [SUPPORTED_PROVIDER_STATE_SCHEMA_VERSION] },
+    });
+  }
+  const sensitivity = schema.sensitivity ?? "sensitive";
+  if (!PROVIDER_STATE_SENSITIVITIES.has(sensitivity)) {
+    throwDiagnostic({
+      code: "provider.schema_invalid",
+      providerId,
+      family,
+      message: `provider "${providerId}" declares invalid state sensitivity "${sensitivity}"`,
+      detail: { sensitivity },
+    });
+  }
+  const migration = schema.migration ?? "fail-closed";
+  if (!PROVIDER_STATE_MIGRATIONS.has(migration)) {
+    throwDiagnostic({
+      code: "provider.schema_invalid",
+      providerId,
+      family,
+      message: `provider "${providerId}" declares invalid state migration "${migration}"`,
+      detail: { migration },
+    });
+  }
+  const slots: ResolvedProviderStateSchema["slots"] = {};
+  for (const [slot, declaration] of Object.entries(schema.slots)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$/.test(slot)) {
+      throwDiagnostic({
+        code: "provider.schema_invalid",
+        providerId,
+        family,
+        message: `provider "${providerId}" declares invalid state slot "${slot}"`,
+        detail: { slot },
+      });
+    }
+    const slotSensitivity =
+      declaration.sensitivity ??
+      (declaration.sensitive === false ? "non-sensitive" : (schema.sensitivity ?? "sensitive"));
+    if (!PROVIDER_STATE_SENSITIVITIES.has(slotSensitivity)) {
+      throwDiagnostic({
+        code: "provider.schema_invalid",
+        providerId,
+        family,
+        message: `provider "${providerId}" declares invalid state slot sensitivity "${slotSensitivity}"`,
+        detail: { slot, sensitivity: slotSensitivity },
+      });
+    }
+    slots[slot] = { ...declaration, sensitivity: slotSensitivity };
+  }
+  return { schemaVersion, sensitivity, migration, slots };
 }
 
 function toGlaError(diagnostic: ProviderHostDiagnostic): GlaError {
@@ -460,7 +637,7 @@ export class ProviderHost {
   private readonly moduleIds = new Map<ProviderId, string>();
   private readonly factories = factoryMap();
   private readonly probes = new Map<ProviderId, ProviderProbe>();
-  private readonly stateSchemas = new Map<ProviderId, ProviderStateSchema>();
+  private readonly stateSchemas = new Map<ProviderId, ResolvedProviderStateSchema>();
   private readonly diagnosticsLog: ProviderHostDiagnostic[] = [];
   private readonly stateRoot: ProviderStateRoot;
 
@@ -638,7 +815,7 @@ export class ProviderHost {
   }
 
   /** Provider-owned state schema, if the provider declared one. */
-  providerStateSchema(id: ProviderId): ProviderStateSchema | undefined {
+  providerStateSchema(id: ProviderId): ResolvedProviderStateSchema | undefined {
     const schema = this.stateSchemas.get(id);
     return schema === undefined ? undefined : structuredClone(schema);
   }
@@ -819,7 +996,7 @@ export class ProviderHost {
     stateRoot: ProviderStateRoot,
   ): ProviderStateNamespace {
     try {
-      return stateRoot.namespace(id);
+      return stateRoot.namespace(id, defaultStateNamespaceMetadata(id, this.stateSchemas.get(id)));
     } catch (error) {
       this.fail({
         code: "provider.state_unavailable",
@@ -893,7 +1070,7 @@ export class ProviderHost {
               message: `provider "${id}" state schema is already registered`,
             });
           }
-          staged.stateSchemas.set(id, structuredClone(schema));
+          staged.stateSchemas.set(id, normalizeProviderStateSchema(id, moduleFamily, schema));
         }),
     };
   }

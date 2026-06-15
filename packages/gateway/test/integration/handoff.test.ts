@@ -10,7 +10,7 @@
 //     flow both ways; an un-authorized/expired/revoked grant upgrade is refused (resolves to nothing); reachable
 //     ONLY within an open window (unmount → unreachable); revoke → the live WS is FORCE-CLOSED and unreachable.
 
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { type IncomingMessage, type Server, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
@@ -495,24 +495,129 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     await writeFile(join(outside, "leak.js"), "export default 'outside root';\n");
     await symlink(join(outside, "leak.js"), join(root, "leak.js"));
     const { base, close } = await bootHandoffGateway(new StubSessionGrants(), new StubStepUp(), {
-      entrypointClientAssets: [{ ref: "test-viewer", root }],
+      entrypointClientAssets: [
+        {
+          providerId: "fake-entrypoint",
+          ref: "fake-entrypoint.test-viewer",
+          root,
+          readOnly: true,
+        },
+      ],
     });
     closers.push(close);
 
-    const ok = await fetch(`${base}/handoff/client-assets/test-viewer/viewer.js`);
+    const ok = await fetch(`${base}/handoff/client-assets/fake-entrypoint.test-viewer/viewer.js`);
     expect(ok.status).toBe(200);
     expect(ok.headers.get("content-type")).toMatch(/text\/javascript/);
     expect(ok.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await ok.text()).toContain("TestViewer");
 
-    const traversal = await fetch(`${base}/handoff/client-assets/test-viewer/%2e%2e/package.json`);
+    const traversal = await fetch(
+      `${base}/handoff/client-assets/fake-entrypoint.test-viewer/%2e%2e/package.json`,
+    );
     expect(traversal.status).toBe(404);
-    const symlinkEscape = await fetch(`${base}/handoff/client-assets/test-viewer/leak.js`);
+    const symlinkEscape = await fetch(
+      `${base}/handoff/client-assets/fake-entrypoint.test-viewer/leak.js`,
+    );
     expect(symlinkEscape.status).toBe(404);
     const missingRef = await fetch(`${base}/handoff/client-assets/unknown/viewer.js`);
     expect(missingRef.status).toBe(404);
     expect(missingRef.headers.get("cache-control")).toBe("no-store");
     expect(missingRef.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("rejects unsafe provider client asset declarations before serving public traffic", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gla-client-assets-"));
+    closers.push(() => rm(root, { recursive: true, force: true }));
+    await writeFile(join(root, "viewer.js"), "export default class TestViewer {}\n");
+
+    const mount = {
+      providerId: "fake-entrypoint",
+      ref: "fake-entrypoint.viewer",
+      root,
+      readOnly: true as const,
+    };
+
+    expect(
+      () =>
+        new AccessGateway({
+          sessionGrants: new StubSessionGrants(),
+          stepUp: new StubStepUp(),
+          entrypointClientAssets: [mount, mount],
+        }),
+    ).toThrow(/duplicate provider client asset ref/);
+    expect(
+      () =>
+        new AccessGateway({
+          sessionGrants: new StubSessionGrants(),
+          stepUp: new StubStepUp(),
+          entrypointClientAssets: [{ ...mount, ref: "viewer" }],
+        }),
+    ).toThrow(/namespaced/);
+    expect(
+      () =>
+        new AccessGateway({
+          sessionGrants: new StubSessionGrants(),
+          stepUp: new StubStepUp(),
+          entrypointClientAssets: [{ ...mount, ref: "fake-entrypoint.auth" }],
+        }),
+    ).toThrow(/reserved gateway surface/);
+    expect(
+      () =>
+        new AccessGateway({
+          sessionGrants: new StubSessionGrants(),
+          stepUp: new StubStepUp(),
+          entrypointClientAssets: [{ ...mount, readOnly: false as never }],
+        }),
+    ).toThrow(/mutable/);
+    await chmod(root, 0o777);
+    expect(
+      () =>
+        new AccessGateway({
+          sessionGrants: new StubSessionGrants(),
+          stepUp: new StubStepUp(),
+          entrypointClientAssets: [mount],
+        }),
+    ).toThrow(/group\/world writable/);
+  });
+
+  it("rejects reviewed provider client assets that contain secret-bearing inputs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gla-client-assets-secret-"));
+    closers.push(() => rm(root, { recursive: true, force: true }));
+    await writeFile(
+      join(root, "viewer.js"),
+      'export const runtimeConfig = { grant: "grant-canary-1234567890" };\n',
+    );
+    const { base, close } = await bootHandoffGateway(new StubSessionGrants(), new StubStepUp(), {
+      entrypointClientAssets: [
+        {
+          providerId: "fake-entrypoint",
+          ref: "fake-entrypoint.secret-viewer",
+          root,
+          readOnly: true,
+        },
+      ],
+    });
+    closers.push(close);
+
+    const res = await fetch(
+      `${base}/handoff/client-assets/fake-entrypoint.secret-viewer/viewer.js`,
+    );
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("provider client asset rejected");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+
+    await writeFile(
+      join(root, "config.json"),
+      JSON.stringify({ grant: "grant-canary-1234567890", runtimeConfig: { port: 3000 } }),
+    );
+    const json = await fetch(
+      `${base}/handoff/client-assets/fake-entrypoint.secret-viewer/config.json`,
+    );
+    expect(json.status).toBe(403);
+    expect(await json.text()).toContain("provider client asset rejected");
   });
 
   it("rejects malformed reverse-proxy transport at mount without exposing a public route", async () => {

@@ -130,7 +130,7 @@ class FakeLauncher implements LauncherPort {
           resourceId: "fake-human-resource",
           transport: "http",
           address: "http://127.0.0.1/fake",
-          client: { kind: "fake-client", ref: "fake-client" },
+          client: { kind: "fake-client", ref: "fake-entrypoint.fake-client" },
         },
       ],
     });
@@ -166,7 +166,7 @@ class FakeEntrypoint implements HumanEntrypointPort {
     return {
       resourceId: "fake-human-resource",
       provider: "fake-entrypoint",
-      client: { kind: "fake-client", ref: "fake-client" },
+      client: { kind: "fake-client", ref: "fake-entrypoint.fake-client" },
       transport: { kind: "reverse-proxy", protocol: "http", upstream: "http://127.0.0.1/fake" },
     };
   }
@@ -255,7 +255,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         family: "entrypoint",
         summary: "fake entrypoint",
         capability: {
-          clientAssets: [{ ref: "fake-client", kind: "fake-client" }],
+          clientAssets: [{ ref: "fake-entrypoint.fake-client", kind: "fake-client" }],
         },
       }),
       "@fake/entrypoint",
@@ -345,7 +345,14 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
     },
     entrypointClientAssets(_host, providerIds) {
       records.assetProviderIds = [...providerIds];
-      return [{ ref: "fake-client", root: process.cwd() }];
+      return [
+        {
+          providerId: "fake-entrypoint",
+          ref: "fake-entrypoint.fake-client",
+          root: process.cwd(),
+          readOnly: true,
+        },
+      ];
     },
     templateProbes: { "browser-handoff": () => "available" },
   };

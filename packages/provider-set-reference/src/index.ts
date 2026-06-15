@@ -667,6 +667,9 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
     ctx.registerStateSchema(id, {
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
       slots: {
         credentials: { sensitive: true, summary: "durable WebAuthn credential store" },
         challenges: { sensitive: true, summary: "transient WebAuthn challenge store" },
@@ -689,6 +692,9 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
     ctx.registerStateSchema(id, {
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
       slots: {
         subjects: { sensitive: true, summary: "durable authentik subject bindings" },
         attempts: { sensitive: true, summary: "transient OIDC attempts" },
@@ -792,6 +798,9 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
     ctx.registerStateSchema(id, {
+      schemaVersion: 1,
+      sensitivity: "secret",
+      migration: "fail-closed",
       slots: {
         refs: { sensitive: true, summary: "opaque secret refs mapped to raw agent-blind values" },
       },

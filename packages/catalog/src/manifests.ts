@@ -409,7 +409,7 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         summary: "noVNC live-view human entrypoint (agent-blind input path)",
         client: {
           kind: "rfb-web-client",
-          ref: "novnc",
+          ref: "entrypoint-novnc.novnc",
           bootstrap: {
             module: "core/rfb.js",
             scaleViewport: true,
@@ -419,7 +419,7 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         },
         clientAssets: [
           {
-            ref: "novnc",
+            ref: "entrypoint-novnc.novnc",
             source: "package",
             package: "@novnc/novnc",
             env: "GLA_NOVNC_WEB_ROOT",

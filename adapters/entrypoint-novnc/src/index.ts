@@ -31,16 +31,20 @@ export const ENTRYPOINT_NOVNC_MODULE = "@gla/entrypoint-novnc" as const;
 /** Ring classification from the architecture baseline (informational). */
 export const ENTRYPOINT_NOVNC_RING = "adapter" as const;
 /** Provider-owned asset reference the gateway can mount under its generic client-asset host. */
-export const NOVNC_CLIENT_ASSET_REF = "novnc" as const;
+export const NOVNC_CLIENT_ASSET_REF = "entrypoint-novnc.novnc" as const;
 /** Browser-client kind understood by the gateway handoff page as an RFB-compatible web client. */
 export const RFB_WEB_CLIENT_KIND = "rfb-web-client" as const;
 
 /** Generic static-client asset mount consumed structurally by the gateway. */
 export interface EntrypointClientAssetMount {
+  /** Runtime provider id that owns the browser assets and namespaces the ref. */
+  readonly providerId: string;
   /** Provider-owned asset reference, used only as a same-origin URL segment. */
   readonly ref: string;
   /** Local read-only directory containing browser assets for this client. */
   readonly root: string;
+  /** Reviewed declaration that the asset root is immutable/read-only during gateway serving. */
+  readonly readOnly: true;
   /** Cache policy for these assets. noVNC docs recommend revalidation during upgrades. */
   readonly cacheControl?: string;
 }
@@ -75,8 +79,10 @@ export function novncClientAssetMounts(
   return [...new Set(roots)]
     .filter((root) => existsSync(root))
     .map((root) => ({
+      providerId: "entrypoint-novnc",
       ref: NOVNC_CLIENT_ASSET_REF,
       root,
+      readOnly: true as const,
       cacheControl: "no-cache",
     }));
 }
@@ -134,7 +140,9 @@ export class EntrypointNovncAdapter implements HumanEntrypointPort {
       resourceId: endpoint.resourceId,
       provider: endpoint.provider,
       client:
-        endpoint.client?.kind === RFB_WEB_CLIENT_KIND ? endpoint.client : novncClientDescriptor(),
+        endpoint.client?.kind === RFB_WEB_CLIENT_KIND
+          ? { ...endpoint.client, ref: NOVNC_CLIENT_ASSET_REF }
+          : novncClientDescriptor(),
       transport: { kind: "reverse-proxy", protocol: "websocket", upstream: novnc },
     };
   }
