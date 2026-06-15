@@ -19,6 +19,7 @@ import {
   isRedactionOrTemplatePlaceholder,
   redactOperatorEgress,
   redactOperatorText,
+  validateConfig,
   validateSchemaShape,
 } from "@gla/kernel";
 import {
@@ -43,6 +44,14 @@ import {
   type TemplateManifest,
   type WpmBundleEvidence,
 } from "./manifests.js";
+import {
+  PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY,
+  type ProviderProfileFamilyId,
+  type ProviderProfileManifest,
+  type ProviderProfileOverlayManifest,
+  type ProviderProfileSelection,
+  type TemplatePackageManifest,
+} from "./provider-profile.js";
 
 export * from "./manifests.js";
 export * from "./provider-profile.js";
@@ -1291,4 +1300,846 @@ export function toAdmissionCatalog(
       return mountCapabilityOf(providersByName.get(launcher));
     },
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deterministic provider graph projection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Stable diagnostic codes produced by deterministic provider graph projection. */
+export type ProviderGraphDiagnosticCode =
+  | "graph.unknown_family"
+  | "graph.unknown_provider"
+  | "graph.family_mismatch"
+  | "graph.duplicate_provider_version"
+  | "graph.overlay_extends_unknown"
+  | "graph.overlay_cycle"
+  | "graph.unresolved_relation"
+  | "graph.dependency_unavailable"
+  | "graph.compatibility_ambiguous"
+  | "graph.config_invalid";
+
+/** Redacted deterministic graph diagnostic safe for install/update, catalog, and admission surfaces. */
+export interface ProviderGraphDiagnostic {
+  code: ProviderGraphDiagnosticCode;
+  message: string;
+  path?: string;
+  profile?: string;
+  providerId?: string;
+  family?: string;
+  template?: string;
+  dependency?: string;
+  detail?: Record<string, unknown>;
+}
+
+/** Provider-set manifest inputs consumed by deterministic graph projection. */
+export interface ProviderGraphProviderSetInput {
+  /** Stable provider-set identity for diagnostics. */
+  id?: string;
+  /** Trusted provider manifests registered by the selected provider set. */
+  providers?: readonly ProviderManifest[];
+  /** Trusted template manifests shipped by the selected provider set. */
+  templates?: readonly TemplateManifest[];
+  /** Provider-set-level default config, lower precedence than profile config. */
+  defaultConfig?: Record<string, Record<string, unknown>>;
+}
+
+/** One config layer that participated in provider config precedence. */
+export interface ProviderGraphConfigLayer {
+  source:
+    | "provider-schema-defaults"
+    | "provider-set-default-config"
+    | "base-profile-config"
+    | "overlay-config"
+    | "template-defaults"
+    | "runtime-assembly-params";
+  providerId: string;
+  values: Record<string, unknown>;
+  profile?: string;
+  templatePackage?: string;
+}
+
+/** Resolved selected provider facts after profile/overlay/default/config precedence. */
+export interface ProviderGraphResolvedProvider {
+  family: ProviderProfileFamilyId;
+  runtimeFamily: RuntimeProfileFamilyName;
+  providerId: string;
+  manifest: ProviderManifest;
+  available: boolean;
+  availability: Availability;
+  dependencies: IndexedDependencyBinding[];
+  config: Record<string, unknown>;
+  configLayers: ProviderGraphConfigLayer[];
+}
+
+/** Resolved template facts in the graph projection. */
+export interface ProviderGraphResolvedTemplate {
+  templateId: string;
+  manifest: TemplateManifest;
+  available: boolean;
+  availability: Availability;
+  dependencies: IndexedDependencyBinding[];
+  requiredParts: Record<string, string>;
+  compatibleProviders?: Record<string, string[]>;
+}
+
+/** Resolved deterministic graph projection used by catalog, doctor, provider-host boot, and admission. */
+export interface ProviderGraphProjection {
+  providerSetId?: string;
+  profileId: string;
+  selectedProviders: Partial<Record<ProviderProfileFamilyId, string>>;
+  providers: ProviderGraphResolvedProvider[];
+  templates: ProviderGraphResolvedTemplate[];
+}
+
+/** Inputs for deterministic provider graph projection. */
+export interface ResolveProviderGraphProjectionInput {
+  providerSet?: ProviderGraphProviderSetInput;
+  providerManifests?: readonly ProviderManifest[];
+  templatePackages?: readonly TemplatePackageManifest[];
+  templates?: readonly TemplateManifest[];
+  baseProfile: ProviderProfileManifest;
+  overlays?: readonly ProviderProfileOverlayManifest[];
+  dependencyBindings?: DependencyBindingSource;
+  probes?: ProbeRegistry;
+  /** Part roles whose family contract requires explicit compatibility evidence. */
+  compatibilityRequiredParts?: readonly string[];
+  /** Runtime part params keyed by selected provider id; highest config precedence layer. */
+  runtimeAssemblyParams?: Record<string, Record<string, unknown>>;
+}
+
+/** Provider graph projection result; false means downstream boot/admission must reject it. */
+export type ProviderGraphProjectionResult =
+  | { ok: true; projection: ProviderGraphProjection; diagnostics: [] }
+  | {
+      ok: false;
+      projection: ProviderGraphProjection;
+      diagnostics: ProviderGraphDiagnostic[];
+    };
+
+type RuntimeProfileFamilyName =
+  (typeof PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY)[ProviderProfileFamilyId];
+
+interface ProfileGraphDoc {
+  name: string;
+  kind: "ProviderProfile" | "ProviderProfileOverlay";
+  spec: ProviderProfileManifest["spec"] | ProviderProfileOverlayManifest["spec"];
+}
+
+const PROFILE_FAMILY_SET = new Set<string>(Object.keys(PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY));
+const RELATION_KEY_TO_FAMILY: Record<string, ProviderFamily> = {
+  auth: "auth",
+  auths: "auth",
+  launchers: "launcher",
+  launcher: "launcher",
+  entrypoints: "entrypoint",
+  entrypoint: "entrypoint",
+  connectors: "connector",
+  connector: "connector",
+  workspaces: "workspace",
+  workspace: "workspace",
+  detectors: "detector",
+  detector: "detector",
+  channels: "channel",
+  channel: "channel",
+  secretStores: "secret-store",
+  "secret-stores": "secret-store",
+  "secret-store": "secret-store",
+};
+
+function graphAddDiagnostic(
+  diagnostics: ProviderGraphDiagnostic[],
+  diagnostic: ProviderGraphDiagnostic,
+): void {
+  diagnostics.push(redactOperatorEgress(diagnostic) as ProviderGraphDiagnostic);
+}
+
+function graphSelectionProviderId(
+  selection: ProviderProfileSelection | undefined,
+): string | undefined {
+  if (typeof selection === "string") {
+    return selection.length > 0 ? selection : undefined;
+  }
+  if (isRecord(selection) && typeof selection.providerId === "string") {
+    return selection.providerId.length > 0 ? selection.providerId : undefined;
+  }
+  return undefined;
+}
+
+function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return structuredClone(value) as Record<string, unknown>;
+}
+
+function mergeRecords(
+  base: Record<string, unknown>,
+  overlay: Record<string, unknown>,
+): Record<string, unknown> {
+  const out = cloneRecord(base);
+  for (const [key, value] of Object.entries(overlay)) {
+    const current = out[key];
+    out[key] =
+      isRecord(current) && isRecord(value) && !("secretRef" in current) && !("secretRef" in value)
+        ? mergeRecords(current, value)
+        : structuredClone(value);
+  }
+  return out;
+}
+
+function schemaDefaults(schema: ConfigSchema | undefined): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const [name, field] of Object.entries(schema ?? {})) {
+    if (field.default !== undefined) {
+      defaults[name] = structuredClone(field.default);
+    }
+  }
+  return defaults;
+}
+
+function addConfigLayer(
+  layers: ProviderGraphConfigLayer[],
+  layer: Omit<ProviderGraphConfigLayer, "values"> & {
+    values?: Record<string, unknown> | undefined;
+  },
+): void {
+  if (layer.values === undefined || Object.keys(layer.values).length === 0) {
+    return;
+  }
+  layers.push({ ...layer, values: cloneRecord(layer.values) });
+}
+
+function combineProviderManifests(
+  input: ResolveProviderGraphProjectionInput,
+  diagnostics: ProviderGraphDiagnostic[],
+): Map<string, ProviderManifest> {
+  const providers = [...(input.providerSet?.providers ?? []), ...(input.providerManifests ?? [])];
+  const byName = new Map<string, ProviderManifest>();
+  for (const provider of providers) {
+    const id = provider.metadata.name;
+    const prior = byName.get(id);
+    if (prior !== undefined) {
+      if (prior.metadata.version !== provider.metadata.version) {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.duplicate_provider_version",
+          message: `provider "${id}" appears with multiple versions`,
+          providerId: id,
+          detail: {
+            versions: [prior.metadata.version, provider.metadata.version],
+          },
+        });
+      }
+      continue;
+    }
+    byName.set(id, provider);
+  }
+  return byName;
+}
+
+function templatePackageTemplates(
+  packages: readonly TemplatePackageManifest[] | undefined,
+): TemplateManifest[] {
+  return (packages ?? []).flatMap((pkg) => pkg.spec.templates);
+}
+
+function combineTemplates(
+  input: ResolveProviderGraphProjectionInput,
+): Map<string, TemplateManifest> {
+  const templates = [
+    ...(input.providerSet?.templates ?? []),
+    ...(input.templates ?? []),
+    ...templatePackageTemplates(input.templatePackages),
+  ];
+  return new Map(templates.map((template) => [template.metadata.name, template]));
+}
+
+function graphDocs(input: ResolveProviderGraphProjectionInput): ProfileGraphDoc[] {
+  return [
+    {
+      name: input.baseProfile.metadata.name,
+      kind: "ProviderProfile",
+      spec: input.baseProfile.spec,
+    },
+    ...(input.overlays ?? []).map(
+      (overlay): ProfileGraphDoc => ({
+        name: overlay.metadata.name,
+        kind: "ProviderProfileOverlay",
+        spec: overlay.spec,
+      }),
+    ),
+  ];
+}
+
+function validateGraphInheritance(
+  input: ResolveProviderGraphProjectionInput,
+  diagnostics: ProviderGraphDiagnostic[],
+): void {
+  const docs = graphDocs(input);
+  const byName = new Map(docs.map((doc) => [doc.name, doc]));
+  for (const doc of docs) {
+    if (doc.spec.extends !== undefined && !byName.has(doc.spec.extends)) {
+      graphAddDiagnostic(diagnostics, {
+        code: "graph.overlay_extends_unknown",
+        message: `${doc.kind} "${doc.name}" extends unknown profile or overlay "${doc.spec.extends}"`,
+        path: "spec.extends",
+        profile: doc.name,
+        detail: { extends: doc.spec.extends },
+      });
+    }
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (doc: ProfileGraphDoc, path: string[]): void => {
+    if (visited.has(doc.name)) {
+      return;
+    }
+    if (visiting.has(doc.name)) {
+      const cycleStart = path.indexOf(doc.name);
+      const cycle = [...path.slice(cycleStart >= 0 ? cycleStart : 0), doc.name];
+      graphAddDiagnostic(diagnostics, {
+        code: "graph.overlay_cycle",
+        message: `provider profile inheritance cycle detected: ${cycle.join(" -> ")}`,
+        path: "spec.extends",
+        profile: doc.name,
+        detail: { cycle },
+      });
+      return;
+    }
+    visiting.add(doc.name);
+    const parent = doc.spec.extends !== undefined ? byName.get(doc.spec.extends) : undefined;
+    if (parent !== undefined) {
+      visit(parent, [...path, doc.name]);
+    }
+    visiting.delete(doc.name);
+    visited.add(doc.name);
+  };
+
+  for (const doc of docs) {
+    visit(doc, []);
+  }
+}
+
+function materializeSelections(
+  input: ResolveProviderGraphProjectionInput,
+): Partial<Record<ProviderProfileFamilyId, ProviderProfileSelection>> {
+  const selected: Partial<Record<ProviderProfileFamilyId, ProviderProfileSelection>> = {
+    ...(input.baseProfile.spec.select ?? {}),
+  };
+  for (const overlay of input.overlays ?? []) {
+    Object.assign(selected, overlay.spec.select ?? {});
+  }
+  return selected;
+}
+
+function profileConfigLayers(
+  input: ResolveProviderGraphProjectionInput,
+  providerId: string,
+): ProviderGraphConfigLayer[] {
+  const layers: ProviderGraphConfigLayer[] = [];
+  addConfigLayer(layers, {
+    source: "base-profile-config",
+    providerId,
+    profile: input.baseProfile.metadata.name,
+    values: input.baseProfile.spec.config?.[providerId],
+  });
+  for (const overlay of input.overlays ?? []) {
+    addConfigLayer(layers, {
+      source: "overlay-config",
+      providerId,
+      profile: overlay.metadata.name,
+      values: overlay.spec.config?.[providerId],
+    });
+  }
+  return layers;
+}
+
+function templateDefaultConfigLayers(
+  input: ResolveProviderGraphProjectionInput,
+  providerId: string,
+): ProviderGraphConfigLayer[] {
+  const layers: ProviderGraphConfigLayer[] = [];
+  for (const pkg of input.templatePackages ?? []) {
+    for (const key of [providerId, `provider.${providerId}`]) {
+      const values = pkg.spec.defaults[key];
+      if (isRecord(values)) {
+        addConfigLayer(layers, {
+          source: "template-defaults",
+          providerId,
+          templatePackage: pkg.metadata.name,
+          values,
+        });
+      }
+    }
+  }
+  return layers;
+}
+
+function resolveProviderConfig(
+  input: ResolveProviderGraphProjectionInput,
+  providerId: string,
+  manifest: ProviderManifest,
+  diagnostics: ProviderGraphDiagnostic[],
+): { config: Record<string, unknown>; layers: ProviderGraphConfigLayer[] } {
+  const layers: ProviderGraphConfigLayer[] = [];
+  addConfigLayer(layers, {
+    source: "provider-schema-defaults",
+    providerId,
+    values: schemaDefaults(manifest.spec.config_schema),
+  });
+  addConfigLayer(layers, {
+    source: "provider-set-default-config",
+    providerId,
+    values: input.providerSet?.defaultConfig?.[providerId],
+  });
+  layers.push(...profileConfigLayers(input, providerId));
+  layers.push(...templateDefaultConfigLayers(input, providerId));
+  addConfigLayer(layers, {
+    source: "runtime-assembly-params",
+    providerId,
+    values: input.runtimeAssemblyParams?.[providerId],
+  });
+
+  const config = layers.reduce<Record<string, unknown>>(
+    (current, layer) => mergeRecords(current, layer.values),
+    {},
+  );
+  const validation = validateConfig(manifest.spec.config_schema ?? {}, config);
+  if (!validation.ok) {
+    graphAddDiagnostic(diagnostics, {
+      code: "graph.config_invalid",
+      message: `merged config for provider "${providerId}" does not match its config_schema`,
+      providerId,
+      family: manifest.spec.family,
+      detail: { defects: validation.defects },
+    });
+  }
+  return { config, layers };
+}
+
+function currentProbeFor(
+  probes: ProbeRegistry | undefined,
+  probeId: string | undefined,
+): DependencyProbeEvidence {
+  const probe = probeId !== undefined ? probes?.[probeId] : undefined;
+  return { result: probe?.() ?? "available" };
+}
+
+function providerAvailability(
+  provider: ProviderManifest,
+  input: ResolveProviderGraphProjectionInput,
+): { availability: Availability; dependencies: IndexedDependencyBinding[] } {
+  const currentProbe = currentProbeFor(input.probes, provider.spec.probe);
+  const dependencies = (provider.spec.requires ?? []).map((requirement) =>
+    evaluateRequirement(
+      requirement,
+      bindingFor(input.dependencyBindings, requirement.dependency),
+      currentProbe,
+    ),
+  );
+  return {
+    availability: deriveAvailability(dependencies, currentProbe),
+    dependencies,
+  };
+}
+
+function templateAvailability(
+  template: TemplateManifest,
+  providersByName: ReadonlyMap<string, ProviderManifest>,
+  providerAvailabilityById: ReadonlyMap<string, Availability>,
+  input: ResolveProviderGraphProjectionInput,
+): { availability: Availability; dependencies: IndexedDependencyBinding[] } {
+  const currentProbe = currentProbeFor(input.probes, template.spec.probe);
+  const dependencies = (template.spec.requires ?? []).map((requirement) =>
+    evaluateRequirement(
+      requirement,
+      bindingFor(input.dependencyBindings, requirement.dependency),
+      currentProbe,
+    ),
+  );
+  const selfAvailability = deriveAvailability(dependencies, currentProbe);
+  const partAvailabilities = Object.values(template.spec.requiredParts).map((providerId) =>
+    providersByName.has(providerId) ? providerAvailabilityById.get(providerId) : undefined,
+  );
+  const unavailablePart = partAvailabilities.some(
+    (availability) => availability === undefined || availability === "unavailable",
+  );
+  const degradedPart = partAvailabilities.some((availability) => availability === "degraded");
+  return {
+    availability:
+      selfAvailability === "unavailable" || unavailablePart
+        ? "unavailable"
+        : selfAvailability === "degraded" || degradedPart
+          ? "degraded"
+          : "available",
+    dependencies,
+  };
+}
+
+function validateSelectedProviders(
+  selected: Partial<Record<ProviderProfileFamilyId, ProviderProfileSelection>>,
+  providersByName: ReadonlyMap<string, ProviderManifest>,
+  diagnostics: ProviderGraphDiagnostic[],
+): Partial<Record<ProviderProfileFamilyId, string>> {
+  const out: Partial<Record<ProviderProfileFamilyId, string>> = {};
+  for (const [family, selection] of Object.entries(selected)) {
+    if (!PROFILE_FAMILY_SET.has(family)) {
+      graphAddDiagnostic(diagnostics, {
+        code: "graph.unknown_family",
+        message: `unknown provider profile family "${family}"`,
+        path: `spec.select.${family}`,
+        family,
+      });
+      continue;
+    }
+    const providerId = graphSelectionProviderId(selection as ProviderProfileSelection);
+    if (providerId === undefined) {
+      continue;
+    }
+    const typedFamily = family as ProviderProfileFamilyId;
+    const provider = providersByName.get(providerId);
+    if (provider === undefined) {
+      graphAddDiagnostic(diagnostics, {
+        code: "graph.unknown_provider",
+        message: `provider "${providerId}" is not registered in the selected provider set`,
+        path: `spec.select.${family}`,
+        family,
+        providerId,
+      });
+      continue;
+    }
+    const expectedFamily = PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY[typedFamily];
+    if (provider.spec.family !== expectedFamily) {
+      graphAddDiagnostic(diagnostics, {
+        code: "graph.family_mismatch",
+        message: `provider "${providerId}" is ${provider.spec.family}, not ${expectedFamily}`,
+        path: `spec.select.${family}`,
+        family,
+        providerId,
+        detail: { actualFamily: provider.spec.family, expectedFamily },
+      });
+      continue;
+    }
+    out[typedFamily] = providerId;
+  }
+  return out;
+}
+
+function validateProviderRelations(
+  providersByName: ReadonlyMap<string, ProviderManifest>,
+  templatesByName: ReadonlyMap<string, TemplateManifest>,
+  diagnostics: ProviderGraphDiagnostic[],
+): void {
+  for (const provider of providersByName.values()) {
+    const compatibleWith = provider.spec.relations?.compatibleWith ?? {};
+    for (const [relationKey, ids] of Object.entries(compatibleWith)) {
+      if (!Array.isArray(ids)) {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.unresolved_relation",
+          message: `provider "${provider.metadata.name}" relation "${relationKey}" must be a provider/template id list`,
+          providerId: provider.metadata.name,
+          family: provider.spec.family,
+          detail: { relationKey },
+        });
+        continue;
+      }
+      if (relationKey === "templates") {
+        for (const id of ids) {
+          if (!templatesByName.has(id)) {
+            graphAddDiagnostic(diagnostics, {
+              code: "graph.unresolved_relation",
+              message: `provider "${provider.metadata.name}" references unknown template "${id}"`,
+              providerId: provider.metadata.name,
+              template: id,
+              detail: { relationKey },
+            });
+          }
+        }
+        continue;
+      }
+      const expectedFamily = RELATION_KEY_TO_FAMILY[relationKey];
+      if (expectedFamily === undefined) {
+        continue;
+      }
+      for (const id of ids) {
+        const related = providersByName.get(id);
+        if (related === undefined) {
+          graphAddDiagnostic(diagnostics, {
+            code: "graph.unresolved_relation",
+            message: `provider "${provider.metadata.name}" relation "${relationKey}" references unknown provider "${id}"`,
+            providerId: id,
+            family: expectedFamily,
+            detail: { sourceProvider: provider.metadata.name, relationKey },
+          });
+          continue;
+        }
+        if (related.spec.family !== expectedFamily) {
+          graphAddDiagnostic(diagnostics, {
+            code: "graph.family_mismatch",
+            message: `provider "${id}" is ${related.spec.family}, not ${expectedFamily}`,
+            providerId: id,
+            family: expectedFamily,
+            detail: {
+              sourceProvider: provider.metadata.name,
+              relationKey,
+              actualFamily: related.spec.family,
+            },
+          });
+        }
+      }
+    }
+  }
+}
+
+function templateHasCompatibilityEvidence(
+  template: TemplateManifest,
+  part: string,
+  providersByName: ReadonlyMap<string, ProviderManifest>,
+): boolean {
+  const explicit = template.spec.compatibleProviders?.[part];
+  if (explicit !== undefined && explicit.length > 0) {
+    return true;
+  }
+  const relationKey = `${part}s`;
+  const requiredProviderIds = Object.values(template.spec.requiredParts);
+  const requiredProviderRelations = requiredProviderIds.some(
+    (providerId) =>
+      (providersByName.get(providerId)?.spec.relations?.compatibleWith?.[relationKey] ?? [])
+        .length > 0,
+  );
+  if (requiredProviderRelations) {
+    return true;
+  }
+  const defaultProviderId = template.spec.requiredParts[part];
+  return (
+    defaultProviderId !== undefined &&
+    providersByName
+      .get(defaultProviderId)
+      ?.spec.relations?.compatibleWith?.templates?.includes(template.metadata.name) === true
+  );
+}
+
+function validateTemplateRelations(
+  templatesByName: ReadonlyMap<string, TemplateManifest>,
+  providersByName: ReadonlyMap<string, ProviderManifest>,
+  input: ResolveProviderGraphProjectionInput,
+  diagnostics: ProviderGraphDiagnostic[],
+): void {
+  for (const template of templatesByName.values()) {
+    const compatibilityRequiredParts = compatibilityRequiredPartsForTemplate(input, template);
+    for (const [part, providerId] of Object.entries(template.spec.requiredParts)) {
+      const expectedFamily = providerFamilyForPart(part);
+      const provider = providersByName.get(providerId);
+      if (provider === undefined) {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.unknown_provider",
+          message: `template "${template.metadata.name}" required part "${part}" references unknown provider "${providerId}"`,
+          providerId,
+          template: template.metadata.name,
+          path: `spec.requiredParts.${part}`,
+        });
+        continue;
+      }
+      if (expectedFamily !== undefined && provider.spec.family !== expectedFamily) {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.family_mismatch",
+          message: `template "${template.metadata.name}" part "${part}" uses ${provider.spec.family}, not ${expectedFamily}`,
+          providerId,
+          family: expectedFamily,
+          template: template.metadata.name,
+          path: `spec.requiredParts.${part}`,
+          detail: { actualFamily: provider.spec.family },
+        });
+      }
+    }
+
+    for (const [part, ids] of Object.entries(template.spec.compatibleProviders ?? {})) {
+      const expectedFamily = providerFamilyForPart(part);
+      for (const id of ids) {
+        const provider = providersByName.get(id);
+        if (provider === undefined) {
+          graphAddDiagnostic(diagnostics, {
+            code: "graph.unresolved_relation",
+            message: `template "${template.metadata.name}" compatible part "${part}" references unknown provider "${id}"`,
+            providerId: id,
+            template: template.metadata.name,
+            path: `spec.compatibleProviders.${part}`,
+          });
+          continue;
+        }
+        if (expectedFamily !== undefined && provider.spec.family !== expectedFamily) {
+          graphAddDiagnostic(diagnostics, {
+            code: "graph.family_mismatch",
+            message: `provider "${id}" is ${provider.spec.family}, not ${expectedFamily}`,
+            providerId: id,
+            family: expectedFamily,
+            template: template.metadata.name,
+            path: `spec.compatibleProviders.${part}`,
+            detail: { actualFamily: provider.spec.family },
+          });
+        }
+      }
+    }
+
+    for (const part of template.spec.openParts ?? []) {
+      if (
+        compatibilityRequiredParts.has(part) &&
+        !templateHasCompatibilityEvidence(template, part, providersByName)
+      ) {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.compatibility_ambiguous",
+          message: `template "${template.metadata.name}" open part "${part}" has no explicit compatibility relation`,
+          template: template.metadata.name,
+          path: `spec.openParts.${part}`,
+          detail: { part },
+        });
+      }
+    }
+  }
+}
+
+function compatibilityRequiredPartsForTemplate(
+  input: ResolveProviderGraphProjectionInput,
+  template: TemplateManifest,
+): Set<string> {
+  const required = new Set(input.compatibilityRequiredParts ?? []);
+  for (const pkg of input.templatePackages ?? []) {
+    const ownsTemplate = pkg.spec.templates.some(
+      (entry) => entry.metadata.name === template.metadata.name,
+    );
+    if (!ownsTemplate || !isRecord(pkg.spec.compatibility)) {
+      continue;
+    }
+    const packageRequired = pkg.spec.compatibility.requiredParts;
+    if (Array.isArray(packageRequired)) {
+      for (const part of packageRequired) {
+        if (typeof part === "string" && part.length > 0) {
+          required.add(part);
+        }
+      }
+    }
+  }
+  return required;
+}
+
+function addDependencyDiagnostics(
+  diagnostics: ProviderGraphDiagnostic[],
+  owner: { providerId?: string; template?: string },
+  dependencies: readonly IndexedDependencyBinding[],
+): void {
+  for (const dependency of dependencies) {
+    if (
+      dependency.status === "bound" &&
+      dependency.diagnostics.install === "available" &&
+      dependency.diagnostics.runtime === "available"
+    ) {
+      continue;
+    }
+    graphAddDiagnostic(diagnostics, {
+      code: "graph.dependency_unavailable",
+      message: `dependency "${dependency.dependency}" is not available`,
+      dependency: dependency.dependency,
+      ...(owner.providerId !== undefined ? { providerId: owner.providerId } : {}),
+      ...(owner.template !== undefined ? { template: owner.template } : {}),
+      detail: { dependency },
+    });
+  }
+}
+
+/**
+ * Build the deterministic provider graph projection for one selected provider set/profile.
+ *
+ * The projection owns profile/overlay selection, template defaults, dependency availability,
+ * compatibility checks, and config/default precedence. It treats WPM {@link DependencyBinding}
+ * records as dependency evidence only; they are surfaced on `dependencies` and never merged into
+ * provider config.
+ */
+export function resolveProviderGraphProjection(
+  input: ResolveProviderGraphProjectionInput,
+): ProviderGraphProjectionResult {
+  const diagnostics: ProviderGraphDiagnostic[] = [];
+  const providersByName = combineProviderManifests(input, diagnostics);
+  const templatesByName = combineTemplates(input);
+
+  validateGraphInheritance(input, diagnostics);
+  validateProviderRelations(providersByName, templatesByName, diagnostics);
+  validateTemplateRelations(templatesByName, providersByName, input, diagnostics);
+
+  const selected = validateSelectedProviders(
+    materializeSelections(input),
+    providersByName,
+    diagnostics,
+  );
+
+  const availabilityById = new Map<string, Availability>();
+  const dependenciesById = new Map<string, IndexedDependencyBinding[]>();
+  for (const provider of providersByName.values()) {
+    const availability = providerAvailability(provider, input);
+    availabilityById.set(provider.metadata.name, availability.availability);
+    dependenciesById.set(provider.metadata.name, availability.dependencies);
+  }
+
+  const selectedProviders: ProviderGraphResolvedProvider[] = [];
+  for (const [family, providerId] of Object.entries(selected) as Array<
+    [ProviderProfileFamilyId, string]
+  >) {
+    const manifest = providersByName.get(providerId);
+    if (manifest === undefined) {
+      continue;
+    }
+    const dependencies = dependenciesById.get(providerId) ?? [];
+    const availability = availabilityById.get(providerId) ?? "unavailable";
+    addDependencyDiagnostics(diagnostics, { providerId }, dependencies);
+    const config = resolveProviderConfig(input, providerId, manifest, diagnostics);
+    selectedProviders.push({
+      family,
+      runtimeFamily: PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY[family],
+      providerId,
+      manifest: structuredClone(manifest),
+      available: availability === "available",
+      availability,
+      dependencies: structuredClone(dependencies),
+      config: config.config,
+      configLayers: config.layers,
+    });
+  }
+
+  const templates: ProviderGraphResolvedTemplate[] = [];
+  for (const template of templatesByName.values()) {
+    const availability = templateAvailability(template, providersByName, availabilityById, input);
+    addDependencyDiagnostics(
+      diagnostics,
+      { template: template.metadata.name },
+      availability.dependencies,
+    );
+    for (const providerId of uniqueStrings(Object.values(template.spec.requiredParts))) {
+      addDependencyDiagnostics(
+        diagnostics,
+        { template: template.metadata.name, providerId },
+        dependenciesById.get(providerId) ?? [],
+      );
+    }
+    const compatibleProviders = deriveCompatibleProviders(template, providersByName.values());
+    templates.push({
+      templateId: template.metadata.name,
+      manifest: structuredClone(template),
+      available: availability.availability === "available",
+      availability: availability.availability,
+      dependencies: structuredClone(availability.dependencies),
+      requiredParts: structuredClone(template.spec.requiredParts),
+      ...(compatibleProviders !== undefined
+        ? { compatibleProviders: structuredClone(compatibleProviders) }
+        : {}),
+    });
+  }
+
+  const projection: ProviderGraphProjection = {
+    ...(input.providerSet?.id !== undefined ? { providerSetId: input.providerSet.id } : {}),
+    profileId: input.baseProfile.metadata.name,
+    selectedProviders: selected,
+    providers: selectedProviders.sort((a, b) => a.providerId.localeCompare(b.providerId)),
+    templates: templates.sort((a, b) => a.templateId.localeCompare(b.templateId)),
+  };
+
+  return diagnostics.length === 0
+    ? { ok: true, projection, diagnostics: [] }
+    : { ok: false, projection, diagnostics };
 }
