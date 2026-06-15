@@ -1,4 +1,9 @@
-import { type ConfigSchema, validateConfig, validateSchemaShape } from "@gla/kernel";
+import {
+  type ConfigSchema,
+  EMPTY_CONFIG_SCHEMA,
+  validateConfig,
+  validateSchemaShape,
+} from "@gla/kernel";
 import type {
   ProviderFamily,
   ProviderManifest,
@@ -169,6 +174,8 @@ export interface ValidateProviderProfileInputs {
   overlays?: readonly unknown[];
   providers?: readonly ProviderManifest[] | Record<string, ProviderManifest>;
   templatePackages?: readonly unknown[];
+  /** Which provider schema validates profile config. Defaults to app boot/factory config. */
+  configValidationMode?: "runtime" | "factory";
   /**
    * Families that may not be disabled/null-selected. Defaults to every current profile family,
    * because no current family contract declares absence as valid product behavior.
@@ -542,6 +549,7 @@ function validateProfileConfig(
   config: unknown,
   profile: string,
   providers: ReadonlyMap<string, ProviderManifest>,
+  configValidationMode: "runtime" | "factory",
 ): void {
   if (config === undefined) {
     return;
@@ -578,18 +586,22 @@ function validateProfileConfig(
       });
       continue;
     }
-    if (provider.spec.config_schema !== undefined) {
-      const validation = validateConfig(provider.spec.config_schema, providerConfig);
-      if (!validation.ok) {
-        addDiagnostic(diagnostics, {
-          code: "profile.config_invalid",
-          message: `config for provider "${providerId}" does not match its config_schema`,
-          path: `spec.config.${providerId}`,
-          profile,
-          providerId,
-          detail: { defects: validation.defects },
-        });
-      }
+    const schema =
+      configValidationMode === "factory"
+        ? (provider.spec.factory_config_schema ??
+          provider.spec.config_schema ??
+          EMPTY_CONFIG_SCHEMA)
+        : (provider.spec.config_schema ?? EMPTY_CONFIG_SCHEMA);
+    const validation = validateConfig(schema, providerConfig);
+    if (!validation.ok) {
+      addDiagnostic(diagnostics, {
+        code: "profile.config_invalid",
+        message: `config for provider "${providerId}" does not match its config_schema`,
+        path: `spec.config.${providerId}`,
+        profile,
+        providerId,
+        detail: { defects: validation.defects },
+      });
     }
   }
 }
@@ -657,6 +669,7 @@ function validateProfileDoc(
   doc: ProfileDocRecord,
   providers: ReadonlyMap<string, ProviderManifest>,
   securityCriticalFamilies: ReadonlySet<string>,
+  configValidationMode: "runtime" | "factory",
 ): void {
   const { name, spec } = doc;
   if (spec.extends !== undefined && !hasText(spec.extends)) {
@@ -689,7 +702,7 @@ function validateProfileDoc(
       }
     }
   }
-  validateProfileConfig(diagnostics, spec.config, name, providers);
+  validateProfileConfig(diagnostics, spec.config, name, providers, configValidationMode);
   validateProfileDefaults(diagnostics, spec.defaults, name, providers, securityCriticalFamilies);
 }
 
@@ -835,7 +848,7 @@ function validateTemplateManifestShape(
     });
   }
   if (template.spec.openParams !== undefined) {
-    const schemaValidation = validateSchemaShape(template.spec.openParams as ConfigSchema);
+    const schemaValidation = validateSchemaShape(template.spec.openParams);
     if (!schemaValidation.ok) {
       addDiagnostic(diagnostics, {
         code: "template_package.schema_invalid",
@@ -936,7 +949,7 @@ export function validateTemplatePackageManifest(input: unknown): ProviderProfile
         path: "spec.schema",
       });
     } else {
-      const schemaValidation = validateSchemaShape(input.spec.schema as ConfigSchema);
+      const schemaValidation = validateSchemaShape(input.spec.schema);
       if (!schemaValidation.ok) {
         addDiagnostic(diagnostics, {
           code: "template_package.schema_invalid",
@@ -1009,6 +1022,7 @@ export function validateProviderProfileInputs(
   const securityCriticalFamilies = new Set(
     input.securityCriticalFamilies ?? PROVIDER_PROFILE_FAMILIES,
   );
+  const configValidationMode = input.configValidationMode ?? "factory";
   const profileDocs = [
     ...(input.profiles ?? []).flatMap((profile) => {
       const parsed = parseProfileDoc(diagnostics, profile, "ProviderProfile");
@@ -1021,7 +1035,7 @@ export function validateProviderProfileInputs(
   ];
 
   for (const doc of profileDocs) {
-    validateProfileDoc(diagnostics, doc, providers, securityCriticalFamilies);
+    validateProfileDoc(diagnostics, doc, providers, securityCriticalFamilies, configValidationMode);
   }
   validateInheritance(diagnostics, profileDocs);
   for (const templatePackage of input.templatePackages ?? []) {

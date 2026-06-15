@@ -325,24 +325,31 @@ provider declares the *typed set of options the agent may set*, and nothing off-
 that).
 
 ```ts
-type ConfigType = "string" | "number" | "bool" | "enum" | "object" | "list";
+type ConfigSchemaType =
+  | "string" | "number" | "integer" | "boolean" | "object" | "array" | "null";
 
-interface ConfigField {
-  type: ConfigType;
-  required?: boolean;                // else optional
-  default?: unknown;                 // applied at admission-mutate when omitted
-  enum?: unknown[];                  // closed set of allowed values
-  min?: number; max?: number;        // range (number) / length (string,list)
-  pattern?: string;                  // regex (string)
-  conflicts_with?: string[];         // cross-field: may not be set together
-  required_with?: string[];          // cross-field: must be set together
-  sensitive?: boolean;               // never echoed in schema/catalog output or logs — a secret-ref, never a literal
-  // object/list composition:
-  fields?: Record<string, ConfigField>;  // for type:"object"
-  items?: ConfigField;                    // for type:"list"
+interface ConfigSchemaNode {
+  type?: ConfigSchemaType | ConfigSchemaType[];
+  properties?: Record<string, ConfigSchemaNode>;
+  required?: string[];
+  additionalProperties?: false;
+  items?: ConfigSchemaNode;
+  enum?: unknown[];
+  const?: unknown;
+  minimum?: number; maximum?: number;
+  minLength?: number; maxLength?: number; pattern?: string;
+  minItems?: number; maxItems?: number;
+  dependencies?: Record<string, string[]>;
+  allOf?: ConfigSchemaNode[]; anyOf?: ConfigSchemaNode[];
+  oneOf?: ConfigSchemaNode[]; not?: ConfigSchemaNode;
+  default?: unknown;                 // graph/defaulting metadata, not validator mutation
+  "x-gla-sensitive"?: boolean;       // redaction metadata, never a literal secret
 }
 
-type ConfigSchema = Record<string, ConfigField>;
+interface ConfigSchema extends ConfigSchemaNode {
+  type: "object";
+  additionalProperties: false;
+}
 ```
 **Guarantees:** the trusted provider/template author draws the line once (which native knobs become options and
 their bounds); the untrusted agent only sets conforming values; off-menu input is rejected offline at admission.
@@ -582,7 +589,7 @@ adapter — `GLA-004 AC#7`).
 | K1 | **error taxonomy** (`GlaError`, `ErrorCode` union, exit-code map) | K0 | ports/entities return these; tests assert on them |
 | K2 | **Caveat algebra** + attenuation predicate (`child ⊆ parent`) | K0 | the heart of §2; unit-testable in isolation |
 | K3 | **Capability entity + `CapabilityPort`** (signing-agnostic) | K1,K2 | task/session/grant all mint from it |
-| K4 | **config_schema vocabulary** (`ConfigField`, JSON-Schema validity check) | K1 | AssemblySpec params + catalog ingest need it |
+| K4 | **config_schema vocabulary** (`ConfigSchema`, JSON-Schema validity check) | K1 | AssemblySpec params + catalog ingest need it |
 | K5 | **AssemblySpec + Mount + Resolved** types + published JSON Schema | K4 | session.spec is this; admission validates it |
 | K6 | **core entity types & state machines** (Task, Session, HandoffWindow, Route, CompletionEnvelope, AuditEvent) | K1,K3,K5 | the aggregates; transitions are pure functions |
 | K7 | **port interfaces** (§6) + `Identity`/enrollment types (§7) | K1,K3,K4,K5 | the seams; no bodies, no adapters |

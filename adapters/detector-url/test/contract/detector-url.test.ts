@@ -41,8 +41,9 @@ describe("DetectorUrlAdapter — contract + scripted URL sequence (GLA-042/043)"
   it("declares its typed contract (complete_on required; intermediate optional)", () => {
     const d = new DetectorUrlAdapter();
     expect(d.contract).toBe(URL_WATCHER_CONTRACT);
-    expect(d.contract.complete_on?.required).toBe(true);
-    expect(d.contract.intermediate?.required).toBe(false);
+    expect(d.contract.required).toEqual(["complete_on"]);
+    expect(d.contract.properties?.complete_on).toMatchObject({ type: "string", minLength: 1 });
+    expect(d.contract.properties?.intermediate).toMatchObject({ type: "string", minLength: 1 });
   });
 
   it("fires on /verify (intermediate) then /dashboard (complete), then COMPLETES", async () => {

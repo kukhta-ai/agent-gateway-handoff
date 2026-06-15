@@ -114,22 +114,27 @@ relations:
 
 | Key | Meaning |
 |---|---|
-| `type` | `string` / `number` / `bool` / `enum` / `object` / `list` |
-| `required` / `optional` | must the agent set it, or may it |
-| `default` | value applied when the agent omits it (filled at admission-mutate) |
-| `enum` | the closed set of allowed values |
-| `min` / `max` / `pattern` | range and format constraints |
-| `conflicts_with` / `required_with` | cross-field rules |
-| `sensitive` | never echoed in `schema` / `catalog` output or logs (a secret-ref, never a literal) |
+| Root shape | a JSON Schema object with `type: "object"` and `additionalProperties: false` |
+| `properties` / `required` | the declared option fields, with required fields listed at the object root |
+| `type` | JSON Schema primitive/container types: `string`, `number`, `integer`, `boolean`, `object`, `array`, `null` |
+| `default` | explicit GLA metadata that graph defaults may read; validation itself never mutates input |
+| `enum` / `const` | closed allowed values |
+| `minimum` / `maximum` / `minLength` / `maxLength` / `pattern` / `minItems` / `maxItems` | range, length, format, and list constraints |
+| `dependencies` / `allOf` / `anyOf` / `oneOf` / `not` | conservative cross-field constraints accepted by the GLA schema profile |
+| `x-gla-sensitive` | explicit redaction metadata; it is never a literal secret and the validator ignores it |
 
 Example — a `docker` launcher's `config_schema` (the "lowered" surface; the rest of the Compose/run config stays fixed in `runtime_base`):
 
 ```jsonc
 {
-  "memory":    { "type": "string", "optional": true, "default": "512Mi", "pattern": "^[0-9]+(Mi|Gi)$" },
-  "cpus":      { "type": "number", "optional": true, "default": 1, "max": 4 },
-  "image_tag": { "type": "enum",   "optional": true,
-                 "enum": ["chromium-stable", "chromium-beta"], "default": "chromium-stable" }
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "memory":    { "type": "string", "default": "512Mi", "pattern": "^[0-9]+(Mi|Gi)$" },
+    "cpus":      { "type": "number", "default": 1, "maximum": 4 },
+    "image_tag": { "type": "string",
+                   "enum": ["chromium-stable", "chromium-beta"], "default": "chromium-stable" }
+  }
   // privileged, namespaces, seccomp, the launcher's own base mounts: NOT here — fixed by the trusted author in runtime_base
 }
 ```
@@ -137,7 +142,7 @@ Example — a `docker` launcher's `config_schema` (the "lowered" surface; the re
 Two consequences follow, and they are the whole point:
 
 - **Allowlist-by-construction.** The agent never submits arbitrary native config that GLA has to screen for safety; it can only set values that *conform to a declared typed schema*, checked offline at admission. "Validate untrusted runtime config for safety" — the hard, fragile problem — dissolves, because there is no arbitrary config to validate, only schema conformance.
-- **The trusted author draws the line.** *Which* native knobs become options, and their bounds, is decided by the provider/template author at install-time (every `required` / `optional` / `enum` / range choice). That is exactly the cognition-vs-enforcement boundary — fixed once by a trusted party, never negotiated by the runtime agent.
+- **The trusted author draws the line.** *Which* native knobs become options, and their bounds, is decided by the provider/template author at install-time (every `required` list / `enum` / range choice). That is exactly the cognition-vs-enforcement boundary — fixed once by a trusted party, never negotiated by the runtime agent.
 
 How an agent *composes* a spec against these schemas — introspect → `--set` / `-f` → `--dry-run` → submit — is the subject of `04-capsule-assembly.md`.
 

@@ -1,9 +1,9 @@
 // @gla/kernel — core ring (baseline §1).
 // Pure domain: entities + state machines, the capability primitive (signing-independent) + a
 // reference HMAC signer, the AssemblySpec contract + offline validator, the typed config_schema
-// validator, the module ports, and the error/exit taxonomy. ZERO third-party runtime imports —
-// only Node builtins (node:crypto in the reference signer). This barrel is the published surface
-// other packages import (kernel-contracts.md §0, GLA-004 AC#7).
+// validator, the module ports, and the error/exit taxonomy. The config_schema validator is the
+// only runtime package dependency; the rest of the kernel stays pure Node/domain code. This barrel
+// is the published surface other packages import (kernel-contracts.md §0, GLA-004 AC#7).
 
 /** Stable package-identity marker (used by the `app` composition root's wiring record). */
 export const KERNEL_MODULE = "@gla/kernel" as const;
@@ -56,14 +56,15 @@ export { HmacCapabilitySigner } from "./hmac-signer.js";
 // ── K4 · typed config_schema vocabulary + validator ───────────────────────────
 export {
   configDefectsToError,
+  EMPTY_CONFIG_SCHEMA,
   validateConfig,
   validateSchemaShape,
 } from "./config-schema.js";
 export type {
   ConfigDefect,
-  ConfigField,
   ConfigSchema,
-  ConfigType,
+  ConfigSchemaNode,
+  ConfigSchemaType,
   ConfigValidation,
 } from "./config-schema.js";
 

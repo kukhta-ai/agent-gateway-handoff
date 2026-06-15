@@ -3,11 +3,23 @@
 // VALID signal to a stable CompletionEnvelope {status, result, next?}. The HEADLINE invariant: an OUT-OF-CONTRACT
 // signal is REJECTED (not normalized) — the window does NOT complete (S-8). Pure: no I/O, no clock.
 
-import type { Iso8601, RawCompletionSignal } from "@gla/kernel";
+import type { ConfigSchema, Iso8601, RawCompletionSignal } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import { CompletionService, type DetectorContract } from "../../src/index.js";
 
 const AT = "2026-06-03T00:00:00.000Z" as Iso8601;
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
 
 /** The scenario-01 url-watcher contract: `url-intermediate` → submitted+next; `url-complete` → verified. */
 function urlWatcherContract(): DetectorContract {
@@ -17,10 +29,7 @@ function urlWatcherContract(): DetectorContract {
       "url-intermediate": { status: "submitted", next: "email-verification" },
       "url-complete": { status: "verified" },
     },
-    resultSchema: {
-      url: { type: "string", required: true },
-      match: { type: "string", required: false },
-    },
+    resultSchema: objectSchema({ url: { type: "string" }, match: { type: "string" } }, ["url"]),
   };
 }
 

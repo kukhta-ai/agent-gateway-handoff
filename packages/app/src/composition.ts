@@ -61,6 +61,7 @@ import {
   authAssurancePolicyFromRequiredAuthStrength,
   glaError,
   redactOperatorText,
+  validateSchemaShape,
 } from "@gla/kernel";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
 import {
@@ -102,6 +103,7 @@ export interface Wiring {
   workspace: string;
   detector: string;
   channel: string;
+  secretStore: string;
 }
 
 /** Provider-neutral sink used by channel providers that expose line-oriented delivery in dev/test. */
@@ -122,6 +124,7 @@ export interface ProviderSelectionProfile {
   entrypoint: ProviderId;
   detector: ProviderId;
   channel: ProviderId;
+  secretStore: ProviderId;
 }
 
 /** Provider-owned compatibility inputs exposed by legacy app options while defaults migrate into profiles. */
@@ -253,6 +256,10 @@ function providerSelectionFromManifest(
   if (channel !== undefined) {
     out.channel = channel;
   }
+  const secretStore = selectionProviderId(select.SecretStore);
+  if (secretStore !== undefined) {
+    out.secretStore = secretStore;
+  }
   return out;
 }
 
@@ -294,6 +301,7 @@ function requireSelectedProfile(
     "entrypoint",
     "detector",
     "channel",
+    "secretStore",
   ] as const) {
     if (typeof merged[key] !== "string" || merged[key].length === 0) {
       throw new Error(`provider composition profile is missing "${key}"`);
@@ -379,6 +387,7 @@ const PROVIDER_PROFILE_BINDINGS: ReadonlyArray<{
   { profileFamily: "AgentConnector", runtimeFamily: "connector", key: "connector" },
   { profileFamily: "CompletionDetector", runtimeFamily: "detector", key: "detector" },
   { profileFamily: "ChannelAdapter", runtimeFamily: "channel", key: "channel" },
+  { profileFamily: "SecretStore", runtimeFamily: "secret-store", key: "secretStore" },
 ];
 
 function hasEntries(value: Record<string, unknown> | undefined): value is Record<string, unknown> {
@@ -415,6 +424,21 @@ function selectedProviderProfileManifest(
     Object.keys(opts.providerProfile ?? {}).length > 0 || Object.keys(overrides).length > 0;
   if (namedManifest !== undefined && !hasRuntimeOverride) {
     return structuredClone(namedManifest);
+  }
+  if (namedManifest !== undefined) {
+    const manifest = structuredClone(namedManifest);
+    manifest.metadata = {
+      ...manifest.metadata,
+      name: profileId !== undefined ? `${profileId}+runtime-override` : manifest.metadata.name,
+    };
+    manifest.spec = {
+      ...manifest.spec,
+      select: {
+        ...(manifest.spec.select ?? {}),
+        ...providerProfileManifest(profile).spec.select,
+      },
+    };
+    return manifest;
   }
   return providerProfileManifest(
     profile,
@@ -643,6 +667,7 @@ export function createApp(opts: ProviderCompositionOptions = {}): App {
     workspace: providerModuleId(providerHost, "workspace", profile.workspace),
     detector: providerModuleId(providerHost, "detector", profile.detector),
     channel: providerModuleId(providerHost, "channel", profile.channel),
+    secretStore: providerModuleId(providerHost, "secret-store", profile.secretStore),
   };
   return {
     wiring,
@@ -1032,7 +1057,15 @@ function buildDetectorContract(
   }
   const contract: DetectorContract = { detector: detectorProviderId, statuses };
   if (isRecord(completion.resultSchema)) {
-    contract.resultSchema = completion.resultSchema as ConfigSchema;
+    const shape = validateSchemaShape(completion.resultSchema);
+    if (!shape.ok) {
+      throw glaError(
+        "policy.denied",
+        `detector provider "${detectorProviderId}" declares an invalid completion result schema`,
+        { detail: { providerId: detectorProviderId, defects: shape.defects } },
+      );
+    }
+    contract.resultSchema = completion.resultSchema as unknown as ConfigSchema;
   }
   return contract;
 }

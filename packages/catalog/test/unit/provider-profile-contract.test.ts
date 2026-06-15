@@ -1,3 +1,4 @@
+import { type ConfigSchema, EMPTY_CONFIG_SCHEMA } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import {
   BROWSER_HANDOFF_TEMPLATE,
@@ -10,11 +11,27 @@ import {
   validateTemplatePackageManifest,
 } from "../../src/index.js";
 
+function emptySchema(): ConfigSchema {
+  return structuredClone(EMPTY_CONFIG_SCHEMA);
+}
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
+
 function provider(
   id: string,
   family: Exclude<ProviderFamily, "template">,
   kind: string,
-  config_schema: ProviderManifest["spec"]["config_schema"] = {},
+  config_schema: ProviderManifest["spec"]["config_schema"] = emptySchema(),
 ): ProviderManifest {
   return {
     apiVersion: "gla.dev/v1",
@@ -31,17 +48,28 @@ function provider(
 }
 
 const AUTH_WEBAUTHN = provider("auth-webauthn", "auth", "AuthProvider", {
-  rpID: { type: "string", required: false, min: 1 },
+  type: "object",
+  additionalProperties: false,
+  properties: { rpID: { type: "string", minLength: 1 } },
 });
 
-const AUTH_OIDC = provider("auth-oidc-acme", "auth", "AuthProvider", {
-  issuerUrl: { type: "string", required: true, min: 1 },
-  clientSecret: {
-    type: "object",
-    required: true,
-    fields: { secretRef: { type: "string", required: true, min: 1 } },
-  },
-});
+const AUTH_OIDC = provider(
+  "auth-oidc-acme",
+  "auth",
+  "AuthProvider",
+  objectSchema(
+    {
+      issuerUrl: { type: "string", minLength: 1 },
+      clientSecret: {
+        type: "object",
+        additionalProperties: false,
+        required: ["secretRef"],
+        properties: { secretRef: { type: "string", minLength: 1 } },
+      },
+    },
+    ["issuerUrl", "clientSecret"],
+  ),
+);
 
 const SECRET_STORE = provider("secret-store-reference", "secret-store", "SecretStore");
 
@@ -64,9 +92,7 @@ function validTemplatePackage(): unknown {
     metadata: { name: "browser-handoff-package", version: "0.1.0" },
     spec: {
       templates: [structuredClone(BROWSER_HANDOFF_TEMPLATE)],
-      schema: {
-        recipient: { type: "string", required: true, min: 1 },
-      },
+      schema: objectSchema({ recipient: { type: "string", minLength: 1 } }, ["recipient"]),
       defaults: {
         "browser-handoff": {
           HumanEntrypoint: "entrypoint-novnc",
@@ -199,6 +225,77 @@ describe("ProviderProfile and ProviderProfileOverlay contracts", () => {
         "spec.config.secret-store-reference.password",
       ]),
     );
+  });
+
+  it("rejects profile config for providers that declare no agent-facing config_schema", () => {
+    const withSchema = provider("entrypoint-no-config", "entrypoint", "HumanEntrypoint");
+    const noSchema: ProviderManifest = {
+      ...withSchema,
+      spec: {
+        family: withSchema.spec.family,
+        capability: withSchema.spec.capability,
+        ...(withSchema.spec.probe !== undefined ? { probe: withSchema.spec.probe } : {}),
+        ...(withSchema.spec.skills !== undefined ? { skills: withSchema.spec.skills } : {}),
+      },
+    };
+
+    const result = validateProviderProfileInputs({
+      providers: [...INSTALLED_PROVIDERS, noSchema],
+      profiles: [
+        {
+          apiVersion: "gla.dev/v1",
+          kind: "ProviderProfile",
+          metadata: { name: "closed-config" },
+          spec: {
+            select: { HumanEntrypoint: "entrypoint-no-config" },
+            config: { "entrypoint-no-config": { unexpected: true } },
+          },
+        },
+      ],
+    });
+
+    expect(codes(result)).toContain("profile.config_invalid");
+    expect(JSON.stringify(result.diagnostics)).toContain("unexpected");
+  });
+
+  it("validates profile config against factory_config_schema by default", () => {
+    const factoryOnly: ProviderManifest = {
+      apiVersion: "gla.dev/v1",
+      kind: "CompletionDetector",
+      metadata: { name: "detector-factory-only", version: "0.1.0" },
+      spec: {
+        family: "detector",
+        capability: { summary: "factory-only detector" },
+        factory_config_schema: objectSchema({ pollMs: { type: "number", minimum: 1 } }, ["pollMs"]),
+        probe: "detector-factory-only",
+      },
+    };
+    const profile = {
+      apiVersion: "gla.dev/v1",
+      kind: "ProviderProfile",
+      metadata: { name: "factory-config" },
+      spec: {
+        select: { CompletionDetector: "detector-factory-only" },
+        config: { "detector-factory-only": { pollMs: 1 } },
+      },
+    };
+
+    expect(
+      validateProviderProfileInputs({
+        providers: [...INSTALLED_PROVIDERS, factoryOnly],
+        profiles: [profile],
+      }),
+    ).toEqual({ ok: true, diagnostics: [] });
+
+    expect(
+      codes(
+        validateProviderProfileInputs({
+          providers: [...INSTALLED_PROVIDERS, factoryOnly],
+          profiles: [profile],
+          configValidationMode: "runtime",
+        }),
+      ),
+    ).toContain("profile.config_invalid");
   });
 
   it("validates template/provider defaults with the same fail-closed selection rules", () => {

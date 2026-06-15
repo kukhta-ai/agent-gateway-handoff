@@ -1,3 +1,4 @@
+import { type ConfigSchema, EMPTY_CONFIG_SCHEMA } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import {
   BROWSER_HANDOFF_TEMPLATE,
@@ -19,6 +20,22 @@ import {
   validateTemplatePackageAuthoring,
 } from "../../src/index.js";
 
+function emptySchema(): ConfigSchema {
+  return structuredClone(EMPTY_CONFIG_SCHEMA);
+}
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
+
 function provider(
   id: string,
   family: Exclude<ProviderFamily, "template">,
@@ -32,7 +49,7 @@ function provider(
     spec: {
       family,
       capability: { summary: `${id} test provider` },
-      config_schema: {},
+      config_schema: emptySchema(),
       probe: id,
     },
   };
@@ -54,9 +71,9 @@ const AUTH_WEBAUTHN: ProviderManifest = {
         diagnostics: ["missing-user-verification"],
       },
     },
-    config_schema: {
-      rpID: { type: "string", required: false, default: "localhost", min: 1 },
-    },
+    config_schema: objectSchema({
+      rpID: { type: "string", default: "localhost", minLength: 1 },
+    }),
     probe: "auth-webauthn",
   },
 };
@@ -99,7 +116,7 @@ function templatePackage(): TemplatePackageManifest {
     metadata: { name: "browser-handoff-package", version: "0.1.0" },
     spec: {
       templates: [structuredClone(BROWSER_HANDOFF_TEMPLATE)],
-      schema: { recipient: { type: "string", required: true, min: 1 } },
+      schema: objectSchema({ recipient: { type: "string", minLength: 1 } }, ["recipient"]),
       defaults: {
         "launcher-process": { startTimeoutMs: 2_500 },
       },
@@ -148,6 +165,7 @@ describe("provider graph projection", () => {
         "launcher-process": { startTimeoutMs: 3_000 },
         "url-watcher": { complete_on: "/dashboard" },
       },
+      configValidationMode: "runtime",
     });
 
     if (!result.ok) {
@@ -197,6 +215,39 @@ describe("provider graph projection", () => {
     });
   });
 
+  it("defaults provider graph config validation to factory schemas for profile config", () => {
+    const factoryOnlyDetector: ProviderManifest = {
+      apiVersion: "gla.dev/v1",
+      kind: "CompletionDetector",
+      metadata: { name: "detector-factory-only", version: "0.1.0" },
+      spec: {
+        family: "detector",
+        capability: { summary: "factory-only detector" },
+        factory_config_schema: objectSchema({ pollMs: { type: "number", minimum: 1 } }, ["pollMs"]),
+        probe: "detector-factory-only",
+      },
+    };
+    const input = {
+      providerSet: { providers: [factoryOnlyDetector] },
+      baseProfile: {
+        apiVersion: "gla.dev/v1",
+        kind: "ProviderProfile",
+        metadata: { name: "factory-profile" },
+        spec: {
+          select: { CompletionDetector: "detector-factory-only" },
+          config: { "detector-factory-only": { pollMs: 1 } },
+        },
+      },
+    } satisfies Parameters<typeof resolveProviderGraphProjection>[0];
+
+    expect(resolveProviderGraphProjection(input).ok).toBe(true);
+    expect(
+      diagnosticCodes(
+        resolveProviderGraphProjection({ ...input, configValidationMode: "runtime" }),
+      ),
+    ).toContain("graph.config_invalid");
+  });
+
   it("rejects graph resolution defects with stable diagnostics", () => {
     const brokenTemplate = structuredClone(BROWSER_HANDOFF_TEMPLATE);
     brokenTemplate.spec.compatibleProviders = {
@@ -211,7 +262,7 @@ describe("provider graph projection", () => {
         capability: { summary: "ambiguous test template" },
         requiredParts: { entrypoint: "entrypoint-novnc" },
         openParts: ["entrypoint"],
-        openParams: { recipient: { type: "string", required: true, min: 1 } },
+        openParams: objectSchema({ recipient: { type: "string", minLength: 1 } }, ["recipient"]),
         skills: [
           {
             id: "ambiguous-entrypoint-template",
@@ -225,18 +276,30 @@ describe("provider graph projection", () => {
       ...(structuredClone(PROVIDER_MANIFESTS["launcher-process"]) as ProviderManifest),
       metadata: { name: "launcher-process", version: "9.9.9" },
     };
+    const duplicateLauncherSameVersion: ProviderManifest = {
+      ...(structuredClone(PROVIDER_MANIFESTS["launcher-process"]) as ProviderManifest),
+      metadata: { name: "launcher-process", version: "0.1.0" },
+    };
+    const duplicateTemplate = structuredClone(BROWSER_HANDOFF_TEMPLATE);
+    const duplicateTemplateVersion = structuredClone(BROWSER_HANDOFF_TEMPLATE);
+    duplicateTemplateVersion.metadata.version = "9.9.9";
     const badRelationProvider = provider("bad-relation", "launcher", "Launcher");
     const badRelationProviderManifest: ProviderManifest = {
       ...badRelationProvider,
       spec: {
         ...badRelationProvider.spec,
-        relations: { compatibleWith: { connectors: ["missing-connector"] } },
+        relations: {
+          compatibleWith: {
+            connectors: ["missing-connector"],
+            entyrpoints: ["entrypoint-novnc"],
+          },
+        },
       },
     };
 
     const result = resolveProviderGraphProjection({
       providerSet: {
-        providers: [...PROVIDERS, duplicateLauncher],
+        providers: [...PROVIDERS, duplicateLauncherSameVersion, duplicateLauncher],
       },
       providerManifests: [badRelationProviderManifest],
       baseProfile: {
@@ -266,7 +329,7 @@ describe("provider graph projection", () => {
           spec: { extends: "cycle-a" },
         },
       ],
-      templates: [brokenTemplate, ambiguousTemplate],
+      templates: [brokenTemplate, duplicateTemplate, duplicateTemplateVersion, ambiguousTemplate],
       compatibilityRequiredParts: ["entrypoint"],
     });
 
@@ -276,11 +339,22 @@ describe("provider graph projection", () => {
         "graph.unknown_family",
         "graph.unknown_provider",
         "graph.family_mismatch",
+        "graph.duplicate_provider",
         "graph.duplicate_provider_version",
+        "graph.duplicate_template",
+        "graph.duplicate_template_version",
         "graph.overlay_cycle",
         "graph.unresolved_relation",
         "graph.dependency_unavailable",
         "graph.compatibility_ambiguous",
+      ]),
+    );
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.unresolved_relation",
+          detail: expect.objectContaining({ relationKey: "entyrpoints" }),
+        }),
       ]),
     );
   });
@@ -294,6 +368,7 @@ describe("provider graph projection", () => {
       runtimeAssemblyParams: {
         "url-watcher": { complete_on: "/dashboard" },
       },
+      configValidationMode: "runtime",
     });
 
     if (!result.ok) {
@@ -458,6 +533,7 @@ describe("provider graph projection", () => {
       runtimeAssemblyParams: {
         "url-watcher": { complete_on: "/dashboard" },
       },
+      configValidationMode: "runtime",
     });
 
     const classicAdmission = toAdmissionCatalog(catalog, content);
@@ -524,7 +600,7 @@ describe("provider graph projection", () => {
         capability: { summary: "ambiguous template" },
         requiredParts: { entrypoint: "entrypoint-basic" },
         openParts: ["entrypoint"],
-        openParams: {},
+        openParams: emptySchema(),
       },
     };
     const graph = resolveProviderGraphProjection({
@@ -574,9 +650,9 @@ describe("provider graph projection", () => {
 
   it("propagates selected provider graph defects to fixed template availability", () => {
     const entrypoint = provider("entrypoint-needs-config", "entrypoint", "HumanEntrypoint");
-    entrypoint.spec.config_schema = {
-      origin: { type: "string", required: true, min: 1 },
-    };
+    entrypoint.spec.config_schema = objectSchema({ origin: { type: "string", minLength: 1 } }, [
+      "origin",
+    ]);
     const fixedTemplate: TemplateManifest = {
       apiVersion: "gla.dev/v1",
       kind: "CapsuleTemplate",
@@ -585,7 +661,7 @@ describe("provider graph projection", () => {
         family: "template",
         capability: { summary: "fixed template" },
         requiredParts: { entrypoint: "entrypoint-needs-config" },
-        openParams: {},
+        openParams: emptySchema(),
       },
     };
     const content = {
@@ -674,7 +750,7 @@ describe("provider graph projection", () => {
         capability: { summary: "open entrypoint without required compatibility" },
         requiredParts: { entrypoint: "entrypoint-basic" },
         openParts: ["entrypoint"],
-        openParams: { recipient: { type: "string", required: true, min: 1 } },
+        openParams: objectSchema({ recipient: { type: "string", minLength: 1 } }, ["recipient"]),
         skills: [
           { id: "open-entrypoint-template", for: "open-entrypoint-template", body: "# test" },
         ],
@@ -722,7 +798,7 @@ describe("provider graph projection", () => {
         family: "template",
         capability: { summary: "template with dependency-backed entrypoint" },
         requiredParts: { entrypoint: "entrypoint-external" },
-        openParams: { recipient: { type: "string", required: true, min: 1 } },
+        openParams: objectSchema({ recipient: { type: "string", minLength: 1 } }, ["recipient"]),
         skills: [
           {
             id: "external-entrypoint-template",
@@ -768,9 +844,9 @@ describe("provider graph projection", () => {
           summary: "share-link human entrypoint for a hosted browser view",
           client: { kind: "share-link", ref: "entrypoint-sharelink.client" },
         },
-        config_schema: {
-          theme: { type: "enum", required: false, enum: ["light", "dark"], default: "light" },
-        },
+        config_schema: objectSchema({
+          theme: { type: "string", enum: ["light", "dark"], default: "light" },
+        }),
         probe: "entrypoint-sharelink",
         skills: [
           {
@@ -801,9 +877,7 @@ describe("provider graph projection", () => {
           connector: ["connector-cdp"],
           detector: ["url-watcher", "user-done"],
         },
-        openParams: {
-          recipient: { type: "string", required: true, min: 1 },
-        },
+        openParams: objectSchema({ recipient: { type: "string", minLength: 1 } }, ["recipient"]),
         probe: "sharelink-handoff",
         skills: [
           {
@@ -820,16 +894,10 @@ describe("provider graph projection", () => {
       metadata: { name: "sharelink-handoff-package", version: "0.1.0" },
       spec: {
         templates: [sharelinkTemplate],
-        schema: { recipient: { type: "string", required: true, min: 1 } },
-        defaults: {
-          "sharelink-handoff": {
-            HumanEntrypoint: "entrypoint-sharelink",
-            AgentConnector: "connector-cdp",
-            CompletionDetector: "url-watcher",
-          },
-        },
+        schema: objectSchema({ recipient: { type: "string", minLength: 1 } }, ["recipient"]),
+        defaults: { "entrypoint-sharelink": { theme: "light" } },
         compatibility: {
-          openParts: ["entrypoint", "connector", "detector"],
+          requiredParts: ["entrypoint", "connector", "detector"],
         },
         docs: ["templates/sharelink-handoff/README.md"],
         tests: ["packages/catalog/test/unit/provider-graph-projection.test.ts"],
@@ -901,6 +969,7 @@ describe("provider graph projection", () => {
         "entrypoint-sharelink": { theme: "dark" },
         "url-watcher": { complete_on: "/dashboard" },
       },
+      configValidationMode: "runtime",
       probes: {
         "entrypoint-sharelink": () => "available",
         "sharelink-handoff": () => "available",
@@ -950,7 +1019,9 @@ describe("provider graph projection", () => {
       available: true,
       family: "entrypoint",
       config_schema: expect.objectContaining({
-        theme: expect.objectContaining({ type: "enum" }),
+        properties: expect.objectContaining({
+          theme: expect.objectContaining({ type: "string", enum: ["light", "dark"] }),
+        }),
       }),
     });
     expect(admission.templateDefaults("sharelink-handoff")).toMatchObject({

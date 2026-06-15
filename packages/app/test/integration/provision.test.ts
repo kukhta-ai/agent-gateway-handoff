@@ -19,6 +19,7 @@ import type {
   AgentConnectorPort,
   ChannelPort,
   CompletionDetectorPort,
+  ConfigSchema,
   HumanEntrypointBinding,
   HumanEntrypointPort,
   LauncherPort,
@@ -38,6 +39,18 @@ import { createReferenceProviderHost } from "@gla/provider-set-reference";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
 import { createBridge, createProvisioningBridge } from "../../src/index.js";
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
 
 function capture(): { out: Output; stdout: () => string; stderr: () => string } {
   const o: string[] = [];
@@ -220,7 +233,7 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
   }
 
   class FakeDetector implements CompletionDetectorPort {
-    readonly contract = {};
+    readonly contract: ConfigSchema = objectSchema({});
 
     async *watch(_handle: RuntimeHandle): AsyncIterable<RawCompletionSignal> {
       records.detectorSignals.push("fake-complete");
@@ -348,9 +361,7 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
         spec: {
           family: "channel",
           capability: { summary: "fake channel selected through Provider Host" },
-          config_schema: {
-            mode: { type: "enum", enum: ["record"], required: false },
-          },
+          config_schema: objectSchema({ mode: { type: "string", enum: ["record"] } }),
           probe: "channel-fake",
         },
       },

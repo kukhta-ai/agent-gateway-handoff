@@ -13,6 +13,7 @@ import type {
   AuthProviderPort,
   ChannelPort,
   CompletionDetectorPort,
+  ConfigSchema,
   HumanEntrypointPort,
   IdentityPort,
   IdentityVerificationResult,
@@ -52,6 +53,18 @@ import {
   referenceProviderStoreContent,
   referenceTemplateProviderDefaultsForProfile,
 } from "../../src/index.js";
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
 
 const fakeIdentity: IdentityPort = {
   async bind(recipient: RecipientRef, _ctx: { channel: string }): Promise<RecipientBinding> {
@@ -134,7 +147,7 @@ function contractManifest(spec: ContractModuleSpec): ProviderManifest {
     spec: {
       family: spec.family,
       capability: { summary: spec.summary },
-      config_schema: { mode: { type: "enum", enum: ["ok"], required: true } },
+      config_schema: objectSchema({ mode: { type: "string", enum: ["ok"] } }, ["mode"]),
       probe: spec.id,
       skills: [
         {
@@ -241,9 +254,9 @@ function contractModule(spec: ContractModuleSpec): GlaProviderModule {
         }
         case "detector": {
           const detector: CompletionDetectorPort = {
-            contract: {
-              status: { type: "enum", enum: ["contract-complete"], required: true },
-            },
+            contract: objectSchema({ status: { type: "string", enum: ["contract-complete"] } }, [
+              "status",
+            ]),
             async *watch(): AsyncIterable<RawCompletionSignal> {
               yield {
                 detector: spec.id,
@@ -552,7 +565,10 @@ describe("referenceProviderModules", () => {
         metadata: { name: spec.id, version: "0.1.0" },
         spec: {
           family: spec.family,
-          config_schema: { mode: { enum: ["ok"], required: true } },
+          config_schema: {
+            required: ["mode"],
+            properties: { mode: { type: "string", enum: ["ok"] } },
+          },
           probe: spec.id,
           skills: [{ id: `use-${spec.id}`, for: spec.id }],
         },
@@ -568,9 +584,9 @@ describe("referenceProviderModules", () => {
         id: `use-${spec.id}`,
         for: spec.id,
       });
-      expect(admissionCatalog.provider(spec.id)?.config_schema).toEqual({
-        mode: { type: "enum", enum: ["ok"], required: true },
-      });
+      expect(admissionCatalog.provider(spec.id)?.config_schema).toEqual(
+        objectSchema({ mode: { type: "string", enum: ["ok"] } }, ["mode"]),
+      );
 
       await expect(
         host.createProvider(spec.family, spec.id, { config: { mode: "ok" } }),
@@ -667,12 +683,14 @@ describe("referenceProviderModules", () => {
     });
 
     expect(host.providerManifest("launcher-process")?.spec.config_schema).toMatchObject({
-      mode: { type: "enum", enum: ["auto", "headless", "full"] },
-      chromiumPath: { type: "string" },
-      startTimeoutMs: { type: "number" },
+      properties: {
+        mode: { type: "string", enum: ["auto", "headless", "full"] },
+        chromiumPath: { type: "string" },
+        startTimeoutMs: { type: "number" },
+      },
     });
     expect(host.providerManifest("workspace-profile")?.spec.config_schema).toMatchObject({
-      root: { type: "string" },
+      properties: { root: { type: "string" } },
     });
 
     const launcherDependencyEvidence = catalog.show("launcher-process")?.requires;
@@ -729,8 +747,10 @@ describe("referenceProviderModules", () => {
     const host = createReferenceProviderHost();
 
     expect(host.providerManifest("channel-cli")?.spec.config_schema).toMatchObject({
-      delivery: { type: "enum", enum: ["stdout", "injected"] },
-      inbound: { type: "enum", enum: ["memory", "injected"] },
+      properties: {
+        delivery: { type: "string", enum: ["stdout", "injected"] },
+        inbound: { type: "string", enum: ["memory", "injected"] },
+      },
     });
     expect(() =>
       host.createProviderSync("channel", "channel-cli", {
@@ -795,7 +815,7 @@ describe("referenceProviderModules", () => {
       kind: "SecretStore",
       spec: {
         family: "secret-store",
-        config_schema: { namespace: { type: "string" } },
+        config_schema: { properties: { namespace: { type: "string" } } },
         probe: "secret-store-reference",
       },
     });
@@ -825,7 +845,7 @@ describe("referenceProviderModules", () => {
           spec: {
             family: "channel",
             capability: { summary: "fake channel" },
-            config_schema: { mode: { type: "enum", enum: ["record"], required: false } },
+            config_schema: objectSchema({ mode: { type: "string", enum: ["record"] } }),
             probe: "channel-fake",
           },
         },
@@ -842,7 +862,7 @@ describe("referenceProviderModules", () => {
           spec: {
             family: "secret-store",
             capability: { summary: "fake secret store", diagnostics: "secret-ref-only" },
-            config_schema: { namespace: { type: "string", required: false } },
+            config_schema: objectSchema({ namespace: { type: "string" } }),
             probe: "secret-store-fake",
           },
         },

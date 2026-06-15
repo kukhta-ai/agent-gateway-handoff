@@ -1,3 +1,4 @@
+import { EMPTY_CONFIG_SCHEMA } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import {
   PROVIDER_MANIFESTS,
@@ -23,7 +24,7 @@ function provider(
     spec: {
       family,
       capability: { summary: `${id} provider` },
-      config_schema: {},
+      config_schema: structuredClone(EMPTY_CONFIG_SCHEMA),
       probe: id,
       skills: [{ id: `use-${id}`, for: id, body: `# ${id}` }],
     },
@@ -105,6 +106,7 @@ describe("provider package authoring validation", () => {
               connectionRefs: ["issuerUrl"],
             },
           ],
+          relations: { compatibleWith: { entyrpoints: ["entrypoint-novnc"] } },
           skills: [],
         },
       },
@@ -132,6 +134,7 @@ describe("provider package authoring validation", () => {
         "provider_author.probe_missing",
         "provider_author.skills_or_docs_missing",
         "provider_author.wpm_bundle_missing",
+        "provider_author.compatibility_invalid",
         "provider_author.redaction_violation",
         "provider_author.contract_tests_missing",
         "provider_author.narrow_waist_edit",
@@ -185,6 +188,9 @@ describe("template package authoring validation", () => {
         connector: ["connector-cdp"],
         detector: ["url-watcher"],
       },
+      providerDefaults: {
+        "launcher-process": { startTimeoutMs: 42 },
+      },
       requires: [
         {
           dependency: "edge-proxy",
@@ -201,6 +207,12 @@ describe("template package authoring validation", () => {
 
     expect(result.ok).toBe(true);
     expect(result.diagnostics).toEqual([]);
+    expect(skeleton.manifest.spec.defaults).toEqual({
+      "launcher-process": { startTimeoutMs: 42 },
+    });
+    expect(skeleton.manifest.spec.compatibility).toEqual({
+      requiredParts: ["entrypoint", "connector", "detector"],
+    });
     expect(result.readiness).toMatchObject({
       packageId: "browser-handoff-lite-package",
       templateIds: ["browser-handoff-lite"],
@@ -267,7 +279,7 @@ describe("template package authoring validation", () => {
               Launcher: "entrypoint-novnc",
             },
           },
-          compatibility: {},
+          compatibility: { openParts: ["entrypoint"] },
           docs: [],
           tests: ["templates/broken-template/test/contract/broken-template.test.ts"],
         },

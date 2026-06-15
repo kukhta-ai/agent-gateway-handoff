@@ -60,6 +60,7 @@ import type {
   SecretValue,
   WorkspacePort,
 } from "@gla/kernel";
+import { EMPTY_CONFIG_SCHEMA } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { ProviderHost } from "@gla/provider-host";
 import type {
@@ -122,6 +123,7 @@ export interface ReferenceRuntimeProviderProfile {
   entrypoint: ProviderId;
   detector: ProviderId;
   channel: ProviderId;
+  secretStore: ProviderId;
 }
 
 /** Operator-facing read model for a named reference profile. */
@@ -304,6 +306,7 @@ export function referenceProviderRuntimeProfile(
     entrypoint: selectionProviderId(select.HumanEntrypoint),
     detector: selectionProviderId(select.CompletionDetector),
     channel: selectionProviderId(select.ChannelAdapter),
+    secretStore: selectionProviderId(select.SecretStore),
   };
 }
 
@@ -491,7 +494,7 @@ function moduleFor(
   };
 }
 
-const USER_DONE_CONTRACT: ConfigSchema = {};
+const USER_DONE_CONTRACT: ConfigSchema = EMPTY_CONFIG_SCHEMA;
 
 class UserDoneDetectorAdapter implements CompletionDetectorPort {
   readonly contract: ConfigSchema = USER_DONE_CONTRACT;
@@ -550,13 +553,17 @@ export const AUTH_WEBAUTHN_PROVIDER_MANIFEST: ProviderManifest = {
       },
     },
     config_schema: {
-      rpID: { type: "string", required: true, min: 1 },
-      rpName: { type: "string", required: false, min: 1 },
-      expectedOrigin: {
-        type: "list",
-        required: true,
-        min: 1,
-        items: { type: "string", min: 1 },
+      type: "object",
+      additionalProperties: false,
+      required: ["rpID", "expectedOrigin"],
+      properties: {
+        rpID: { type: "string", minLength: 1 },
+        rpName: { type: "string", minLength: 1 },
+        expectedOrigin: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", minLength: 1 },
+        },
       },
     },
     probe: "webauthn",
@@ -592,11 +599,16 @@ export const AUTH_AUTHENTIK_PROVIDER_MANIFEST: ProviderManifest = {
       },
     },
     config_schema: {
-      issuerUrl: { type: "string", required: true, min: 1 },
-      clientId: { type: "string", required: true, min: 1 },
-      clientSecret: { type: "string", required: true, min: 1, sensitive: true },
-      redirectUri: { type: "string", required: true, min: 1 },
-      scopes: { type: "string", required: false, min: 1 },
+      type: "object",
+      additionalProperties: false,
+      required: ["issuerUrl", "clientId", "clientSecret", "redirectUri"],
+      properties: {
+        issuerUrl: { type: "string", minLength: 1 },
+        clientId: { type: "string", minLength: 1 },
+        clientSecret: { type: "string", minLength: 1, "x-gla-sensitive": true },
+        redirectUri: { type: "string", minLength: 1 },
+        scopes: { type: "string", minLength: 1 },
+      },
     },
     requires: [
       {
@@ -633,7 +645,11 @@ export const SECRET_STORE_REFERENCE_MANIFEST: ProviderManifest = {
       diagnostics: "secret-ref-only",
     },
     config_schema: {
-      namespace: { type: "string", required: false, min: 1 },
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        namespace: { type: "string", minLength: 1 },
+      },
     },
     probe: "secret-store-reference",
     skills: [
