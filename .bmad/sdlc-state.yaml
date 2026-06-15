@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider graph follow-up GLA-108 in progress"
-branch: feature/provider-graph-task-108
+phase_name: "Autonomous build — provider graph follow-up GLA-109 next"
+branch: feature/provider-graph
 epic: provider-graph-107
-active_story: GLA-108
+active_story: null
 review_cycle: 0
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "GLA-108 in progress on feature/provider-graph-task-108; GLA-109 remains next after GLA-108 is Done"
-  note: "2026-06-15 user goal: implement backlog tasks GLA-108 through GLA-109 according to project SDLC, architecture, and vision. Reusing persistent provider-graph specialists first: architect James, UX Arendt, SM Lagrange, worker Avicenna, TEA/reviewer Planck, investigator Ampere. BMAD story-loop skills loaded; repo lacks BMAD sprint-status.yaml/story specs for automatic workflow execution, so Backlog.md/design-set fallback is explicit per Rule 3."
+  next_ready_sequence: "GLA-108 Done and merged into feature/provider-graph; GLA-109 is next."
+  note: "2026-06-15 user goal: implement backlog tasks GLA-108 through GLA-109 according to project SDLC, architecture, and vision. Reusing persistent provider-graph specialists first: architect James, UX Arendt, SM Lagrange, worker Avicenna, TEA/reviewer Planck, investigator Ampere. BMAD story-loop skills loaded; repo lacks BMAD sprint-status.yaml/story specs for automatic workflow execution, so Backlog.md/design-set fallback is explicit per Rule 3. GLA-108 completed with Planck re-review clean and pnpm gate passing with required browser E2E."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
 # (Redis-free path; postgres+server+worker); GLA's REAL adapter did a REAL OIDC round-trip -> finishEnrollment+verifyAssertion ->
@@ -137,4 +137,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-15T12:00:12Z"
+last_updated: "2026-06-15T12:42:09Z"
