@@ -34,12 +34,13 @@ cookies, or an authentik browser session are not GLA grants and cannot satisfy t
 scope, TTL/revocation, enrollment, or assurance checks the Access Gateway owns.
 
 It does **not** own noVNC or any other Human Entrypoint provider. The selected provider declares browser-client
-metadata and assets; the gateway serves those assets by opaque provider `ref` and applies the same grant checks to
-the route transport. Adding a different entrypoint client must not add a new authorization branch.
+metadata and assets; the gateway serves those assets by provider-scoped opaque `ref` values shaped
+`<providerId>.<assetRef>` and applies the same grant checks to the route transport. Adding a different entrypoint
+client must not add a new authorization branch.
 
 ## Entities & data
 
-Grant capabilities (verified), `RevocationEntry` cache, `Route` authorization state (path, grant, session/entrypoint resource), a reverse-proxy transport binding (protocol + upstream), and provider browser-client asset mounts keyed by opaque client `ref`.
+Grant capabilities (verified), `RevocationEntry` cache, `Route` authorization state (path, grant, session/entrypoint resource), a reverse-proxy transport binding (protocol + upstream), and provider browser-client asset mounts keyed by provider-scoped opaque client `ref`.
 
 ## Bearer-bearing public surfaces
 

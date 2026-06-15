@@ -343,9 +343,9 @@ Identity + Auth responsibilities.
 Provider-owned browser assets are served through generic gateway asset mounts only after provider-set mapping and
 validation:
 
-- asset refs are namespaced by provider id and cannot collide with route, grant, enrollment, callback, or other
-  provider asset paths;
-- asset roots are read-only, canonicalized, and path traversal is rejected;
+- asset refs are namespaced by provider id (`<providerId>.<assetRef>`) and cannot collide with route, grant,
+  enrollment, callback, or other provider asset paths;
+- asset roots carry an explicit reviewed read-only declaration, are canonicalized, and path traversal is rejected;
 - assets are versioned or content-addressed, with content hash recorded for diagnostics;
 - provider assets must not contain raw grants, bootstrap tickets, secret refs, operator tokens, or generated
   runtime config;
@@ -358,7 +358,7 @@ validation:
 
 Provider state lives in Provider Host namespaces and follows daemon-state recovery rules:
 
-- state keys are scoped by provider id and schema version;
+- state keys are scoped by provider id and schema version as `provider.<providerId>.v<schemaVersion>.<slot>`;
 - sensitive classification is the default unless the provider proves otherwise;
 - schema migrations are explicit and fail closed on unknown versions;
 - provider namespaces load before public gateway binding when they affect enrollment, auth, grants, routes, or live

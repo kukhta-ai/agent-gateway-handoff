@@ -63,7 +63,9 @@ record contents.
 - A backup without `state.key` is intentionally not enough to decrypt records.
 - Restoring an old backup can revive old operational facts; operators must prefer explicit incident cleanup or
 re-enrollment when rollback is suspected.
-- Schema migrations must be explicit and fail closed. Unknown schema versions are not auto-interpreted.
+- Provider-owned state records are keyed as `provider.<providerId>.v<schemaVersion>.<slot>` and are read during
+  daemon recovery before public gateway traffic is bound. Schema migrations must be explicit and fail closed.
+  Unknown schema versions are not auto-interpreted.
 - Capability signing-key rotation invalidates previously issued bearer capabilities unless a future migration
 explicitly reissues them. After suspected key exposure, stop the daemon, preserve the state root for incident
 evidence, rotate/remove the state root, re-enroll recipients, and recreate active tasks/sessions.

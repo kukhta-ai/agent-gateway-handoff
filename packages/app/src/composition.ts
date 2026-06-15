@@ -68,6 +68,7 @@ import {
   ProviderHost,
   type ProviderId,
   type ProviderKvStore,
+  type ProviderStateNamespaceMetadata,
   type ProviderStateRoot,
   type RuntimeProviderFamily,
   providerServices,
@@ -89,7 +90,7 @@ import {
   WorkspaceManager,
   attachConnector,
 } from "@gla/worker";
-import { DaemonStateRoot } from "./daemon-state.js";
+import { DaemonStateError, DaemonStateRoot } from "./daemon-state.js";
 
 /** The MVP default wiring (baseline §5): which adapter is bound to each kernel port. */
 export interface Wiring {
@@ -722,9 +723,20 @@ function buildAuthProvider(
 class DaemonProviderStateRoot implements ProviderStateRoot {
   constructor(private readonly state: DaemonStateRoot) {}
 
-  namespace(providerId: ProviderId): { kv<T>(slot: string): ProviderKvStore<T> } {
+  namespace(
+    providerId: ProviderId,
+    metadata: ProviderStateNamespaceMetadata = {
+      providerId,
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
+      diagnostics: [],
+    },
+  ): ProviderStateNamespaceMetadata & { kv<T>(slot: string): ProviderKvStore<T> } {
     return {
-      kv: <T>(slot: string) => this.state.kv<T>(`provider.${providerId}.${slot}`),
+      ...metadata,
+      kv: <T>(slot: string) =>
+        this.state.kv<T>(providerStateKind(providerId, metadata.schemaVersion, slot)),
     };
   }
 }
@@ -734,6 +746,36 @@ function providerStateRoot(state: DaemonStateRoot | undefined): ProviderStateRoo
     return undefined;
   }
   return new DaemonProviderStateRoot(state);
+}
+
+function providerStateKind(providerId: ProviderId, schemaVersion: number, slot: string): string {
+  return `provider.${providerId}.v${schemaVersion}.${slot}`;
+}
+
+function verifyProviderStateRecovery(state: DaemonStateRoot | undefined, host: ProviderHost): void {
+  if (state === undefined) {
+    return;
+  }
+  const known = new Set<string>();
+  for (const descriptor of host.providerDescriptors()) {
+    const schema = descriptor.stateSchema;
+    if (schema === undefined) {
+      continue;
+    }
+    for (const slot of Object.keys(schema.slots)) {
+      const kind = providerStateKind(descriptor.providerId, schema.schemaVersion, slot);
+      known.add(kind);
+      state.kv<unknown>(kind).entries();
+    }
+  }
+  for (const kind of state.recordKinds("provider.")) {
+    if (!known.has(kind)) {
+      throw new DaemonStateError(
+        "state.schema",
+        `unsupported provider state schema record: ${kind}`,
+      );
+    }
+  }
 }
 
 function stateSlot<T>(
@@ -1266,6 +1308,7 @@ export function createProvisioningBridge(
       : undefined;
   let stateOwnedByStack = false;
   try {
+    verifyProviderStateRecovery(state, providerHost);
     const launcherProviderId = profile.launcher;
     const workspaceProviderId = profile.workspace;
     const connectorProviderId = profile.connector;

@@ -23,6 +23,7 @@
 // services satisfy.
 
 import { randomBytes } from "node:crypto";
+import { lstatSync, statSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import {
   type IncomingMessage,
@@ -243,10 +244,14 @@ interface ReverseProxyTransportBinding {
 
 /** Provider-owned browser-client assets the gateway serves read-only under `/handoff/client-assets/<ref>/...`. */
 export interface EntrypointClientAssetMount {
-  /** Provider-owned reference from `HumanEntrypointClientBinding.ref`. */
+  /** Runtime provider id that owns the browser assets and namespaces the ref. */
+  providerId: string;
+  /** Provider-owned reference from `HumanEntrypointClientBinding.ref`; must start with `<providerId>.`. */
   ref: string;
   /** Local read-only directory containing browser assets for that ref. */
   root: string;
+  /** Reviewed declaration that the asset root is immutable/read-only during gateway serving. */
+  readOnly: true;
   /** Cache policy for served assets. Defaults to `no-cache` so module trees revalidate across upgrades. */
   cacheControl?: string;
 }
@@ -422,8 +427,8 @@ export class AccessGateway {
   private readonly proxyConnectTimeoutMs: number;
   /** The WS-proxy idle timeout (ms) applied to both proxied sockets — a stalled stream cannot pin fds. 0 disables. */
   private readonly proxyIdleTimeoutMs: number;
-  /** Provider browser-client assets served from local read-only roots, grouped by provider ref. */
-  private readonly entrypointClientAssets = new Map<string, EntrypointClientAssetMount[]>();
+  /** Provider browser-client assets served from local read-only roots, keyed by provider-scoped ref. */
+  private readonly entrypointClientAssets = new Map<string, EntrypointClientAssetMount>();
   /** Short-lived same-origin stream tickets that let browser WebSockets avoid grant-bearing URLs. */
   private readonly streamTickets = new Map<
     string,
@@ -459,12 +464,13 @@ export class AccessGateway {
     this.trustForwardedPrefix = opts.trustForwardedPrefix ?? false;
     for (const mount of opts.entrypointClientAssets ?? []) {
       const normalized = normalizeClientAssetMount(mount);
-      if (normalized === undefined) {
-        continue;
+      if (this.entrypointClientAssets.has(normalized.ref)) {
+        throw layerError(
+          "client-asset-mount",
+          `duplicate provider client asset ref: ${normalized.ref}`,
+        );
       }
-      const existing = this.entrypointClientAssets.get(normalized.ref) ?? [];
-      existing.push(normalized);
-      this.entrypointClientAssets.set(normalized.ref, existing);
+      this.entrypointClientAssets.set(normalized.ref, normalized);
     }
   }
 
@@ -1243,6 +1249,15 @@ export class AccessGateway {
         return;
       }
       const body = await readFile(file);
+      const unsafe = unsafeClientAssetContent(file, body);
+      if (unsafe !== undefined) {
+        this.sendJson(
+          res,
+          403,
+          this.errBody("policy.denied", `provider client asset rejected: ${unsafe}`),
+        );
+        return;
+      }
       res.writeHead(200, {
         "content-type": contentTypeForPath(file),
         "content-length": body.byteLength,
@@ -1830,26 +1845,87 @@ function layerError(layer: string, message: string): Error {
   return err;
 }
 
-function normalizeClientAssetMount(
-  mount: EntrypointClientAssetMount,
-): EntrypointClientAssetMount | undefined {
-  if (!/^[a-zA-Z0-9._-]+$/.test(mount.ref)) {
-    return undefined;
+const SAFE_CLIENT_ASSET_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$/;
+const RESERVED_CLIENT_ASSET_REFS = new Set([
+  "auth",
+  "callback",
+  "client-assets",
+  "enroll",
+  "grant",
+  "grants",
+  "handoff",
+  "route",
+  "routes",
+]);
+
+function normalizeClientAssetMount(mount: EntrypointClientAssetMount): EntrypointClientAssetMount {
+  if (!SAFE_CLIENT_ASSET_ID.test(mount.providerId)) {
+    throw layerError("client-asset-mount", "invalid provider client asset provider id");
+  }
+  if (!SAFE_CLIENT_ASSET_ID.test(mount.ref)) {
+    throw layerError("client-asset-mount", "invalid provider client asset ref");
+  }
+  const namespacePrefix = `${mount.providerId}.`;
+  if (!mount.ref.startsWith(namespacePrefix) || mount.ref.length === namespacePrefix.length) {
+    throw layerError(
+      "client-asset-mount",
+      `provider client asset ref "${mount.ref}" must be namespaced as "${namespacePrefix}<asset>"`,
+    );
+  }
+  const localRef = mount.ref.slice(namespacePrefix.length);
+  if (RESERVED_CLIENT_ASSET_REFS.has(localRef) || RESERVED_CLIENT_ASSET_REFS.has(mount.ref)) {
+    throw layerError(
+      "client-asset-mount",
+      `provider client asset ref overlaps a reserved gateway surface: ${mount.ref}`,
+    );
+  }
+  if (mount.readOnly !== true) {
+    throw layerError("client-asset-mount", `provider client asset root is mutable: ${mount.ref}`);
   }
   const root = resolvePath(mount.root);
   if (root.length === 0) {
-    return undefined;
+    throw layerError("client-asset-mount", "provider client asset root is empty");
+  }
+  try {
+    if (lstatSync(root).isSymbolicLink()) {
+      throw layerError(
+        "client-asset-mount",
+        `provider client asset root must not be a symlink: ${mount.ref}`,
+      );
+    }
+    if (!statSync(root).isDirectory()) {
+      throw layerError(
+        "client-asset-mount",
+        `provider client asset root must be a directory: ${mount.ref}`,
+      );
+    }
+    if ((statSync(root).mode & 0o022) !== 0) {
+      throw layerError(
+        "client-asset-mount",
+        `provider client asset root must not be group/world writable: ${mount.ref}`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof Error && "layer" in error) {
+      throw error;
+    }
+    throw layerError(
+      "client-asset-mount",
+      `provider client asset root is unavailable: ${mount.ref}`,
+    );
   }
   return {
+    providerId: mount.providerId,
     ref: mount.ref,
     root,
+    readOnly: true,
     ...(mount.cacheControl !== undefined ? { cacheControl: mount.cacheControl } : {}),
   };
 }
 
 function resolveClientAssetRequest(
   path: string,
-  mountsByRef: ReadonlyMap<string, readonly EntrypointClientAssetMount[]>,
+  mountsByRef: ReadonlyMap<string, EntrypointClientAssetMount>,
 ): { path: string; root: string; cacheControl?: string } | undefined {
   const prefix = "/handoff/client-assets/";
   if (!path.startsWith(prefix)) {
@@ -1862,6 +1938,9 @@ function resolveClientAssetRequest(
   }
   const ref = rest.slice(0, slash);
   if (!/^[a-zA-Z0-9._-]+$/.test(ref)) {
+    return undefined;
+  }
+  if (RESERVED_CLIENT_ASSET_REFS.has(ref)) {
     return undefined;
   }
   const rawAssetPath = rest.slice(slash + 1);
@@ -1879,18 +1958,58 @@ function resolveClientAssetRequest(
   ) {
     return undefined;
   }
-  for (const mount of mountsByRef.get(ref) ?? []) {
-    const root = resolvePath(mount.root);
-    const candidate = resolvePath(root, ...segments);
-    const rel = relative(root, candidate);
-    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-      continue;
+  const mount = mountsByRef.get(ref);
+  if (mount === undefined) {
+    return undefined;
+  }
+  const root = resolvePath(mount.root);
+  const candidate = resolvePath(root, ...segments);
+  const rel = relative(root, candidate);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    return undefined;
+  }
+  return {
+    path: candidate,
+    root,
+    ...(mount.cacheControl !== undefined ? { cacheControl: mount.cacheControl } : {}),
+  };
+}
+
+const TEXT_CLIENT_ASSET_EXTENSIONS = new Set([
+  ".css",
+  ".htm",
+  ".html",
+  ".js",
+  ".json",
+  ".map",
+  ".mjs",
+  ".svg",
+  ".txt",
+]);
+
+const UNSAFE_CLIENT_ASSET_PATTERNS: Array<{ reason: string; pattern: RegExp }> = [
+  { reason: "raw grant", pattern: /["']?\bgrant\b["']?\s*[:=]\s*["']?[a-z0-9._~+/=-]{8,}/i },
+  {
+    reason: "bootstrap ticket",
+    pattern: /\b(?:gla_handoff_boot|gla_enroll_boot|bootstrapTicket|bootstrap_ticket)\b/i,
+  },
+  { reason: "secret ref", pattern: /\b(?:secret:gla\/|secret-ref|secretRef)\b/i },
+  { reason: "operator token", pattern: /\b(?:operator[-_\s]?token|operatorToken)\b/i },
+  {
+    reason: "generated runtime config",
+    pattern: /\b(?:generatedRuntimeConfig|["']?runtimeConfig["']?\s*[:=])/i,
+  },
+];
+
+function unsafeClientAssetContent(path: string, body: Buffer): string | undefined {
+  if (!TEXT_CLIENT_ASSET_EXTENSIONS.has(extname(path).toLowerCase())) {
+    return undefined;
+  }
+  const text = body.toString("utf8");
+  for (const { reason, pattern } of UNSAFE_CLIENT_ASSET_PATTERNS) {
+    if (pattern.test(text)) {
+      return reason;
     }
-    return {
-      path: candidate,
-      root,
-      ...(mount.cacheControl !== undefined ? { cacheControl: mount.cacheControl } : {}),
-    };
   }
   return undefined;
 }

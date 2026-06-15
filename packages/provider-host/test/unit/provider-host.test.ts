@@ -75,13 +75,21 @@ describe("ProviderHost", () => {
       },
     });
     expect(host.providerStateSchema("fake-launcher")).toEqual({
-      slots: { runtime: { summary: "fake runtime state" } },
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
+      slots: { runtime: { summary: "fake runtime state", sensitivity: "sensitive" } },
     });
     expect(host.providerDescriptor("fake-launcher")).toMatchObject({
       providerId: "fake-launcher",
       moduleId: "@gla/fake-launcher-provider",
       manifest: { metadata: { name: "fake-launcher" } },
-      stateSchema: { slots: { runtime: { summary: "fake runtime state" } } },
+      stateSchema: {
+        schemaVersion: 1,
+        sensitivity: "sensitive",
+        migration: "fail-closed",
+        slots: { runtime: { summary: "fake runtime state", sensitivity: "sensitive" } },
+      },
     });
     expect(host.providerDescriptors().map((descriptor) => descriptor.moduleId)).toEqual([
       "@gla/fake-launcher-provider",
@@ -95,6 +103,22 @@ describe("ProviderHost", () => {
       stateRoot.namespace("fake-launcher").kv<{ seen: boolean }>("runtime").get("created"),
     ).toEqual({
       seen: true,
+    });
+    expect(stateRoot.namespace("fake-launcher")).toMatchObject({
+      providerId: "fake-launcher",
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
+      diagnostics: [
+        expect.objectContaining({
+          code: "provider.state_namespace",
+          providerId: "fake-launcher",
+          detail: expect.objectContaining({
+            schemaVersion: 1,
+            slots: ["runtime"],
+          }),
+        }),
+      ],
     });
   });
 
@@ -162,6 +186,26 @@ describe("ProviderHost", () => {
     expect(host.providerIds("launcher")).toEqual([]);
     expect(host.providerManifest("fake-launcher")).toBeUndefined();
     expect(host.providerStateSchema("fake-launcher")).toBeUndefined();
+  });
+
+  it("fails closed when a provider declares an unknown state schema version", () => {
+    const unsupportedState: GlaProviderModule = {
+      manifest: manifest(),
+      register(ctx) {
+        ctx.registerLauncher("fake-launcher", { create: () => fakeLauncher });
+        ctx.registerProbe("fake-launcher", () => "available");
+        ctx.registerStateSchema("fake-launcher", {
+          schemaVersion: 99,
+          sensitivity: "sensitive",
+          migration: "fail-closed",
+          slots: { runtime: { summary: "future state" } },
+        });
+      },
+    };
+
+    expect(() => new ProviderHost().registerModule(unsupportedState)).toThrow(
+      /unsupported state schema version/,
+    );
   });
 
   it("fails closed with redacted diagnostics when provider-owned state namespace is unavailable", async () => {
