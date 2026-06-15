@@ -98,7 +98,7 @@ Because the spec is data with an introspectable schema and a `--dry-run` checker
 
 ## 3. The option set is typed and provider-declared
 
-Every value the agent may set lives inside some provider's `config_schema` — a *typed* option schema (the full vocabulary is in `03` §3.1: `type`, `required`/`optional`, `default`, `enum`, `min`/`max`/`pattern`, `conflicts_with`/`required_with`, `sensitive`). This is the mechanism that lets GLA offer **rich operator extensibility** without ever handing the agent open native config:
+Every value the agent may set lives inside some provider's `config_schema` — a closed root-object JSON Schema profile (the full vocabulary is in `02` §3.1: `properties`, root `required`, `default`, `enum`/`const`, range/length/pattern bounds, conservative composition, and `x-gla-sensitive` metadata). This is the mechanism that lets GLA offer **rich operator extensibility** without ever handing the agent open native config:
 
 - the **operator / provider author** (install-time, trusted) decides which native knobs are exposed and their bounds — they "lower" the surface into a typed schema, once;
 - the **agent** (runtime, untrusted) composes a config by setting values within that schema; anything off-menu is rejected, offline, at admission.

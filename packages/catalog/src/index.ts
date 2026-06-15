@@ -14,6 +14,7 @@ import {
   type CatalogEntity,
   type CatalogPort,
   type ConfigSchema,
+  EMPTY_CONFIG_SCHEMA,
   type TemplateDescriptor,
   glaError,
   isRedactionOrTemplatePlaceholder,
@@ -781,7 +782,10 @@ export interface CatalogDiagnostic {
     | "graph.unknown_family"
     | "graph.unknown_provider"
     | "graph.family_mismatch"
+    | "graph.duplicate_provider"
     | "graph.duplicate_provider_version"
+    | "graph.duplicate_template"
+    | "graph.duplicate_template_version"
     | "graph.overlay_extends_unknown"
     | "graph.overlay_cycle"
     | "graph.unresolved_relation"
@@ -1247,6 +1251,17 @@ export class CatalogService implements CatalogPort {
   }
 
   /**
+   * Show provider detail with the same facts admission reads: availability, dependency evidence,
+   * graph diagnostics, config schema, and auth assurance capability. Read-only.
+   */
+  providerShow(name: string): CatalogProviderInfo | undefined {
+    if (this.providerGraph !== undefined) {
+      return toAdmissionCatalogFromProviderGraphProjection(this.providerGraph).provider(name);
+    }
+    return toAdmissionCatalog(this, this.store).provider(name);
+  }
+
+  /**
    * Resolve a template to the kernel {@link TemplateDescriptor} (required parts + open-param schema
    * + binding status). Returns `undefined` for an unknown id (the CLI maps that to exit 5). Used by
    * Admission and the Bridge. Read-only.
@@ -1321,7 +1336,7 @@ export class CatalogService implements CatalogPort {
     return {
       id,
       requiredParts: Object.keys(t.spec.requiredParts),
-      openParams: t.spec.openParams ?? {},
+      openParams: t.spec.openParams ?? EMPTY_CONFIG_SCHEMA,
       available: availability === "available",
       availability,
       ...(compatibleProviders !== undefined ? { compatibleProviders } : {}),
@@ -1527,9 +1542,7 @@ export function toAdmissionCatalog(
         dependencies: entity.requires,
         diagnostics: providerDiagnostics(use, entity),
       };
-      if (manifest?.spec.config_schema !== undefined) {
-        info.config_schema = manifest.spec.config_schema;
-      }
+      info.config_schema = manifest?.spec.config_schema ?? EMPTY_CONFIG_SCHEMA;
       if (entity.authAssurance !== undefined) {
         info.authAssurance = structuredClone(entity.authAssurance);
       }
@@ -1550,7 +1563,10 @@ export type ProviderGraphDiagnosticCode =
   | "graph.unknown_family"
   | "graph.unknown_provider"
   | "graph.family_mismatch"
+  | "graph.duplicate_provider"
   | "graph.duplicate_provider_version"
+  | "graph.duplicate_template"
+  | "graph.duplicate_template_version"
   | "graph.overlay_extends_unknown"
   | "graph.overlay_cycle"
   | "graph.unresolved_relation"
@@ -1753,8 +1769,8 @@ function mergeRecords(
 
 function schemaDefaults(schema: ConfigSchema | undefined): Record<string, unknown> {
   const defaults: Record<string, unknown> = {};
-  for (const [name, field] of Object.entries(schema ?? {})) {
-    if (field.default !== undefined) {
+  for (const [name, field] of Object.entries(schema?.properties ?? {})) {
+    if (Object.hasOwn(field, "default")) {
       defaults[name] = structuredClone(field.default);
     }
   }
@@ -1792,6 +1808,13 @@ function combineProviderManifests(
             versions: [prior.metadata.version, provider.metadata.version],
           },
         });
+      } else {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.duplicate_provider",
+          message: `provider "${id}" appears more than once`,
+          providerId: id,
+          detail: { version: provider.metadata.version },
+        });
       }
       continue;
     }
@@ -1808,13 +1831,40 @@ function templatePackageTemplates(
 
 function combineTemplates(
   input: ResolveProviderGraphProjectionInput,
+  diagnostics: ProviderGraphDiagnostic[],
 ): Map<string, TemplateManifest> {
   const templates = [
     ...(input.providerSet?.templates ?? []),
     ...(input.templates ?? []),
     ...templatePackageTemplates(input.templatePackages),
   ];
-  return new Map(templates.map((template) => [template.metadata.name, template]));
+  const byName = new Map<string, TemplateManifest>();
+  for (const template of templates) {
+    const id = template.metadata.name;
+    const prior = byName.get(id);
+    if (prior !== undefined) {
+      if (prior.metadata.version !== template.metadata.version) {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.duplicate_template_version",
+          message: `template "${id}" appears with multiple versions`,
+          template: id,
+          detail: {
+            versions: [prior.metadata.version, template.metadata.version],
+          },
+        });
+      } else {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.duplicate_template",
+          message: `template "${id}" appears more than once`,
+          template: id,
+          detail: { version: template.metadata.version },
+        });
+      }
+      continue;
+    }
+    byName.set(id, template);
+  }
+  return byName;
 }
 
 function graphDocs(input: ResolveProviderGraphProjectionInput): ProfileGraphDoc[] {
@@ -1974,10 +2024,11 @@ function resolveProviderConfig(
   ) {
     return { config, layers };
   }
+  const configValidationMode = input.configValidationMode ?? "factory";
   const schema =
-    input.configValidationMode === "factory"
-      ? (manifest.spec.factory_config_schema ?? manifest.spec.config_schema ?? {})
-      : (manifest.spec.config_schema ?? {});
+    configValidationMode === "factory"
+      ? (manifest.spec.factory_config_schema ?? manifest.spec.config_schema ?? EMPTY_CONFIG_SCHEMA)
+      : (manifest.spec.config_schema ?? EMPTY_CONFIG_SCHEMA);
   const validation = validateConfig(schema, config);
   if (!validation.ok) {
     graphAddDiagnostic(diagnostics, {
@@ -2141,6 +2192,13 @@ function validateProviderRelations(
       }
       const expectedFamily = RELATION_KEY_TO_FAMILY[relationKey];
       if (expectedFamily === undefined) {
+        graphAddDiagnostic(diagnostics, {
+          code: "graph.unresolved_relation",
+          message: `provider "${provider.metadata.name}" relation "${relationKey}" is not a known compatibility relation`,
+          providerId: provider.metadata.name,
+          family: provider.spec.family,
+          detail: { relationKey },
+        });
         continue;
       }
       for (const id of ids) {
@@ -2345,7 +2403,7 @@ export function resolveProviderGraphProjection(
 ): ProviderGraphProjectionResult {
   const diagnostics: ProviderGraphDiagnostic[] = [];
   const providersByName = combineProviderManifests(input, diagnostics);
-  const templatesByName = combineTemplates(input);
+  const templatesByName = combineTemplates(input, diagnostics);
 
   validateGraphInheritance(input, diagnostics);
   validateProviderRelations(providersByName, templatesByName, diagnostics);
@@ -2774,9 +2832,7 @@ export function toAdmissionCatalogFromProviderGraphProjection(
         dependencies: structuredClone(provider.dependencies),
         diagnostics: [...providerDiagnosticsFromGraphFact(provider, use, []), ...graphDiagnostics],
       };
-      if (provider.manifest.spec.config_schema !== undefined) {
-        info.config_schema = provider.manifest.spec.config_schema;
-      }
+      info.config_schema = provider.manifest.spec.config_schema ?? EMPTY_CONFIG_SCHEMA;
       if (provider.authAssurance !== undefined) {
         info.authAssurance = structuredClone(provider.authAssurance);
       }

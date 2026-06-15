@@ -30,6 +30,7 @@ import { type AssemblyProposal, type TemplateDefaults, resolveAssembly } from "@
 import {
   type Capability,
   type ConfigSchema,
+  EMPTY_CONFIG_SCHEMA,
   type ErrorCode,
   type GlaError,
   type PartRef,
@@ -549,10 +550,7 @@ export class AdmissionService {
   private checkConfigSchemas(resolved: ResolvedAssemblySpec): AdmitReject | undefined {
     for (const { role, ref } of allParts(resolved)) {
       const info = this.catalog.provider(ref.use);
-      const schema = info?.config_schema;
-      if (schema === undefined) {
-        continue; // provider declares no options → nothing to validate
-      }
+      const schema = info?.config_schema ?? EMPTY_CONFIG_SCHEMA;
       const params = ref.params ?? {};
       const result = validateConfig(schema, params);
       if (!result.ok) {

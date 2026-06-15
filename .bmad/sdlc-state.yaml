@@ -3,17 +3,17 @@
 # Re-read on every resume; update at every phase boundary.
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
-phase: 7
-phase_name: "Handoff — provider graph epic complete; push/PR user gate pending"
-branch: feature/provider-graph
+phase: 5
+phase_name: "Autonomous build — provider graph follow-up GLA-108 in progress"
+branch: feature/provider-graph-task-108
 epic: provider-graph-107
-active_story: null
+active_story: GLA-108
 review_cycle: 0
 follow_on_scope:
-  tasks: "GLA-107..GLA-107.13"
+  tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
-  next_ready_sequence: "GLA-107..GLA-107.13 complete; local epic gate PASS; next SDLC action is user-approved push/PR to dev"
-  note: "2026-06-14 user goal: implement backlog tasks GLA-107 through GLA-107.13 according to project SDLC, architecture, and vision. Persistent specialists initialized first for provider-graph epic: architect James, UX Arendt, SM Lagrange, worker Avicenna, TEA/reviewer Planck, investigator Ampere."
+  next_ready_sequence: "GLA-108 in progress on feature/provider-graph-task-108; GLA-109 remains next after GLA-108 is Done"
+  note: "2026-06-15 user goal: implement backlog tasks GLA-108 through GLA-109 according to project SDLC, architecture, and vision. Reusing persistent provider-graph specialists first: architect James, UX Arendt, SM Lagrange, worker Avicenna, TEA/reviewer Planck, investigator Ampere. BMAD story-loop skills loaded; repo lacks BMAD sprint-status.yaml/story specs for automatic workflow execution, so Backlog.md/design-set fallback is explicit per Rule 3."
 authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
 # REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
 # (Redis-free path; postgres+server+worker); GLA's REAL adapter did a REAL OIDC round-trip -> finishEnrollment+verifyAssertion ->
@@ -137,4 +137,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-15T04:15:33Z"
+last_updated: "2026-06-15T12:00:12Z"

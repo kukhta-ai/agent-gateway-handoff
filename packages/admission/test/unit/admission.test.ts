@@ -9,6 +9,7 @@ import { homedir, tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import type {
   Capability,
+  ConfigSchema,
   PolicyContext,
   PolicyPort,
   RecipientRef,
@@ -28,6 +29,18 @@ import {
   defaultDenylist,
   glaStateDir,
 } from "../../src/index.js";
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
 
 // ── A controllable test catalog (so each rejection branch is reachable) ──────────────────────────
 const BROWSER_DEFAULTS: TemplateDefaults = {
@@ -81,7 +94,9 @@ function fakeCatalog(opts: FakeCatalogOpts = {}): AdmissionCatalogPort {
     "url-watcher": {
       name: "url-watcher",
       available: true,
-      config_schema: { complete_on: { type: "string", required: true, pattern: "^/" } },
+      config_schema: objectSchema({ complete_on: { type: "string", pattern: "^/" } }, [
+        "complete_on",
+      ]),
     },
   };
   return {
@@ -289,6 +304,17 @@ describe("AdmissionService.admit — each rejection class → its stable code + 
     expect(res.exitCode).toBe(3);
     // Admission named the missing field rather than inventing it.
     expect(JSON.stringify(res.error.detail)).toMatch(/complete_on/);
+  });
+
+  it("params for a provider with no config_schema are rejected by the closed empty schema", async () => {
+    const res = admission(policyAllowAll()).admit(
+      proposal({ entrypoints: [{ use: "entrypoint-novnc", params: { unexpected: true } }] }),
+      await agentAuthority(),
+    );
+    expect(res.decision).toBe("reject");
+    if (res.decision !== "reject") return;
+    expect(res.code).toBe("policy.denied");
+    expect(JSON.stringify(res.error.detail)).toMatch(/unexpected/);
   });
 
   it("MOUNT denied (catastrophic denylist) → mount.denied → exit 3", async () => {

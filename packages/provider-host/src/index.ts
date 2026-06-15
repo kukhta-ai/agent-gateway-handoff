@@ -15,6 +15,7 @@ import {
   type AuthProviderPort,
   type ChannelPort,
   type CompletionDetectorPort,
+  EMPTY_CONFIG_SCHEMA,
   type GlaError,
   type HumanEntrypointPort,
   type LauncherPort,
@@ -934,7 +935,8 @@ export class ProviderHost {
         detail: { configType: typeof config },
       });
     }
-    const schema = manifest.spec.factory_config_schema ?? manifest.spec.config_schema ?? {};
+    const schema =
+      manifest.spec.factory_config_schema ?? manifest.spec.config_schema ?? EMPTY_CONFIG_SCHEMA;
     const validation = validateConfig(schema, config);
     if (!validation.ok) {
       const err = configDefectsToError(validation.defects);

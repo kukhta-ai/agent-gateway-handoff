@@ -1,5 +1,5 @@
 import type { IndexedDependencyBinding, ProviderManifest } from "@gla/catalog";
-import type { LauncherPort, RuntimeHandle } from "@gla/kernel";
+import type { ConfigSchema, LauncherPort, RuntimeHandle } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import {
   type GlaProviderModule,
@@ -21,6 +21,18 @@ const fakeLauncher: LauncherPort = {
   async stop(): Promise<void> {},
 };
 
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
+
 function manifest(overrides: Partial<ProviderManifest["spec"]> = {}): ProviderManifest {
   return {
     apiVersion: "gla.dev/v1",
@@ -29,9 +41,7 @@ function manifest(overrides: Partial<ProviderManifest["spec"]> = {}): ProviderMa
     spec: {
       family: "launcher",
       capability: { summary: "fake launcher" },
-      config_schema: {
-        mode: { type: "enum", enum: ["safe"], required: true },
-      },
+      config_schema: objectSchema({ mode: { type: "string", enum: ["safe"] } }, ["mode"]),
       probe: "fake-launcher",
       skills: [{ id: "use-fake-launcher", for: "fake-launcher", body: "Use fake launcher." }],
       relations: { compatibleWith: { connectors: ["fake-connector"] } },
@@ -265,18 +275,16 @@ describe("ProviderHost", () => {
   it("uses factory_config_schema for runtime creation while preserving agent-facing config_schema metadata", async () => {
     const host = new ProviderHost().registerModule(
       module({
-        config_schema: {
-          complete_on: { type: "string", required: true, pattern: "^/" },
-        },
-        factory_config_schema: {
-          mode: { type: "enum", enum: ["safe"], required: true },
-        },
+        config_schema: objectSchema({ complete_on: { type: "string", pattern: "^/" } }, [
+          "complete_on",
+        ]),
+        factory_config_schema: objectSchema({ mode: { type: "string", enum: ["safe"] } }, ["mode"]),
       }),
     );
 
-    expect(host.providerManifest("fake-launcher")?.spec.config_schema).toEqual({
-      complete_on: { type: "string", required: true, pattern: "^/" },
-    });
+    expect(host.providerManifest("fake-launcher")?.spec.config_schema).toEqual(
+      objectSchema({ complete_on: { type: "string", pattern: "^/" } }, ["complete_on"]),
+    );
     await expect(
       host.createProvider("launcher", "fake-launcher", {
         config: { mode: "safe" },

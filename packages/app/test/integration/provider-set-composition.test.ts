@@ -11,6 +11,7 @@ import {
   type ChannelPort,
   type CompletionDetectorPort,
   type ConfigSchema,
+  EMPTY_CONFIG_SCHEMA,
   type HumanEntrypointBinding,
   type HumanEntrypointPort,
   KERNEL_MODULE,
@@ -20,8 +21,10 @@ import {
   type PartRef,
   type RawCompletionSignal,
   type RecipientRef,
+  type Ref,
   type ResolvedAssemblySpec,
   type RuntimeHandle,
+  type SecretStorePort,
   type WorkspaceHandle,
   type WorkspacePort,
   encodeRuntimeHandle,
@@ -45,6 +48,22 @@ interface FakeRecords {
   serviceBindings: Record<string, boolean>;
   assetProviderIds: string[];
   delivered: Array<{ recipient: RecipientRef; link: string }>;
+}
+
+function emptySchema(): ConfigSchema {
+  return structuredClone(EMPTY_CONFIG_SCHEMA);
+}
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
 }
 
 function fakeRecords(): FakeRecords {
@@ -177,12 +196,20 @@ class FakeEntrypoint implements HumanEntrypointPort {
 }
 
 class FakeDetector implements CompletionDetectorPort {
-  readonly contract: ConfigSchema = {};
+  readonly contract: ConfigSchema = emptySchema();
 
   async *watch(
     _h: RuntimeHandle,
     _params: Record<string, unknown>,
   ): AsyncIterable<RawCompletionSignal> {}
+}
+
+class FakeSecretStore implements SecretStorePort {
+  async put(_value: unknown, _audience: string): Promise<Ref<"secret-ref">> {
+    return "secret:fake" as Ref<"secret-ref">;
+  }
+
+  async injectInto(_ref: Ref<"secret-ref">, _target: unknown): Promise<void> {}
 }
 
 function fakeProviderSet(records: FakeRecords): AppProviderSet {
@@ -193,11 +220,18 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "AuthProvider",
         family: "auth",
         summary: "fake auth",
-        configSchema: {
-          rpID: { type: "string", required: true, min: 1 },
-          rpName: { type: "string", required: false, min: 1 },
-          expectedOrigin: { type: "list", required: true, min: 1, items: { type: "string" } },
-        },
+        configSchema: objectSchema(
+          {
+            rpID: { type: "string", minLength: 1 },
+            rpName: { type: "string", minLength: 1 },
+            expectedOrigin: {
+              type: "array",
+              minItems: 1,
+              items: { type: "string", minLength: 1 },
+            },
+          },
+          ["rpID", "expectedOrigin"],
+        ),
       }),
       "@fake/auth",
       (ctx) =>
@@ -214,9 +248,9 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "Launcher",
         family: "launcher",
         summary: "fake launcher",
-        configSchema: {
-          mode: { type: "enum", enum: ["auto", "headless"], required: false, default: "headless" },
-        },
+        configSchema: objectSchema({
+          mode: { type: "string", enum: ["auto", "headless"], default: "headless" },
+        }),
       }),
       "@fake/launcher",
       (ctx) =>
@@ -233,7 +267,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "Workspace",
         family: "workspace",
         summary: "fake workspace",
-        configSchema: { root: { type: "string", required: false, min: 1 } },
+        configSchema: objectSchema({ root: { type: "string", minLength: 1 } }),
       }),
       "@fake/workspace",
       (ctx) =>
@@ -260,14 +294,9 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "HumanEntrypoint",
         family: "entrypoint",
         summary: "fake entrypoint",
-        configSchema: {
-          clientTheme: {
-            type: "enum",
-            required: false,
-            enum: ["light", "dark"],
-            default: "light",
-          },
-        },
+        configSchema: objectSchema({
+          clientTheme: { type: "string", enum: ["light", "dark"], default: "light" },
+        }),
         capability: {
           clientAssets: [{ ref: "fake-entrypoint.fake-client", kind: "fake-client" }],
         },
@@ -282,7 +311,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "CompletionDetector",
         family: "detector",
         summary: "fake detector",
-        factoryConfigSchema: { pollMs: { type: "number", required: true, min: 1 } },
+        factoryConfigSchema: objectSchema({ pollMs: { type: "number", minimum: 1 } }, ["pollMs"]),
         capability: { completion: { statuses: { fake: { status: "done" } } } },
       }),
       "@fake/detector",
@@ -319,6 +348,19 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
           },
         }),
     ),
+    moduleFor(
+      providerManifest({
+        id: "fake-secret-store",
+        kind: "SecretStore",
+        family: "secret-store",
+        summary: "fake secret store",
+      }),
+      "@fake/secret-store",
+      (ctx) =>
+        ctx.registerSecretStore("fake-secret-store", {
+          create: () => new FakeSecretStore(),
+        }),
+    ),
   ];
   return {
     moduleId: "@fake/provider-set",
@@ -331,6 +373,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
       entrypoint: "fake-entrypoint",
       detector: "fake-detector",
       channel: "fake-channel",
+      secretStore: "fake-secret-store",
     },
     defaultConfig({ family, providerId, legacy }) {
       if (family === "auth" && providerId === "fake-auth") {
@@ -387,6 +430,7 @@ function fakeProviderProfile(id: string): ProviderProfileManifest {
         AgentConnector: "fake-connector",
         CompletionDetector: "fake-detector",
         ChannelAdapter: "fake-channel",
+        SecretStore: "fake-secret-store",
       },
     },
   };
@@ -415,6 +459,7 @@ describe("provider-set agnostic app composition", () => {
       workspace: "@fake/workspace",
       detector: "@fake/detector",
       channel: "@fake/channel",
+      secretStore: "@fake/secret-store",
     });
 
     const bridge = createBridge({ providerSet });

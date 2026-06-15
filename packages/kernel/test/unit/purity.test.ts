@@ -1,13 +1,14 @@
-// AC#7 — purity: the kernel imports ONLY Node builtins (node:*) and its own relative modules.
-// No adapter, no I/O library, no network/DB, no third-party runtime dependency. This test reads
-// every kernel source file and asserts each import specifier is either a `node:` builtin or a
-// relative path — failing loudly if a future edit pulls in a concrete dependency.
+// AC#7 — purity: the kernel imports only Node builtins (node:*), its own relative modules,
+// and the documented JSON Schema validator dependency. No adapter, I/O library, network/DB,
+// or other runtime dependency is allowed. This test reads every kernel source file and fails
+// loudly if a future edit pulls in a concrete dependency.
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const SRC_DIR = fileURLToPath(new URL("../../src/", import.meta.url));
+const ALLOWED_RUNTIME_PACKAGES = new Set(["ajv/dist/ajv.js"]);
 
 /** Every non-test .ts file under src/. */
 function kernelSourceFiles(): string[] {
@@ -35,7 +36,7 @@ function importSpecifiers(source: string): string[] {
 }
 
 describe("kernel purity (GLA-004 AC#7 / invariant 1)", () => {
-  it("imports only node:* builtins and relative modules — no third-party/runtime dep", () => {
+  it("imports only node:* builtins, relative modules, and the JSON Schema validator", () => {
     const files = kernelSourceFiles();
     expect(files.length).toBeGreaterThan(0);
 
@@ -45,7 +46,8 @@ describe("kernel purity (GLA-004 AC#7 / invariant 1)", () => {
       for (const spec of importSpecifiers(src)) {
         const isNodeBuiltin = spec.startsWith("node:");
         const isRelative = spec.startsWith("./") || spec.startsWith("../");
-        if (!isNodeBuiltin && !isRelative) {
+        const isAllowedRuntimePackage = ALLOWED_RUNTIME_PACKAGES.has(spec);
+        if (!isNodeBuiltin && !isRelative && !isAllowedRuntimePackage) {
           offenders.push({ file: file.replace(SRC_DIR, "."), spec });
         }
       }

@@ -1,7 +1,9 @@
 import {
   type ConfigSchema,
+  EMPTY_CONFIG_SCHEMA,
   redactOperatorEgress,
   redactOperatorText,
+  validateConfig,
   validateSchemaShape,
 } from "@gla/kernel";
 import type {
@@ -13,9 +15,6 @@ import type {
   WpmBundleEvidence,
 } from "./manifests.js";
 import {
-  PROVIDER_PROFILE_FAMILIES,
-  PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY,
-  type ProviderProfileFamilyId,
   type TemplatePackageManifest,
   validateTemplatePackageManifest,
 } from "./provider-profile.js";
@@ -31,6 +30,7 @@ export type ProviderAuthoringDiagnosticCode =
   | "provider_author.probe_missing"
   | "provider_author.skills_or_docs_missing"
   | "provider_author.dependency_invalid"
+  | "provider_author.compatibility_invalid"
   | "provider_author.wpm_bundle_missing"
   | "provider_author.redaction_violation"
   | "provider_author.contract_tests_missing"
@@ -203,6 +203,8 @@ export interface TemplatePackageSkeletonInput {
   compatibleProviders?: Record<string, string[]>;
   /** Template parameter schema. */
   openParams?: ConfigSchema;
+  /** Provider config defaults consumed by the provider graph, keyed by provider id or `provider.<id>`. */
+  providerDefaults?: Record<string, Record<string, unknown>>;
   /** Template-level host or service dependencies. */
   requires?: readonly DependencyRequirement[];
 }
@@ -236,6 +238,26 @@ const RUNTIME_FAMILY_SET = new Set<ProviderAuthoringRuntimeFamily>([
   "channel",
   "secret-store",
 ]);
+const RELATION_KEY_TO_FAMILY: Record<string, ProviderFamily> = {
+  auth: "auth",
+  auths: "auth",
+  launcher: "launcher",
+  launchers: "launcher",
+  entrypoint: "entrypoint",
+  entrypoints: "entrypoint",
+  connector: "connector",
+  connectors: "connector",
+  workspace: "workspace",
+  workspaces: "workspace",
+  detector: "detector",
+  detectors: "detector",
+  channel: "channel",
+  channels: "channel",
+  "secret-store": "secret-store",
+  "secret-stores": "secret-store",
+  secretStores: "secret-store",
+  templates: "template",
+};
 const FAMILY_TO_KIND: Record<ProviderAuthoringRuntimeFamily, string> = {
   auth: "AuthProvider",
   launcher: "Launcher",
@@ -452,7 +474,7 @@ function validateSchema(
     });
     return;
   }
-  const result = validateSchemaShape(schema as ConfigSchema);
+  const result = validateSchemaShape(schema);
   if (!result.ok) {
     pushDiagnostic(diagnostics, {
       code,
@@ -737,15 +759,42 @@ function providersById(
   return new Map(Object.entries(providers));
 }
 
-function providerProfileFamilyForRuntimeFamily(
-  family: ProviderAuthoringRuntimeFamily,
-): ProviderProfileFamilyId | undefined {
-  for (const profileFamily of PROVIDER_PROFILE_FAMILIES) {
-    if (PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY[profileFamily] === family) {
-      return profileFamily;
+function providerIdFromDefaultTarget(targetId: string): string {
+  return targetId.startsWith("provider.") ? targetId.slice("provider.".length) : targetId;
+}
+
+function validateProviderRelations(
+  diagnostics: AuthoringDiagnostic[],
+  manifest: ProviderManifest,
+): void {
+  const compatibleWith = manifest.spec.relations?.compatibleWith;
+  if (!isRecord(compatibleWith)) {
+    return;
+  }
+  for (const [relationKey, ids] of Object.entries(compatibleWith)) {
+    const expectedFamily = RELATION_KEY_TO_FAMILY[relationKey];
+    if (expectedFamily === undefined) {
+      pushDiagnostic(diagnostics, {
+        code: "provider_author.compatibility_invalid",
+        message: "provider compatibleWith relation key is not known to the provider graph",
+        path: `spec.relations.compatibleWith.${relationKey}`,
+        packageId: manifest.metadata.name,
+        family: manifest.spec.family,
+        detail: { relationKey },
+      });
+      continue;
+    }
+    if (!hasNonEmptyStringArray(ids)) {
+      pushDiagnostic(diagnostics, {
+        code: "provider_author.compatibility_invalid",
+        message: "provider compatibleWith relation must be a non-empty provider/template id list",
+        path: `spec.relations.compatibleWith.${relationKey}`,
+        packageId: manifest.metadata.name,
+        family: manifest.spec.family,
+        detail: { expectedFamily },
+      });
     }
   }
-  return undefined;
 }
 
 /** Validate a provider package for the provider-author/developer UX before operator install/update. */
@@ -814,6 +863,7 @@ export function validateProviderPackageAuthoring(
       "spec.factory_config_schema",
       manifest.metadata.name,
     );
+    validateProviderRelations(diagnostics, manifest);
     if (!hasText(manifest.spec.probe) || input.module?.registersProbe !== true) {
       pushDiagnostic(diagnostics, {
         code: "provider_author.probe_missing",
@@ -906,16 +956,18 @@ function validateTemplateDefaults(
     });
     return;
   }
-  const templateIds = new Set(templateIdsFromManifest(manifest));
   for (const [targetId, targetDefaults] of Object.entries(defaults)) {
-    if (!templateIds.has(targetId) && !providerIndex.has(targetId)) {
+    const providerId = providerIdFromDefaultTarget(targetId);
+    const provider = providerIndex.get(providerId);
+    if (provider === undefined) {
       pushDiagnostic(diagnostics, {
         code: "template_author.defaults_invalid",
-        message: "template defaults must target a packaged template or known provider id",
+        message: "template defaults must be keyed by a known provider id or provider.<id>",
         path: `spec.defaults.${targetId}`,
         ...(packageId !== undefined ? { packageId } : {}),
         detail: { targetId },
       });
+      continue;
     }
     if (!isRecord(targetDefaults)) {
       pushDiagnostic(diagnostics, {
@@ -926,44 +978,19 @@ function validateTemplateDefaults(
       });
       continue;
     }
-    for (const [family, selected] of Object.entries(targetDefaults)) {
-      if (!PROVIDER_PROFILE_FAMILIES.includes(family as ProviderProfileFamilyId)) {
-        pushDiagnostic(diagnostics, {
-          code: "template_author.defaults_invalid",
-          message: "template defaults must use canonical profile family ids",
-          path: `spec.defaults.${targetId}.${family}`,
-          ...(packageId !== undefined ? { packageId } : {}),
-          family,
-        });
-        continue;
-      }
-      if (typeof selected !== "string" || !providerIndex.has(selected)) {
-        pushDiagnostic(diagnostics, {
-          code: "template_author.defaults_invalid",
-          message: "template defaults must select known provider ids",
-          path: `spec.defaults.${targetId}.${family}`,
-          ...(packageId !== undefined ? { packageId } : {}),
-          family,
-        });
-        continue;
-      }
-      const expectedRuntimeFamily =
-        PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY[family as ProviderProfileFamilyId];
-      const provider = providerIndex.get(selected);
-      if (provider !== undefined && provider.spec.family !== expectedRuntimeFamily) {
-        pushDiagnostic(diagnostics, {
-          code: "template_author.defaults_invalid",
-          message: "template default provider family does not match the selected profile family",
-          path: `spec.defaults.${targetId}.${family}`,
-          ...(packageId !== undefined ? { packageId } : {}),
-          family,
-          detail: {
-            providerId: selected,
-            expectedRuntimeFamily,
-            actualFamily: provider.spec.family,
-          },
-        });
-      }
+    const validation = validateConfig(
+      provider.spec.config_schema ?? EMPTY_CONFIG_SCHEMA,
+      targetDefaults,
+    );
+    if (!validation.ok) {
+      pushDiagnostic(diagnostics, {
+        code: "template_author.defaults_invalid",
+        message: "template defaults must match the target provider config_schema",
+        path: `spec.defaults.${targetId}`,
+        ...(packageId !== undefined ? { packageId } : {}),
+        family: provider.spec.family,
+        detail: { providerId, defects: validation.defects },
+      });
     }
   }
 }
@@ -988,7 +1015,20 @@ function validateTemplateCompatibility(
       ...(packageId !== undefined ? { packageId } : {}),
     });
   }
+  const compatibility = isRecord(manifest.spec.compatibility) ? manifest.spec.compatibility : {};
+  for (const key of Object.keys(compatibility)) {
+    if (key !== "requiredParts") {
+      pushDiagnostic(diagnostics, {
+        code: "template_author.compatibility_invalid",
+        message:
+          "TemplatePackage spec.compatibility only supports requiredParts consumed by the provider graph",
+        path: `spec.compatibility.${key}`,
+        ...(packageId !== undefined ? { packageId } : {}),
+      });
+    }
+  }
   const templates = Array.isArray(manifest.spec.templates) ? manifest.spec.templates : [];
+  const openPartSet = new Set<string>();
   for (const [index, template] of templates.entries()) {
     if (!isRecord(template) || !isRecord(template.spec)) {
       continue;
@@ -997,6 +1037,9 @@ function validateTemplateCompatibility(
     const openParts = Array.isArray(template.spec.openParts)
       ? template.spec.openParts.filter((part): part is string => typeof part === "string")
       : [];
+    for (const part of openParts) {
+      openPartSet.add(part);
+    }
     const compatibleProviders = isRecord(template.spec.compatibleProviders)
       ? template.spec.compatibleProviders
       : {};
@@ -1032,6 +1075,28 @@ function validateTemplateCompatibility(
           ...(packageId !== undefined ? { packageId } : {}),
         });
       }
+    }
+  }
+  const requiredParts = compatibility.requiredParts;
+  if (!hasNonEmptyStringArray(requiredParts)) {
+    pushDiagnostic(diagnostics, {
+      code: "template_author.compatibility_invalid",
+      message:
+        "TemplatePackage spec.compatibility.requiredParts must list open parts requiring explicit compatibility checks",
+      path: "spec.compatibility.requiredParts",
+      ...(packageId !== undefined ? { packageId } : {}),
+    });
+    return;
+  }
+  for (const part of requiredParts) {
+    if (!openPartSet.has(part)) {
+      pushDiagnostic(diagnostics, {
+        code: "template_author.compatibility_invalid",
+        message: "TemplatePackage compatibility requiredParts may only name open template parts",
+        path: "spec.compatibility.requiredParts",
+        ...(packageId !== undefined ? { packageId } : {}),
+        detail: { part },
+      });
     }
   }
 }
@@ -1170,7 +1235,7 @@ export function createProviderPackageSkeleton(
     spec: {
       family: input.family,
       capability: { summary: input.summary ?? `${input.providerId} ${input.family} provider` },
-      config_schema: input.configSchema ?? {},
+      config_schema: input.configSchema ?? EMPTY_CONFIG_SCHEMA,
       ...(input.factoryConfigSchema !== undefined
         ? { factory_config_schema: input.factoryConfigSchema }
         : {}),
@@ -1228,7 +1293,7 @@ export function createTemplatePackageSkeleton(
       ...(requires.length > 0 ? { requires } : {}),
       ...(input.openParts !== undefined ? { openParts: [...input.openParts] } : {}),
       ...(Object.keys(compatibleProviders).length > 0 ? { compatibleProviders } : {}),
-      openParams: input.openParams ?? {},
+      openParams: input.openParams ?? EMPTY_CONFIG_SCHEMA,
       skills: [
         {
           id: input.templateId,
@@ -1244,16 +1309,9 @@ export function createTemplatePackageSkeleton(
     metadata: { name: input.packageId, version },
     spec: {
       templates: [template],
-      schema: input.openParams ?? {},
-      defaults: {
-        [input.templateId]: Object.fromEntries(
-          Object.entries(input.requiredParts).flatMap(([part, providerId]) => {
-            const family = providerFamilyFromRequiredPart(part);
-            return family === undefined ? [] : [[family, providerId]];
-          }),
-        ),
-      },
-      compatibility: { openParts: input.openParts ?? [] },
+      schema: input.openParams ?? EMPTY_CONFIG_SCHEMA,
+      defaults: input.providerDefaults ?? {},
+      compatibility: { requiredParts: input.openParts ?? Object.keys(compatibleProviders) },
       docs: [`templates/${input.templateId}/README.md`],
       tests: [`templates/${input.templateId}/test/contract/${input.templateId}.test.ts`],
     },
@@ -1271,11 +1329,4 @@ export function createTemplatePackageSkeleton(
     ],
     wpmSkeletons,
   };
-}
-
-function providerFamilyFromRequiredPart(part: string): ProviderProfileFamilyId | undefined {
-  const runtimeFamily = part === "humanEntrypoint" ? "entrypoint" : part;
-  return isRuntimeFamily(runtimeFamily)
-    ? providerProfileFamilyForRuntimeFamily(runtimeFamily)
-    : undefined;
 }

@@ -360,16 +360,19 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         mounts: { host_paths: ["file", "directory"], modes: ["ro", "rw"] },
       },
       config_schema: {
-        mode: {
-          type: "enum",
-          required: false,
-          default: "auto",
-          enum: ["auto", "headless", "full"],
-          conflicts_with: ["headless"],
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          mode: {
+            type: "string",
+            default: "auto",
+            enum: ["auto", "headless", "full"],
+          },
+          headless: { type: "boolean" },
+          chromiumPath: { type: "string", minLength: 1 },
+          startTimeoutMs: { type: "number", minimum: 1 },
         },
-        headless: { type: "bool", required: false, conflicts_with: ["mode"] },
-        chromiumPath: { type: "string", required: false, min: 1 },
-        startTimeoutMs: { type: "number", required: false, min: 1 },
+        allOf: [{ not: { required: ["mode", "headless"] } }],
       },
       // The browser-runtime host dependency (GLA-007 stands it up via WPM); not seeded as bound.
       requires: [
@@ -484,7 +487,11 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
       family: "workspace",
       capability: { summary: "ephemeral browser-profile-temp workspace (wiped at reap)" },
       config_schema: {
-        root: { type: "string", required: false, min: 1 },
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          root: { type: "string", minLength: 1 },
+        },
       },
       // In-tree, no host dependency to stand up.
       probe: "workspace-profile",
@@ -509,19 +516,33 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
             "url-complete": { status: "verified" },
           },
           resultSchema: {
-            url: { type: "string", required: true },
-            match: { type: "string", required: false },
+            type: "object",
+            additionalProperties: false,
+            required: ["url"],
+            properties: {
+              url: { type: "string" },
+              match: { type: "string" },
+            },
           },
         },
       },
       config_schema: {
-        complete_on: { type: "string", required: true, pattern: "^/" },
-        // An optional INTERMEDIATE URL (e.g. `/verify`) — the watcher emits an intermediate signal on its first
-        // match before the terminal `complete_on` (scenario-01 Phase 8: `/verify` → submitted, next email-verification).
-        intermediate: { type: "string", required: false, pattern: "^/" },
+        type: "object",
+        additionalProperties: false,
+        required: ["complete_on"],
+        properties: {
+          complete_on: { type: "string", pattern: "^/" },
+          // An optional INTERMEDIATE URL (e.g. `/verify`) — the watcher emits an intermediate signal on its first
+          // match before the terminal `complete_on` (scenario-01 Phase 8: `/verify` → submitted, next email-verification).
+          intermediate: { type: "string", pattern: "^/" },
+        },
       },
       factory_config_schema: {
-        pollMs: { type: "number", required: false, min: 1 },
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          pollMs: { type: "number", minimum: 1 },
+        },
       },
       probe: "url-watcher",
       relations: { compatibleWith: { templates: ["browser-handoff"] } },
@@ -587,8 +608,13 @@ export const BROWSER_HANDOFF_TEMPLATE: TemplateManifest = {
     // registered provider manifests.
     openParts: ["entrypoint", "connector", "detector"],
     openParams: {
-      recipient: { type: "string", required: true },
-      ttl: { type: "string", required: false, pattern: "^[0-9]+(s|m|h|d)$" },
+      type: "object",
+      additionalProperties: false,
+      required: ["recipient"],
+      properties: {
+        recipient: { type: "string" },
+        ttl: { type: "string", pattern: "^[0-9]+(s|m|h|d)$" },
+      },
     },
     probe: "browser-handoff",
     skills: [
@@ -620,8 +646,12 @@ export const CHANNEL_CLI_MANIFEST: ProviderManifest = {
     family: "channel",
     capability: { summary: "local/CLI fallback channel (headless tests)" },
     config_schema: {
-      delivery: { type: "enum", enum: ["stdout", "injected"], required: false },
-      inbound: { type: "enum", enum: ["memory", "injected"], required: false },
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        delivery: { type: "string", enum: ["stdout", "injected"] },
+        inbound: { type: "string", enum: ["memory", "injected"] },
+      },
     },
     probe: "channel-cli",
   },
