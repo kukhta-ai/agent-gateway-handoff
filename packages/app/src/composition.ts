@@ -22,8 +22,17 @@ import {
   type CatalogServiceOptions,
   type DependencyBinding,
   type IndexedDependencyBinding,
+  type ProviderGraphDiagnostic,
+  type ProviderGraphDoctorReport,
+  type ProviderGraphProjectionResult,
+  type ProviderGraphProviderFact,
+  type ProviderGraphResolvedProvider,
+  type ProviderProfileFamilyId,
+  type ProviderProfileManifest,
   type StoreContent,
-  toAdmissionCatalog,
+  providerGraphDoctorReport,
+  resolveProviderGraphProjection,
+  toAdmissionCatalogFromProviderGraphProjection,
 } from "@gla/catalog";
 import { CompletionService, type DetectorContract } from "@gla/completion";
 import { AccessGateway, type EntrypointClientAssetMount } from "@gla/gateway";
@@ -273,6 +282,232 @@ function providerCatalogOptions(
   return options;
 }
 
+const PROVIDER_PROFILE_BINDINGS: ReadonlyArray<{
+  profileFamily: ProviderProfileFamilyId;
+  runtimeFamily: RuntimeProviderFamily;
+  key: keyof ProviderSelectionProfile;
+}> = [
+  { profileFamily: "AuthProvider", runtimeFamily: "auth", key: "auth" },
+  { profileFamily: "Launcher", runtimeFamily: "launcher", key: "launcher" },
+  { profileFamily: "Workspace", runtimeFamily: "workspace", key: "workspace" },
+  { profileFamily: "HumanEntrypoint", runtimeFamily: "entrypoint", key: "entrypoint" },
+  { profileFamily: "AgentConnector", runtimeFamily: "connector", key: "connector" },
+  { profileFamily: "CompletionDetector", runtimeFamily: "detector", key: "detector" },
+  { profileFamily: "ChannelAdapter", runtimeFamily: "channel", key: "channel" },
+];
+
+function hasEntries(value: Record<string, unknown> | undefined): value is Record<string, unknown> {
+  return value !== undefined && Object.keys(value).length > 0;
+}
+
+function providerProfileManifest(profile: ProviderSelectionProfile): ProviderProfileManifest {
+  const select: NonNullable<ProviderProfileManifest["spec"]["select"]> = {};
+  for (const binding of PROVIDER_PROFILE_BINDINGS) {
+    select[binding.profileFamily] = profile[binding.key];
+  }
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "ProviderProfile",
+    metadata: { name: "selected-runtime-profile" },
+    spec: {
+      select,
+      lifecycle: { owner: "operator", apply: "boot", hotReload: false },
+    },
+  };
+}
+
+function providerSetDefaultConfig(
+  providerSet: AppProviderSet | undefined,
+  profile: ProviderSelectionProfile,
+): Record<string, Record<string, unknown>> | undefined {
+  if (providerSet?.defaultConfig === undefined) {
+    return undefined;
+  }
+  const defaults: Record<string, Record<string, unknown>> = {};
+  for (const binding of PROVIDER_PROFILE_BINDINGS) {
+    const providerId = profile[binding.key];
+    const values = providerSet.defaultConfig({
+      family: binding.runtimeFamily,
+      providerId,
+      legacy: {},
+    });
+    if (hasEntries(values)) {
+      defaults[providerId] = values;
+    }
+  }
+  return Object.keys(defaults).length > 0 ? defaults : undefined;
+}
+
+interface ProviderGraphRuntimeContext {
+  readonly catalogOptions: CatalogServiceOptions;
+  readonly graph: ProviderGraphProjectionResult;
+  readonly doctor: ProviderGraphDoctorReport;
+}
+
+function providerGraphRuntimeContext(opts: {
+  providerHost: ProviderHost;
+  providerSet?: AppProviderSet | undefined;
+  profile: ProviderSelectionProfile;
+  dependencyBindings?: DependencyBinding[] | undefined;
+  runtimeAssemblyParams?: Record<string, Record<string, unknown>> | undefined;
+  configValidationProviderIds?: readonly ProviderId[] | undefined;
+}): ProviderGraphRuntimeContext {
+  const content = providerStoreContent(opts.providerHost, opts.profile);
+  const catalogOptions: CatalogServiceOptions = { content };
+  if (opts.dependencyBindings !== undefined) {
+    catalogOptions.dependencyBindings = opts.dependencyBindings;
+  }
+  const defaultConfig = providerSetDefaultConfig(opts.providerSet, opts.profile);
+  const graphInputBase: Parameters<typeof resolveProviderGraphProjection>[0] = {
+    providerSet: {
+      ...(opts.providerSet?.moduleId !== undefined ? { id: opts.providerSet.moduleId } : {}),
+      providers: content.providers,
+      templates: content.templates,
+      ...(defaultConfig !== undefined ? { defaultConfig } : {}),
+    },
+    baseProfile: providerProfileManifest(opts.profile),
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
+    ...(opts.runtimeAssemblyParams !== undefined
+      ? { runtimeAssemblyParams: opts.runtimeAssemblyParams }
+      : {}),
+    configValidationMode: "factory",
+    ...(opts.configValidationProviderIds !== undefined
+      ? { configValidationProviderIds: opts.configValidationProviderIds }
+      : {}),
+  };
+  const dependencyGraph = resolveProviderGraphProjection(graphInputBase);
+  const dependencyBindingsByProvider = Object.fromEntries(
+    dependencyGraph.projection.providerFacts.map((provider) => [
+      provider.providerId,
+      provider.dependencies,
+    ]),
+  );
+  const probes = opts.providerHost.providerProbeRegistry(dependencyBindingsByProvider);
+  catalogOptions.probes = probes;
+  const graphInput: Parameters<typeof resolveProviderGraphProjection>[0] = {
+    ...graphInputBase,
+    probes,
+  };
+  const graph = resolveProviderGraphProjection(graphInput);
+  catalogOptions.providerGraph = graph;
+  return {
+    catalogOptions,
+    graph,
+    doctor: providerGraphDoctorReport(graph),
+  };
+}
+
+function selectedGraphProvider(
+  graph: ProviderGraphProjectionResult,
+  providerId: ProviderId,
+  family: RuntimeProviderFamily,
+): ProviderGraphResolvedProvider | undefined {
+  return graph.projection.providers.find(
+    (provider) => provider.providerId === providerId && provider.runtimeFamily === family,
+  );
+}
+
+function graphProviderFact(
+  graph: ProviderGraphProjectionResult,
+  providerId: ProviderId,
+  family: RuntimeProviderFamily,
+): ProviderGraphProviderFact | undefined {
+  return graph.projection.providerFacts.find(
+    (provider) => provider.providerId === providerId && provider.runtimeFamily === family,
+  );
+}
+
+function graphProviderDiagnostics(
+  graph: ProviderGraphProjectionResult,
+  providerId: ProviderId,
+): ProviderGraphDiagnostic[] {
+  return graph.diagnostics.filter(
+    (diagnostic) =>
+      diagnostic.providerId === providerId ||
+      (diagnostic.providerId === undefined && diagnostic.template === undefined),
+  );
+}
+
+function graphProviderCreateInputs(
+  context: ProviderGraphRuntimeContext,
+  family: RuntimeProviderFamily,
+  providerId: ProviderId,
+  fallbackConfig: Record<string, unknown> = {},
+): { config: Record<string, unknown>; dependencyBindings?: IndexedDependencyBinding[] } {
+  const selected = selectedGraphProvider(context.graph, providerId, family);
+  const fact = selected ?? graphProviderFact(context.graph, providerId, family);
+  if (fact === undefined) {
+    throw glaError("catalog.unknown", `provider "${providerId}" is not registered in the graph`, {
+      detail: {
+        diagnostics: [
+          {
+            code: "graph.unknown_provider",
+            providerId,
+            family,
+            message: `provider "${providerId}" is not registered in the selected provider graph`,
+          },
+        ],
+      },
+    });
+  }
+  const diagnostics = graphProviderDiagnostics(context.graph, providerId);
+  const bootBlockingDiagnostics = diagnostics.filter(
+    (diagnostic) => diagnostic.code !== "graph.dependency_unavailable",
+  );
+  if (bootBlockingDiagnostics.length > 0) {
+    throw glaError(
+      "catalog.unavailable",
+      `provider "${providerId}" has graph diagnostics and cannot boot`,
+      {
+        detail: { diagnostics: bootBlockingDiagnostics },
+      },
+    );
+  }
+  if (!fact.available) {
+    const dependencyNames = fact.dependencies.map((dependency) => dependency.dependency).join(", ");
+    throw glaError(
+      "dependency.unavailable",
+      `provider "${providerId}" has unavailable dependencies${
+        dependencyNames.length > 0 ? `: ${dependencyNames}` : ""
+      }`,
+      {
+        detail: {
+          diagnostics:
+            diagnostics.length > 0
+              ? diagnostics
+              : [
+                  {
+                    code: "graph.dependency_unavailable",
+                    providerId,
+                    family,
+                    message: `provider "${providerId}" is ${fact.availability}`,
+                    detail: { dependencies: fact.dependencies },
+                  },
+                ],
+        },
+      },
+    );
+  }
+  const config = selected?.config ?? fallbackConfig;
+  const dependencyBindings = fact.dependencies.length > 0 ? fact.dependencies : undefined;
+  return {
+    config,
+    ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
+  };
+}
+
+function addRuntimeParams(
+  params: Record<string, Record<string, unknown>>,
+  providerId: ProviderId,
+  values: Record<string, unknown> | undefined,
+): void {
+  if (hasEntries(values)) {
+    params[providerId] = values;
+  }
+}
+
 /** Compose against an explicit provider set/profile. Default wiring is supplied by distribution entrypoints. */
 export function createApp(opts: ProviderCompositionOptions = {}): App {
   const providerHost = requireProviderHost(opts);
@@ -337,6 +572,7 @@ function buildAuthProvider(
   providerHost: ProviderHost,
   providerSet: AppProviderSet | undefined,
   profile: ProviderSelectionProfile,
+  graphContext?: ProviderGraphRuntimeContext | undefined,
 ): { provider: AuthProviderPort; module: string } {
   const providerId = selection.authProvider ?? profile.auth;
   const config = providerConfig(selection.authProviderConfig, providerSet, "auth", providerId, {
@@ -346,10 +582,18 @@ function buildAuthProvider(
       ? webauthn.expectedOrigin
       : [webauthn.expectedOrigin],
   });
+  const graphInputs =
+    graphContext !== undefined
+      ? graphProviderCreateInputs(graphContext, "auth", providerId, config)
+      : undefined;
   const provider = providerHost.createProviderSync("auth", providerId, {
-    config,
+    config: graphInputs?.config ?? config,
     ...(stateRoot !== undefined ? { stateRoot } : {}),
-    ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
+    ...(graphInputs?.dependencyBindings !== undefined
+      ? { dependencyBindings: graphInputs.dependencyBindings }
+      : dependencyBindings !== undefined
+        ? { dependencyBindings }
+        : {}),
   });
   return { provider, module: providerModuleId(providerHost, "auth", providerId) };
 }
@@ -405,18 +649,25 @@ function buildChannelProvider(opts: {
   providerId: ProviderId;
   config?: Record<string, unknown>;
   dependencyBindings?: DependencyBinding[];
+  graphContext?: ProviderGraphRuntimeContext;
   identity: IdentityService;
   deliverySink?: DeliverySink;
 }): ChannelPort {
-  const dependencyEvidence = providerDependencyEvidence(
-    opts.providerId,
-    opts.dependencyBindings,
-    opts.providerHost,
-    opts.profile,
-  );
+  const graphInputs =
+    opts.graphContext !== undefined
+      ? graphProviderCreateInputs(opts.graphContext, "channel", opts.providerId, opts.config ?? {})
+      : undefined;
+  const dependencyEvidence =
+    graphInputs?.dependencyBindings ??
+    providerDependencyEvidence(
+      opts.providerId,
+      opts.dependencyBindings,
+      opts.providerHost,
+      opts.profile,
+    );
   const serviceBindings = providerServiceBindings(opts.providerSet, "channel", opts.providerId, {});
   return opts.providerHost.createProviderSync("channel", opts.providerId, {
-    config: opts.config ?? {},
+    config: graphInputs?.config ?? opts.config ?? {},
     ...(dependencyEvidence !== undefined ? { dependencyBindings: dependencyEvidence } : {}),
     services: providerServices({
       ...serviceBindings,
@@ -639,15 +890,23 @@ export interface CreateBridgeOptions extends ProviderCompositionOptions {
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
   const providerHost = requireProviderHost(opts);
   const profile = requireSelectedProfile(opts);
-  const catalogOptions = providerCatalogOptions(opts.dependencyBindings, providerHost, profile);
+  const graphContext = providerGraphRuntimeContext({
+    providerHost,
+    providerSet: opts.providerSet,
+    profile,
+    dependencyBindings: opts.dependencyBindings,
+    configValidationProviderIds: [],
+  });
+  const catalogOptions = graphContext.catalogOptions;
   const catalog = new CatalogService(catalogOptions);
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );
   const admission = new AdmissionService({
     policy,
-    catalog: toAdmissionCatalog(catalog, catalogOptions.content),
+    catalog: toAdmissionCatalogFromProviderGraphProjection(graphContext.graph),
   });
+  void graphContext.doctor;
   return new AgentBridge({ catalog, admission });
 }
 
@@ -801,6 +1060,8 @@ export interface ProvisioningStack {
   /** Idempotently closes runtime handles owned by this stack, including the daemon state-root lock. */
   close(): Promise<void>;
   bridge: AgentBridge;
+  /** Doctor/readiness report derived from the same resolved provider graph used for boot and admission. */
+  providerGraphDoctor: ProviderGraphDoctorReport;
   /** The capsule lifecycle manager (spawn/health/stop tracking). */
   lifecycle: CapsuleLifecycleManager;
   /** The cleanup reconciler (idempotent terminal-session teardown + orphan scan). */
@@ -887,18 +1148,7 @@ export function createProvisioningBridge(
     const entrypointProviderId = profile.entrypoint;
     const detectorProviderId = profile.detector;
     const channelProviderId = profile.channel;
-    const catalogOptions = providerCatalogOptions(opts.dependencyBindings, providerHost, profile);
-    const catalog = new CatalogService(catalogOptions);
-    const policy = new CedarPolicyAdapter(
-      opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
-    );
-    const admission = new AdmissionService({
-      policy,
-      catalog: toAdmissionCatalog(catalog, catalogOptions.content),
-    });
-
-    // ── Worker plane: Provider Host creates launcher/workspace ports, then worker core receives only ports.
-    const launcherProviderConfig = providerConfig(
+    const launcherBootConfig = providerConfig(
       opts.launcherProviderConfig,
       opts.providerSet,
       "launcher",
@@ -909,22 +1159,7 @@ export function createProvisioningBridge(
         ...(opts.startTimeoutMs !== undefined ? { startTimeoutMs: opts.startTimeoutMs } : {}),
       },
     );
-    const launcherDependencyEvidence = providerDependencyEvidence(
-      launcherProviderId,
-      opts.dependencyBindings,
-      providerHost,
-      profile,
-    );
-    const launcher = providerHost.createProviderSync("launcher", launcherProviderId, {
-      config: launcherProviderConfig,
-      ...(launcherDependencyEvidence !== undefined
-        ? { dependencyBindings: launcherDependencyEvidence }
-        : {}),
-    });
-    const registry = new SpawnerRegistry();
-    registry.register(launcherProviderId, launcher, { default: true });
-
-    const workspaceProviderConfig = providerConfig(
+    const workspaceBootConfig = providerConfig(
       opts.workspaceProviderConfig,
       opts.providerSet,
       "workspace",
@@ -933,16 +1168,115 @@ export function createProvisioningBridge(
         ...(opts.workspaceRoot !== undefined ? { root: opts.workspaceRoot } : {}),
       },
     );
-    const workspaceDependencyEvidence = providerDependencyEvidence(
+    const connectorBootConfig = providerConfig(
+      opts.connectorProviderConfig,
+      opts.providerSet,
+      "connector",
+      connectorProviderId,
+    );
+    const entrypointBootConfig = providerConfig(
+      opts.entrypointProviderConfig,
+      opts.providerSet,
+      "entrypoint",
+      entrypointProviderId,
+    );
+    const detectorBootConfig =
+      opts.handoff?.completion !== undefined
+        ? providerConfig(
+            opts.detectorProviderConfig,
+            opts.providerSet,
+            "detector",
+            detectorProviderId,
+            {
+              ...(opts.handoff.completion.pollMs !== undefined
+                ? { pollMs: opts.handoff.completion.pollMs }
+                : {}),
+            },
+          )
+        : providerConfig(
+            opts.detectorProviderConfig,
+            opts.providerSet,
+            "detector",
+            detectorProviderId,
+          );
+    const channelBootConfig = providerConfig(
+      opts.channelProviderConfig,
+      opts.providerSet,
+      "channel",
+      channelProviderId,
+    );
+    const authBootConfig =
+      opts.handoff !== undefined
+        ? providerConfig(opts.handoff.authProviderConfig, opts.providerSet, "auth", profile.auth, {
+            rpID: opts.handoff.rpID ?? "localhost",
+            rpName: opts.handoff.rpName ?? "GLA",
+            expectedOrigin: Array.isArray(opts.handoff.expectedOrigin)
+              ? opts.handoff.expectedOrigin
+              : [opts.handoff.expectedOrigin],
+          })
+        : undefined;
+    const runtimeAssemblyParams: Record<string, Record<string, unknown>> = {};
+    addRuntimeParams(runtimeAssemblyParams, launcherProviderId, launcherBootConfig);
+    addRuntimeParams(runtimeAssemblyParams, workspaceProviderId, workspaceBootConfig);
+    addRuntimeParams(runtimeAssemblyParams, connectorProviderId, connectorBootConfig);
+    addRuntimeParams(runtimeAssemblyParams, entrypointProviderId, entrypointBootConfig);
+    addRuntimeParams(runtimeAssemblyParams, detectorProviderId, detectorBootConfig);
+    addRuntimeParams(runtimeAssemblyParams, channelProviderId, channelBootConfig);
+    addRuntimeParams(runtimeAssemblyParams, profile.auth, authBootConfig);
+    const configValidationProviderIds = [
+      launcherProviderId,
       workspaceProviderId,
-      opts.dependencyBindings,
+      connectorProviderId,
+      ...(opts.handoff !== undefined
+        ? [profile.auth, channelProviderId, entrypointProviderId]
+        : []),
+      ...(opts.handoff?.completion !== undefined ? [detectorProviderId] : []),
+    ];
+
+    const graphContext = providerGraphRuntimeContext({
       providerHost,
+      providerSet: opts.providerSet,
       profile,
+      dependencyBindings: opts.dependencyBindings,
+      runtimeAssemblyParams,
+      configValidationProviderIds,
+    });
+    const catalogOptions = graphContext.catalogOptions;
+    const catalog = new CatalogService(catalogOptions);
+    const policy = new CedarPolicyAdapter(
+      opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
+    );
+    const admission = new AdmissionService({
+      policy,
+      catalog: toAdmissionCatalogFromProviderGraphProjection(graphContext.graph),
+    });
+
+    // ── Worker plane: Provider Host creates launcher/workspace ports, then worker core receives only ports.
+    const launcherCreateInputs = graphProviderCreateInputs(
+      graphContext,
+      "launcher",
+      launcherProviderId,
+      launcherBootConfig,
+    );
+    const launcher = providerHost.createProviderSync("launcher", launcherProviderId, {
+      config: launcherCreateInputs.config,
+      ...(launcherCreateInputs.dependencyBindings !== undefined
+        ? { dependencyBindings: launcherCreateInputs.dependencyBindings }
+        : {}),
+    });
+    const registry = new SpawnerRegistry();
+    registry.register(launcherProviderId, launcher, { default: true });
+
+    const workspaceCreateInputs = graphProviderCreateInputs(
+      graphContext,
+      "workspace",
+      workspaceProviderId,
+      workspaceBootConfig,
     );
     const workspacePort = providerHost.createProviderSync("workspace", workspaceProviderId, {
-      config: workspaceProviderConfig,
-      ...(workspaceDependencyEvidence !== undefined
-        ? { dependencyBindings: workspaceDependencyEvidence }
+      config: workspaceCreateInputs.config,
+      ...(workspaceCreateInputs.dependencyBindings !== undefined
+        ? { dependencyBindings: workspaceCreateInputs.dependencyBindings }
         : {}),
     });
     const workspace = new WorkspaceManager(workspacePort);
@@ -973,25 +1307,17 @@ export function createProvisioningBridge(
       if (port !== undefined) {
         return port;
       }
-      const connectorDependencyEvidence = providerDependencyEvidence(
+      const connectorCreateInputs = graphProviderCreateInputs(
+        graphContext,
+        "connector",
         providerId,
-        opts.dependencyBindings,
-        providerHost,
-        profile,
+        providerId === connectorProviderId ? connectorBootConfig : {},
       );
       port = managedAgentConnectorPort(
         providerHost.createProviderSync("connector", providerId, {
-          config:
-            providerId === connectorProviderId
-              ? providerConfig(
-                  opts.connectorProviderConfig,
-                  opts.providerSet,
-                  "connector",
-                  providerId,
-                )
-              : {},
-          ...(connectorDependencyEvidence !== undefined
-            ? { dependencyBindings: connectorDependencyEvidence }
+          config: connectorCreateInputs.config,
+          ...(connectorCreateInputs.dependencyBindings !== undefined
+            ? { dependencyBindings: connectorCreateInputs.dependencyBindings }
             : {}),
         }),
       );
@@ -1079,6 +1405,7 @@ export function createProvisioningBridge(
         providerHost,
         opts.providerSet,
         profile,
+        graphContext,
       );
       authModule = selected.module;
       identity =
@@ -1094,12 +1421,8 @@ export function createProvisioningBridge(
         providerSet: opts.providerSet,
         profile,
         providerId: channelProviderId,
-        config: providerConfig(
-          opts.channelProviderConfig,
-          opts.providerSet,
-          "channel",
-          channelProviderId,
-        ),
+        config: channelBootConfig,
+        graphContext,
         identity,
         ...(opts.dependencyBindings !== undefined
           ? { dependencyBindings: opts.dependencyBindings }
@@ -1121,24 +1444,16 @@ export function createProvisioningBridge(
         if (port !== undefined) {
           return port;
         }
-        const entrypointDependencyEvidence = providerDependencyEvidence(
+        const entrypointCreateInputs = graphProviderCreateInputs(
+          graphContext,
+          "entrypoint",
           providerId,
-          opts.dependencyBindings,
-          providerHost,
-          profile,
+          providerId === entrypointProviderId ? entrypointBootConfig : {},
         );
         port = providerHost.createProviderSync("entrypoint", providerId, {
-          config:
-            providerId === entrypointProviderId
-              ? providerConfig(
-                  opts.entrypointProviderConfig,
-                  opts.providerSet,
-                  "entrypoint",
-                  providerId,
-                )
-              : {},
-          ...(entrypointDependencyEvidence !== undefined
-            ? { dependencyBindings: entrypointDependencyEvidence }
+          config: entrypointCreateInputs.config,
+          ...(entrypointCreateInputs.dependencyBindings !== undefined
+            ? { dependencyBindings: entrypointCreateInputs.dependencyBindings }
             : {}),
         });
         entrypointPorts.set(providerId, port);
@@ -1230,18 +1545,12 @@ export function createProvisioningBridge(
           if (port !== undefined) {
             return port;
           }
-          const detectorConfig =
-            providerId === detectorProviderId
-              ? providerConfig(
-                  opts.detectorProviderConfig,
-                  opts.providerSet,
-                  "detector",
-                  providerId,
-                  {
-                    ...(c.pollMs !== undefined ? { pollMs: c.pollMs } : {}),
-                  },
-                )
-              : {};
+          const detectorCreateInputs = graphProviderCreateInputs(
+            graphContext,
+            "detector",
+            providerId,
+            providerId === detectorProviderId ? detectorBootConfig : {},
+          );
           const detectorServiceBindings = providerServiceBindings(
             opts.providerSet,
             "detector",
@@ -1254,16 +1563,10 @@ export function createProvisioningBridge(
             Object.keys(detectorServiceBindings).length > 0
               ? providerServices(detectorServiceBindings)
               : undefined;
-          const detectorDependencyEvidence = providerDependencyEvidence(
-            providerId,
-            opts.dependencyBindings,
-            providerHost,
-            profile,
-          );
           port = providerHost.createProviderSync("detector", providerId, {
-            config: detectorConfig,
-            ...(detectorDependencyEvidence !== undefined
-              ? { dependencyBindings: detectorDependencyEvidence }
+            config: detectorCreateInputs.config,
+            ...(detectorCreateInputs.dependencyBindings !== undefined
+              ? { dependencyBindings: detectorCreateInputs.dependencyBindings }
               : {}),
             ...(detectorServices !== undefined ? { services: detectorServices } : {}),
           });
@@ -1456,6 +1759,7 @@ export function createProvisioningBridge(
       ready: session.recoveryComplete(),
       close,
       bridge,
+      providerGraphDoctor: graphContext.doctor,
       lifecycle,
       reconciler,
       registry,

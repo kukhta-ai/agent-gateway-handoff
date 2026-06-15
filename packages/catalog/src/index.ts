@@ -612,7 +612,17 @@ export interface CatalogDiagnostic {
     | "provider.unknown"
     | "provider.unavailable"
     | "provider.degraded"
-    | "template.dependency_unavailable";
+    | "template.dependency_unavailable"
+    | "graph.unknown_family"
+    | "graph.unknown_provider"
+    | "graph.family_mismatch"
+    | "graph.duplicate_provider_version"
+    | "graph.overlay_extends_unknown"
+    | "graph.overlay_cycle"
+    | "graph.unresolved_relation"
+    | "graph.dependency_unavailable"
+    | "graph.compatibility_ambiguous"
+    | "graph.config_invalid";
   message: string;
   provider?: string;
   part?: string;
@@ -856,6 +866,8 @@ export interface CatalogServiceOptions {
   probes?: ProbeRegistry;
   /** Structured WPM DependencyBinding receipt evidence. Absent means host-touching deps are unavailable. */
   dependencyBindings?: DependencyBindingSource;
+  /** Optional resolved provider graph used to align catalog diagnostics with admission/doctor/boot. */
+  providerGraph?: ProviderGraphProjection | ProviderGraphProjectionResult;
 }
 
 /**
@@ -1008,10 +1020,14 @@ export function referenceWpmDependencyBindings(): DependencyBinding[] {
 export class CatalogService implements CatalogPort {
   private readonly index: IngestResult;
   private readonly store: StoreContent;
+  private readonly providerGraph?: ProviderGraphProjection | ProviderGraphProjectionResult;
 
   constructor(opts: CatalogServiceOptions = {}) {
     this.store = opts.content ?? defaultStoreContent();
     this.index = ingest(this.store, opts.probes ?? {}, opts.dependencyBindings);
+    if (opts.providerGraph !== undefined) {
+      this.providerGraph = opts.providerGraph;
+    }
   }
 
   /**
@@ -1025,6 +1041,7 @@ export class CatalogService implements CatalogPort {
       const k = filter.kind.toLowerCase();
       rows = rows.filter((e) => e.kind.toLowerCase() === k || e.family.toLowerCase() === k);
     }
+    rows = rows.map((entity) => entityWithProviderGraph(entity, this.providerGraph));
     if (filter?.available === true) {
       rows = rows.filter((e) => e.available);
     }
@@ -1034,7 +1051,8 @@ export class CatalogService implements CatalogPort {
 
   /** Look up one entity by name (docs/05 `catalog`/`template`/`skill show` lookups). Read-only. */
   show(name: string): IndexedEntity | undefined {
-    return this.index.entities.get(name);
+    const entity = this.index.entities.get(name);
+    return entity !== undefined ? entityWithProviderGraph(entity, this.providerGraph) : undefined;
   }
 
   /**
@@ -1079,23 +1097,36 @@ export class CatalogService implements CatalogPort {
     if (t === undefined) {
       return undefined;
     }
-    const parts: PartBinding[] = Object.entries(t.spec.requiredParts).map(([part, provider]) => {
-      const ent = this.index.entities.get(provider);
-      return {
-        part,
-        provider,
-        ...(ent?.family !== undefined ? { family: ent.family } : {}),
-        availability: ent?.availability ?? "unavailable",
-        available: ent?.availability === "available",
-        dependencies: ent?.requires ?? [],
-        diagnostics: providerDiagnostics(provider, ent, part),
-      };
-    });
     const entity = this.index.entities.get(id);
-    const availability = entity?.availability ?? "unavailable";
-    const dependencies = entity?.requires ?? [];
-    const diagnostics = templateDiagnostics(dependencies, parts);
-    const compatibleProviders = deriveCompatibleProviders(t, this.store.providers);
+    const graphTemplate = templateFromProviderGraph(this.providerGraph, id);
+    const parts: PartBinding[] =
+      partBindingsFromProviderGraphTemplate(this.providerGraph, id) ??
+      Object.entries(t.spec.requiredParts).map(([part, provider]) => {
+        const ent = this.index.entities.get(provider);
+        return {
+          part,
+          provider,
+          ...(ent?.family !== undefined ? { family: ent.family } : {}),
+          availability: ent?.availability ?? "unavailable",
+          available: ent?.availability === "available",
+          dependencies: ent?.requires ?? [],
+          diagnostics: providerDiagnostics(provider, ent, part),
+        };
+      });
+    const graphDiagnostics = catalogDiagnosticsFromProviderGraph(this.providerGraph, {
+      template: id,
+    }).filter((diagnostic) => diagnostic.code !== "graph.dependency_unavailable");
+    const dependencies = graphTemplate?.dependencies ?? entity?.requires ?? [];
+    const diagnostics = [...templateDiagnostics(dependencies, parts), ...graphDiagnostics];
+    const graphDefects =
+      graphDiagnostics.length > 0 ||
+      hasBlockingGraphDiagnostics(diagnostics) ||
+      providerGraphHasGlobalDefects(this.providerGraph);
+    const availability = graphDefects
+      ? "unavailable"
+      : (graphTemplate?.availability ?? entity?.availability ?? "unavailable");
+    const compatibleProviders =
+      graphTemplate?.compatibleProviders ?? deriveCompatibleProviders(t, this.store.providers);
     return {
       id,
       requiredParts: Object.keys(t.spec.requiredParts),
@@ -1372,6 +1403,16 @@ export interface ProviderGraphResolvedProvider {
   configLayers: ProviderGraphConfigLayer[];
 }
 
+/** Registered provider facts in the graph projection, including non-selected compatible providers. */
+export interface ProviderGraphProviderFact {
+  providerId: string;
+  runtimeFamily: Exclude<ProviderFamily, "template">;
+  manifest: ProviderManifest;
+  available: boolean;
+  availability: Availability;
+  dependencies: IndexedDependencyBinding[];
+}
+
 /** Resolved template facts in the graph projection. */
 export interface ProviderGraphResolvedTemplate {
   templateId: string;
@@ -1388,6 +1429,7 @@ export interface ProviderGraphProjection {
   providerSetId?: string;
   profileId: string;
   selectedProviders: Partial<Record<ProviderProfileFamilyId, string>>;
+  providerFacts: ProviderGraphProviderFact[];
   providers: ProviderGraphResolvedProvider[];
   templates: ProviderGraphResolvedTemplate[];
 }
@@ -1406,6 +1448,14 @@ export interface ResolveProviderGraphProjectionInput {
   compatibilityRequiredParts?: readonly string[];
   /** Runtime part params keyed by selected provider id; highest config precedence layer. */
   runtimeAssemblyParams?: Record<string, Record<string, unknown>>;
+  /**
+   * Config schema used when validating merged selected-provider config.
+   * `runtime` validates the agent/template-facing config_schema; `factory` validates Provider Host
+   * construction config when a provider declares a separate factory_config_schema.
+   */
+  configValidationMode?: "runtime" | "factory";
+  /** When set, merged config is validated only for these selected provider ids. */
+  configValidationProviderIds?: readonly string[];
 }
 
 /** Provider graph projection result; false means downstream boot/admission must reject it. */
@@ -1702,7 +1752,17 @@ function resolveProviderConfig(
     (current, layer) => mergeRecords(current, layer.values),
     {},
   );
-  const validation = validateConfig(manifest.spec.config_schema ?? {}, config);
+  if (
+    input.configValidationProviderIds !== undefined &&
+    !input.configValidationProviderIds.includes(providerId)
+  ) {
+    return { config, layers };
+  }
+  const schema =
+    input.configValidationMode === "factory"
+      ? (manifest.spec.factory_config_schema ?? manifest.spec.config_schema ?? {})
+      : (manifest.spec.config_schema ?? {});
+  const validation = validateConfig(schema, config);
   if (!validation.ok) {
     graphAddDiagnostic(diagnostics, {
       code: "graph.config_invalid",
@@ -2077,6 +2137,23 @@ export function resolveProviderGraphProjection(
     dependenciesById.set(provider.metadata.name, availability.dependencies);
   }
 
+  const providerFacts: ProviderGraphProviderFact[] = [];
+  for (const provider of providersByName.values()) {
+    if (provider.spec.family === "template") {
+      continue;
+    }
+    const dependencies = dependenciesById.get(provider.metadata.name) ?? [];
+    const availability = availabilityById.get(provider.metadata.name) ?? "unavailable";
+    providerFacts.push({
+      providerId: provider.metadata.name,
+      runtimeFamily: provider.spec.family,
+      manifest: structuredClone(provider),
+      available: availability === "available",
+      availability,
+      dependencies: structuredClone(dependencies),
+    });
+  }
+
   const selectedProviders: ProviderGraphResolvedProvider[] = [];
   for (const [family, providerId] of Object.entries(selected) as Array<
     [ProviderProfileFamilyId, string]
@@ -2135,6 +2212,7 @@ export function resolveProviderGraphProjection(
     ...(input.providerSet?.id !== undefined ? { providerSetId: input.providerSet.id } : {}),
     profileId: input.baseProfile.metadata.name,
     selectedProviders: selected,
+    providerFacts: providerFacts.sort((a, b) => a.providerId.localeCompare(b.providerId)),
     providers: selectedProviders.sort((a, b) => a.providerId.localeCompare(b.providerId)),
     templates: templates.sort((a, b) => a.templateId.localeCompare(b.templateId)),
   };
@@ -2142,4 +2220,430 @@ export function resolveProviderGraphProjection(
   return diagnostics.length === 0
     ? { ok: true, projection, diagnostics: [] }
     : { ok: false, projection, diagnostics };
+}
+
+function graphProjectionParts(input: ProviderGraphProjection | ProviderGraphProjectionResult): {
+  projection: ProviderGraphProjection;
+  diagnostics: ProviderGraphDiagnostic[];
+} {
+  if ("ok" in input) {
+    return {
+      projection: input.projection,
+      diagnostics: input.diagnostics,
+    };
+  }
+  return { projection: input, diagnostics: [] };
+}
+
+function providerGraphGlobalDiagnostics(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult | undefined,
+): ProviderGraphDiagnostic[] {
+  if (input === undefined) {
+    return [];
+  }
+  return graphProjectionParts(input).diagnostics.filter(
+    (diagnostic) => diagnostic.providerId === undefined && diagnostic.template === undefined,
+  );
+}
+
+function providerGraphHasGlobalDefects(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult | undefined,
+): boolean {
+  return providerGraphGlobalDiagnostics(input).length > 0;
+}
+
+function graphDiagnosticsAsCatalog(
+  diagnostics: readonly ProviderGraphDiagnostic[],
+  filter: { providerId?: string; template?: string; part?: string } = {},
+): CatalogDiagnostic[] {
+  return diagnostics
+    .filter((diagnostic) => {
+      if (filter.providerId !== undefined && diagnostic.providerId !== filter.providerId) {
+        return false;
+      }
+      if (filter.template !== undefined && diagnostic.template !== filter.template) {
+        return false;
+      }
+      return true;
+    })
+    .map((diagnostic) => ({
+      code: diagnostic.code,
+      message: diagnostic.message,
+      ...(diagnostic.providerId !== undefined ? { provider: diagnostic.providerId } : {}),
+      ...(filter.part !== undefined ? { part: filter.part } : {}),
+      ...(diagnostic.family !== undefined ? { family: diagnostic.family } : {}),
+      ...(diagnostic.dependency !== undefined ? { dependency: diagnostic.dependency } : {}),
+      ...(diagnostic.detail !== undefined ? { detail: diagnostic.detail } : {}),
+    }));
+}
+
+function catalogDiagnosticsFromProviderGraph(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult | undefined,
+  filter: { providerId?: string; template?: string; part?: string } = {},
+): CatalogDiagnostic[] {
+  if (input === undefined) {
+    return [];
+  }
+  const diagnostics = graphProjectionParts(input).diagnostics;
+  const target = graphDiagnosticsAsCatalog(diagnostics, filter);
+  if (filter.providerId === undefined && filter.template === undefined) {
+    return target;
+  }
+  return [...target, ...graphDiagnosticsAsCatalog(providerGraphGlobalDiagnostics(input))];
+}
+
+function providerFactFromProviderGraph(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult | undefined,
+  providerId: string,
+): ProviderGraphProviderFact | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+  return graphProjectionParts(input).projection.providerFacts.find(
+    (provider) => provider.providerId === providerId,
+  );
+}
+
+function templateFromProviderGraph(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult | undefined,
+  templateId: string,
+): ProviderGraphResolvedTemplate | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+  return graphProjectionParts(input).projection.templates.find(
+    (template) => template.templateId === templateId,
+  );
+}
+
+function hasBlockingGraphDiagnostics(diagnostics: readonly CatalogDiagnostic[]): boolean {
+  return diagnostics.some(
+    (diagnostic) =>
+      diagnostic.code.startsWith("graph.") && diagnostic.code !== "graph.dependency_unavailable",
+  );
+}
+
+function templateProviderGraphDiagnostics(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult | undefined,
+  templateId: string,
+): CatalogDiagnostic[] {
+  if (input === undefined) {
+    return [];
+  }
+  const { projection, diagnostics } = graphProjectionParts(input);
+  const template = projection.templates.find((entry) => entry.templateId === templateId);
+  if (template === undefined) {
+    return [];
+  }
+  return Object.entries(template.requiredParts).flatMap(([part, providerId]) =>
+    graphDiagnosticsAsCatalog(diagnostics, { providerId, part }),
+  );
+}
+
+function partBindingsFromProviderGraphTemplate(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult | undefined,
+  templateId: string,
+): PartBinding[] | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+  const { projection, diagnostics } = graphProjectionParts(input);
+  const template = projection.templates.find((entry) => entry.templateId === templateId);
+  if (template === undefined) {
+    return undefined;
+  }
+  const providersById = new Map(
+    projection.providerFacts.map((provider) => [provider.providerId, provider]),
+  );
+  return partBindingsFromProjectionTemplate(template, providersById, diagnostics);
+}
+
+function entityWithProviderGraph(
+  entity: IndexedEntity,
+  graph: ProviderGraphProjection | ProviderGraphProjectionResult | undefined,
+): IndexedEntity {
+  if (graph === undefined) {
+    return entity;
+  }
+  const diagnostics = catalogDiagnosticsFromProviderGraph(graph, {
+    ...(entity.kind === "CapsuleTemplate" || entity.family === "template"
+      ? { template: entity.name }
+      : { providerId: entity.name }),
+  });
+  const requiredProviderDiagnostics =
+    entity.kind === "CapsuleTemplate" || entity.family === "template"
+      ? templateProviderGraphDiagnostics(graph, entity.name)
+      : [];
+  const graphDefects =
+    diagnostics.length > 0 ||
+    hasBlockingGraphDiagnostics(requiredProviderDiagnostics) ||
+    providerGraphHasGlobalDefects(graph);
+  const graphAvailability =
+    entity.kind === "CapsuleTemplate" || entity.family === "template"
+      ? templateFromProviderGraph(graph, entity.name)?.availability
+      : providerFactFromProviderGraph(graph, entity.name)?.availability;
+  const graphProvider = providerFactFromProviderGraph(graph, entity.name);
+  const availability = graphDefects ? "unavailable" : (graphAvailability ?? entity.availability);
+  return {
+    ...entity,
+    availability,
+    available: availability === "available",
+    ...(graphProvider !== undefined ? { requires: graphProvider.dependencies } : {}),
+  };
+}
+
+function providerDiagnosticsFromGraphFact(
+  provider: ProviderGraphProviderFact | undefined,
+  providerId: string,
+  diagnostics: readonly ProviderGraphDiagnostic[],
+  part?: string,
+): CatalogDiagnostic[] {
+  if (provider === undefined) {
+    return [
+      {
+        code: "provider.unknown",
+        message: `unknown provider "${providerId}"`,
+        provider: providerId,
+        ...(part !== undefined ? { part } : {}),
+      },
+    ];
+  }
+  const base: CatalogDiagnostic =
+    provider.availability === "available"
+      ? {
+          code: "provider.available",
+          message: `provider "${providerId}" is available`,
+          provider: providerId,
+          family: provider.runtimeFamily,
+          ...(part !== undefined ? { part } : {}),
+        }
+      : {
+          code: provider.availability === "degraded" ? "provider.degraded" : "provider.unavailable",
+          message: `provider "${providerId}" is ${provider.availability}`,
+          provider: providerId,
+          family: provider.runtimeFamily,
+          ...(part !== undefined ? { part } : {}),
+          detail: {
+            availability: provider.availability,
+            dependencies: provider.dependencies,
+          },
+        };
+  return [
+    base,
+    ...graphDiagnosticsAsCatalog(
+      diagnostics,
+      part !== undefined ? { providerId, part } : { providerId },
+    ),
+  ];
+}
+
+function partBindingsFromProjectionTemplate(
+  template: ProviderGraphResolvedTemplate,
+  providersById: ReadonlyMap<string, ProviderGraphProviderFact>,
+  diagnostics: readonly ProviderGraphDiagnostic[],
+): PartBinding[] {
+  return Object.entries(template.requiredParts).map(([part, providerId]) => {
+    const provider = providersById.get(providerId);
+    return {
+      part,
+      provider: providerId,
+      ...(provider?.runtimeFamily !== undefined ? { family: provider.runtimeFamily } : {}),
+      availability: provider?.availability ?? "unavailable",
+      available: provider?.available === true,
+      dependencies: provider?.dependencies ?? [],
+      diagnostics: providerDiagnosticsFromGraphFact(provider, providerId, diagnostics, part),
+    };
+  });
+}
+
+/**
+ * Adapt a resolved provider graph into the {@link CatalogAdmissionView} admission consumes.
+ *
+ * Admission keeps its mutate/validate pipeline, but its template/provider facts now come directly
+ * from the shared graph projection: availability, dependency evidence, compatibility, diagnostics,
+ * and provider schemas all have the same source as catalog/doctor/boot reads.
+ */
+export function toAdmissionCatalogFromProviderGraphProjection(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult,
+): CatalogAdmissionView {
+  const { projection, diagnostics } = graphProjectionParts(input);
+  const providersById = new Map(
+    projection.providerFacts.map((provider) => [provider.providerId, provider]),
+  );
+  const templatesById = new Map(
+    projection.templates.map((template) => [template.templateId, template]),
+  );
+
+  return {
+    templateDefaults(id: string): CatalogTemplateDefaults | undefined {
+      const template = templatesById.get(id);
+      if (template === undefined) {
+        return undefined;
+      }
+      const parts = template.requiredParts;
+      const out: CatalogTemplateDefaults = { template: id };
+      if (parts.launcher) {
+        out.launcher = { use: parts.launcher };
+      }
+      if (parts.entrypoint) {
+        out.entrypoints = [{ use: parts.entrypoint }];
+      }
+      if (parts.connector) {
+        out.connector = { use: parts.connector };
+      }
+      if (parts.workspace) {
+        out.workspace = { use: parts.workspace };
+      }
+      if (parts.detector) {
+        out.detectors = [{ use: parts.detector }];
+      }
+      if (template.manifest.spec.openParts !== undefined) {
+        out.openParts = [...template.manifest.spec.openParts];
+      }
+      if (template.compatibleProviders !== undefined) {
+        out.compatibleProviders = structuredClone(template.compatibleProviders);
+      }
+      const partBindings = partBindingsFromProjectionTemplate(template, providersById, diagnostics);
+      const graphDiagnostics = catalogDiagnosticsFromProviderGraph(input, {
+        template: id,
+      }).filter((diagnostic) => diagnostic.code !== "graph.dependency_unavailable");
+      const templateDiagnosticRows = templateDiagnostics(template.dependencies, partBindings);
+      const graphDefects =
+        graphDiagnostics.length > 0 || hasBlockingGraphDiagnostics(templateDiagnosticRows);
+      out.available = template.available && !graphDefects;
+      out.availability = graphDefects ? "unavailable" : template.availability;
+      out.dependencies = structuredClone(template.dependencies);
+      out.diagnostics = [...templateDiagnosticRows, ...graphDiagnostics];
+      return out;
+    },
+    provider(use: string): CatalogProviderInfo | undefined {
+      const provider = providersById.get(use);
+      if (provider === undefined) {
+        return undefined;
+      }
+      const graphDiagnostics = catalogDiagnosticsFromProviderGraph(input, { providerId: use });
+      const graphDefects = graphDiagnostics.length > 0;
+      const info: CatalogProviderInfo = {
+        name: use,
+        available: provider.available && !graphDefects,
+        availability: graphDefects ? "unavailable" : provider.availability,
+        family: provider.runtimeFamily,
+        dependencies: structuredClone(provider.dependencies),
+        diagnostics: [...providerDiagnosticsFromGraphFact(provider, use, []), ...graphDiagnostics],
+      };
+      if (provider.manifest.spec.config_schema !== undefined) {
+        info.config_schema = provider.manifest.spec.config_schema;
+      }
+      return info;
+    },
+    launcherMountCapability(launcher: string): CatalogLauncherMountCapability | undefined {
+      return mountCapabilityOf(providersById.get(launcher)?.manifest);
+    },
+  };
+}
+
+export type ProviderGraphDoctorStatus = "PASS" | "DEGRADED" | "FAIL";
+
+export interface ProviderGraphDoctorProvider {
+  providerId: string;
+  family: string;
+  selected: boolean;
+  available: boolean;
+  availability: Availability;
+  dependencies: IndexedDependencyBinding[];
+  diagnostics: CatalogDiagnostic[];
+}
+
+export interface ProviderGraphDoctorTemplate {
+  templateId: string;
+  available: boolean;
+  availability: Availability;
+  dependencies: IndexedDependencyBinding[];
+  diagnostics: CatalogDiagnostic[];
+}
+
+/** Read-only doctor summary for the selected provider graph. */
+export interface ProviderGraphDoctorReport {
+  status: ProviderGraphDoctorStatus;
+  providerSetId?: string;
+  profileId: string;
+  selectedProviders: Partial<Record<ProviderProfileFamilyId, string>>;
+  providers: ProviderGraphDoctorProvider[];
+  templates: ProviderGraphDoctorTemplate[];
+  diagnostics: CatalogDiagnostic[];
+}
+
+/**
+ * Build the doctor/readiness report from the same graph result used by catalog, admission, and boot.
+ *
+ * The overall status follows the selected profile: unselected optional providers are listed for
+ * diagnostics but do not fail this profile until a template/admitted assembly chooses them.
+ */
+export function providerGraphDoctorReport(
+  input: ProviderGraphProjection | ProviderGraphProjectionResult,
+): ProviderGraphDoctorReport {
+  const { projection, diagnostics } = graphProjectionParts(input);
+  const selectedIds = new Set(Object.values(projection.selectedProviders).filter(hasText));
+  const providersById = new Map(
+    projection.providerFacts.map((provider) => [provider.providerId, provider]),
+  );
+  const providers = projection.providerFacts.map((provider) => {
+    const selected = selectedIds.has(provider.providerId);
+    const graphDiagnostics = catalogDiagnosticsFromProviderGraph(input, {
+      providerId: provider.providerId,
+    });
+    const graphDefects = graphDiagnostics.length > 0;
+    return {
+      providerId: provider.providerId,
+      family: provider.runtimeFamily,
+      selected,
+      available: provider.available && !graphDefects,
+      availability: graphDefects ? "unavailable" : provider.availability,
+      dependencies: structuredClone(provider.dependencies),
+      diagnostics: [
+        ...providerDiagnosticsFromGraphFact(provider, provider.providerId, []),
+        ...graphDiagnostics,
+      ],
+    };
+  });
+  const templates = projection.templates.map((template) => {
+    const partBindings = partBindingsFromProjectionTemplate(template, providersById, diagnostics);
+    const graphDiagnostics = catalogDiagnosticsFromProviderGraph(input, {
+      template: template.templateId,
+    }).filter((diagnostic) => diagnostic.code !== "graph.dependency_unavailable");
+    const templateDiagnosticRows = templateDiagnostics(template.dependencies, partBindings);
+    const graphDefects =
+      graphDiagnostics.length > 0 || hasBlockingGraphDiagnostics(templateDiagnosticRows);
+    return {
+      templateId: template.templateId,
+      available: template.available && !graphDefects,
+      availability: graphDefects ? "unavailable" : template.availability,
+      dependencies: structuredClone(template.dependencies),
+      diagnostics: [...templateDiagnosticRows, ...graphDiagnostics],
+    };
+  });
+  const selectedProviderRows = providers.filter((provider) => provider.selected);
+  const selectedOrTemplateUnavailable =
+    selectedProviderRows.some((provider) => provider.availability === "unavailable") ||
+    templates.some((template) => template.availability === "unavailable");
+  const selectedOrTemplateDegraded =
+    selectedProviderRows.some((provider) => provider.availability === "degraded") ||
+    templates.some((template) => template.availability === "degraded");
+  const graphDiagnostics = graphDiagnosticsAsCatalog(diagnostics);
+  const status: ProviderGraphDoctorStatus =
+    graphDiagnostics.length > 0 || selectedOrTemplateUnavailable
+      ? "FAIL"
+      : selectedOrTemplateDegraded
+        ? "DEGRADED"
+        : "PASS";
+
+  return {
+    status,
+    ...(projection.providerSetId !== undefined ? { providerSetId: projection.providerSetId } : {}),
+    profileId: projection.profileId,
+    selectedProviders: structuredClone(projection.selectedProviders),
+    providers,
+    templates,
+    diagnostics: graphDiagnostics,
+  };
 }

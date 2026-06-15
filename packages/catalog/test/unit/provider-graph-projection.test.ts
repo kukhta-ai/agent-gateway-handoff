@@ -2,14 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   BROWSER_HANDOFF_TEMPLATE,
   CHANNEL_CLI_MANIFEST,
+  CatalogService,
   PROVIDER_MANIFESTS,
   type ProviderFamily,
   type ProviderManifest,
   type ProviderProfileManifest,
   type TemplateManifest,
   type TemplatePackageManifest,
+  providerGraphDoctorReport,
   referenceWpmDependencyBindings,
   resolveProviderGraphProjection,
+  toAdmissionCatalog,
+  toAdmissionCatalogFromProviderGraphProjection,
 } from "../../src/index.js";
 
 function provider(
@@ -283,6 +287,212 @@ describe("provider graph projection", () => {
     expect(launcher?.config).not.toHaveProperty("dependencyBindings");
     expect(launcher?.config).not.toHaveProperty("connection");
     expect(launcher?.config).not.toHaveProperty("receipt");
+  });
+
+  it("feeds admission and doctor from the same graph projection as catalog reads", () => {
+    const dependencyBindings = referenceWpmDependencyBindings().filter(
+      (binding) => binding.dependency !== "edge-proxy",
+    );
+    const content = {
+      providers: PROVIDERS,
+      templates: [structuredClone(BROWSER_HANDOFF_TEMPLATE)],
+    };
+    const catalog = new CatalogService({ content, dependencyBindings });
+    const graph = resolveProviderGraphProjection({
+      providerSet: {
+        id: "reference",
+        providers: content.providers,
+        templates: content.templates,
+      },
+      baseProfile: BASE_PROFILE,
+      dependencyBindings,
+      runtimeAssemblyParams: {
+        "url-watcher": { complete_on: "/dashboard" },
+      },
+    });
+
+    const classicAdmission = toAdmissionCatalog(catalog, content);
+    const graphAdmission = toAdmissionCatalogFromProviderGraphProjection(graph);
+    const graphTemplate = graphAdmission.templateDefaults("browser-handoff");
+
+    expect(graphTemplate).toMatchObject({
+      available: false,
+      availability: "unavailable",
+      diagnostics: [
+        expect.objectContaining({
+          code: "template.dependency_unavailable",
+          dependency: "edge-proxy",
+        }),
+      ],
+    });
+    expect(graphAdmission.provider("launcher-process")).toMatchObject(
+      classicAdmission.provider("launcher-process") ?? {},
+    );
+    expect(graphAdmission.provider("user-done")).toMatchObject({
+      name: "user-done",
+      available: true,
+      family: "detector",
+    });
+    expect(providerGraphDoctorReport(graph)).toMatchObject({
+      status: "FAIL",
+      selectedProviders: expect.objectContaining({ Launcher: "launcher-process" }),
+      templates: [
+        expect.objectContaining({
+          templateId: "browser-handoff",
+          availability: "unavailable",
+        }),
+      ],
+    });
+  });
+
+  it("marks graph-defective templates unavailable for admission before state creation", () => {
+    const entrypoint = provider("entrypoint-basic", "entrypoint", "HumanEntrypoint");
+    const ambiguousTemplate: TemplateManifest = {
+      apiVersion: "gla.dev/v1",
+      kind: "CapsuleTemplate",
+      metadata: { name: "ambiguous-entrypoint-template", version: "0.1.0" },
+      spec: {
+        family: "template",
+        capability: { summary: "ambiguous template" },
+        requiredParts: { entrypoint: "entrypoint-basic" },
+        openParts: ["entrypoint"],
+        openParams: {},
+      },
+    };
+    const graph = resolveProviderGraphProjection({
+      providerSet: {
+        providers: [entrypoint],
+        templates: [ambiguousTemplate],
+      },
+      baseProfile: {
+        apiVersion: "gla.dev/v1",
+        kind: "ProviderProfile",
+        metadata: { name: "entrypoint-profile" },
+        spec: { select: { HumanEntrypoint: "entrypoint-basic" } },
+      },
+      compatibilityRequiredParts: ["entrypoint"],
+    });
+
+    expect(graph.ok).toBe(false);
+    expect(
+      toAdmissionCatalogFromProviderGraphProjection(graph).templateDefaults(
+        "ambiguous-entrypoint-template",
+      ),
+    ).toMatchObject({
+      available: false,
+      availability: "unavailable",
+      diagnostics: [
+        expect.objectContaining({
+          code: "graph.compatibility_ambiguous",
+        }),
+      ],
+    });
+    expect(providerGraphDoctorReport(graph)).toMatchObject({
+      status: "FAIL",
+      templates: [
+        expect.objectContaining({
+          templateId: "ambiguous-entrypoint-template",
+          available: false,
+          availability: "unavailable",
+          diagnostics: [
+            expect.objectContaining({
+              code: "graph.compatibility_ambiguous",
+            }),
+          ],
+        }),
+      ],
+    });
+  });
+
+  it("propagates selected provider graph defects to fixed template availability", () => {
+    const entrypoint = provider("entrypoint-needs-config", "entrypoint", "HumanEntrypoint");
+    entrypoint.spec.config_schema = {
+      origin: { type: "string", required: true, min: 1 },
+    };
+    const fixedTemplate: TemplateManifest = {
+      apiVersion: "gla.dev/v1",
+      kind: "CapsuleTemplate",
+      metadata: { name: "fixed-entrypoint-template", version: "0.1.0" },
+      spec: {
+        family: "template",
+        capability: { summary: "fixed template" },
+        requiredParts: { entrypoint: "entrypoint-needs-config" },
+        openParams: {},
+      },
+    };
+    const content = {
+      providers: [entrypoint],
+      templates: [fixedTemplate],
+    };
+    const graph = resolveProviderGraphProjection({
+      providerSet: content,
+      baseProfile: {
+        apiVersion: "gla.dev/v1",
+        kind: "ProviderProfile",
+        metadata: { name: "entrypoint-profile" },
+        spec: { select: { HumanEntrypoint: "entrypoint-needs-config" } },
+      },
+    });
+    const catalog = new CatalogService({ content, providerGraph: graph });
+
+    expect(graph.ok).toBe(false);
+    expect(catalog.show("fixed-entrypoint-template")).toMatchObject({
+      available: false,
+      availability: "unavailable",
+    });
+    expect(
+      catalog.list({ kind: "template", available: true }).map((entry) => entry.name),
+    ).not.toContain("fixed-entrypoint-template");
+    expect(catalog.templateShow("fixed-entrypoint-template")).toMatchObject({
+      available: false,
+      availability: "unavailable",
+      diagnostics: [
+        expect.objectContaining({
+          code: "graph.config_invalid",
+          provider: "entrypoint-needs-config",
+          part: "entrypoint",
+        }),
+      ],
+    });
+    expect(
+      toAdmissionCatalogFromProviderGraphProjection(graph).templateDefaults(
+        "fixed-entrypoint-template",
+      ),
+    ).toMatchObject({
+      available: false,
+      availability: "unavailable",
+      diagnostics: [
+        expect.objectContaining({
+          code: "graph.config_invalid",
+          provider: "entrypoint-needs-config",
+          part: "entrypoint",
+        }),
+      ],
+    });
+    expect(providerGraphDoctorReport(graph)).toMatchObject({
+      status: "FAIL",
+      providers: [
+        expect.objectContaining({
+          providerId: "entrypoint-needs-config",
+          available: false,
+          availability: "unavailable",
+        }),
+      ],
+      templates: [
+        expect.objectContaining({
+          templateId: "fixed-entrypoint-template",
+          available: false,
+          availability: "unavailable",
+          diagnostics: [
+            expect.objectContaining({
+              code: "graph.config_invalid",
+              provider: "entrypoint-needs-config",
+              part: "entrypoint",
+            }),
+          ],
+        }),
+      ],
+    });
   });
 
   it("does not reject open parts without a required-compatibility contract", () => {

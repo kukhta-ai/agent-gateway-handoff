@@ -6,6 +6,7 @@
 import type {
   DependencyRequirement,
   IndexedDependencyBinding,
+  Probe,
   ProbeResult,
   ProviderManifest,
 } from "@gla/catalog";
@@ -536,6 +537,34 @@ export class ProviderHost {
   /** Registered provider manifests, in registration order. */
   providerManifests(): ProviderManifest[] {
     return [...this.manifests.values()].map((manifest) => structuredClone(manifest));
+  }
+
+  /**
+   * Synchronous catalog probe registry keyed by manifest `spec.probe`.
+   *
+   * Catalog/provider-graph reads are synchronous, so async Provider Host probes are projected as
+   * unavailable here and still fail with `provider.async_unsupported` if boot tries sync creation.
+   */
+  providerProbeRegistry(
+    dependencyBindingsByProvider: Record<string, IndexedDependencyBinding[]> = {},
+  ): Record<string, Probe> {
+    const out: Record<string, Probe> = {};
+    for (const [providerId, probe] of this.probes.entries()) {
+      const manifest = this.manifests.get(providerId);
+      const probeName = manifest?.spec.probe ?? providerId;
+      out[probeName] = () => {
+        const result = probe({
+          providerId,
+          dependencies: new StaticProviderDependencyView(
+            manifest?.spec.requires ?? [],
+            dependencyBindingsByProvider[providerId],
+          ),
+          diagnostics: { emit: () => {} },
+        });
+        return isPromiseLike(result) ? "unavailable" : result;
+      };
+    }
+    return out;
   }
 
   /** Return one registered provider manifest by id. */

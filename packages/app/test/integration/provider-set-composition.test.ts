@@ -1,4 +1,8 @@
-import type { ProviderFamily, ProviderManifest } from "@gla/catalog";
+import {
+  type ProviderFamily,
+  type ProviderManifest,
+  referenceWpmDependencyBindings,
+} from "@gla/catalog";
 import {
   type AgentConnector,
   type AgentConnectorPort,
@@ -451,6 +455,7 @@ describe("provider-set agnostic app composition", () => {
     const providerSet = fakeProviderSet(records);
     const stack = createProvisioningBridge({
       providerSet,
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherMode: "headless",
       workspaceRoot: "/tmp/fake-gla-workspace",
       handoff: {
@@ -465,6 +470,13 @@ describe("provider-set agnostic app composition", () => {
       },
     });
     try {
+      expect(stack.providerGraphDoctor).toMatchObject({
+        status: "PASS",
+        selectedProviders: expect.objectContaining({
+          Launcher: "fake-launcher",
+          AgentConnector: "fake-connector",
+        }),
+      });
       expect(stack.authModule).toBe("@fake/auth");
       expect(stack.entrypoint).toBeDefined();
       expect(stack.detector).toBeDefined();
