@@ -1,4 +1,4 @@
-import type { ProviderManifest } from "@gla/catalog";
+import type { IndexedDependencyBinding, ProviderManifest } from "@gla/catalog";
 import type { LauncherPort, RuntimeHandle } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import {
@@ -301,6 +301,35 @@ describe("ProviderHost", () => {
         ],
       },
     });
+  });
+
+  it("projects registered synchronous probes with indexed dependency evidence", () => {
+    const dependency: IndexedDependencyBinding = {
+      dependency: "browser-runtime",
+      hostTouching: true,
+      status: "bound",
+      missingEvidence: [],
+      diagnostics: { install: "available", runtime: "available" },
+    };
+    const dependencyAware: GlaProviderModule = {
+      manifest: manifest({
+        requires: [{ dependency: "browser-runtime", hostTouching: true }],
+      }),
+      register(ctx) {
+        ctx.registerLauncher("fake-launcher", { create: () => fakeLauncher });
+        ctx.registerProbe("fake-launcher", ({ dependencies }) =>
+          dependencies.bindingFor("browser-runtime")?.status === "bound"
+            ? "available"
+            : "unavailable",
+        );
+      },
+    };
+    const host = new ProviderHost().registerModule(dependencyAware);
+
+    expect(host.providerProbeRegistry()["fake-launcher"]?.()).toBe("unavailable");
+    expect(host.providerProbeRegistry({ "fake-launcher": [dependency] })["fake-launcher"]?.()).toBe(
+      "available",
+    );
   });
 
   it("redacts provider-emitted diagnostics before forwarding to caller-supplied sinks", async () => {
