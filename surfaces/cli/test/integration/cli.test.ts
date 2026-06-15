@@ -9,7 +9,7 @@ import { CatalogService, defaultStoreContent, referenceWpmDependencyBindings } f
 import { glaError } from "@gla/kernel";
 import { describe, expect, it, vi } from "vitest";
 import { CLI_VERSION, type CliServices, run } from "../../src/cli.js";
-import { DEFERRED_CLI_SURFACES } from "../../src/contract.js";
+import { CLI_COMMANDS, DEFERRED_CLI_SURFACES } from "../../src/contract.js";
 import { ExitCode } from "../../src/exit-codes.js";
 import { main } from "../../src/index.js";
 import { Output, type OutputStreams } from "../../src/output.js";
@@ -172,6 +172,74 @@ describe("gla exit codes", () => {
     }
   });
 
+  it("process entry reports parser usage failures before connecting to a configured daemon", async () => {
+    const previous = process.env.GLA_ENDPOINT;
+    process.env.GLA_ENDPOINT = join(tmpdir(), `gla-missing-usage-${Date.now()}.sock`);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    try {
+      const code = await main(["--bogus"]);
+      expect(code).toBe(ExitCode.USAGE);
+      expect(stdout.join("")).toBe("");
+      const err = JSON.parse(stderr.join("")).error;
+      expect(err.code).toBe("usage.bad_flag");
+      expect(err.message).not.toContain("gla-missing-usage");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
+      } else {
+        process.env.GLA_ENDPOINT = previous;
+      }
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("process entry emits local machine help before connecting to a configured daemon", async () => {
+    const previous = process.env.GLA_ENDPOINT;
+    process.env.GLA_ENDPOINT = join(tmpdir(), `gla-missing-help-${Date.now()}.sock`);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    try {
+      const code = await main(["--help"]);
+      expect(code).toBe(ExitCode.OK);
+      expect(JSON.parse(stdout.join("")).command).toBe("gla");
+      expect(stderr.join("")).toBe("");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
+      } else {
+        process.env.GLA_ENDPOINT = previous;
+      }
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
   it("--endpoint overrides a bad GLA_ENDPOINT before connecting", async () => {
     const previous = process.env.GLA_ENDPOINT;
     process.env.GLA_ENDPOINT = "https://gla.example/bridge?secret=ENV_SECRET_CANARY_094";
@@ -243,6 +311,59 @@ describe("gla JSON/TTY output contract", () => {
 });
 
 describe("gla current contract/schema/help (GLA-094)", () => {
+  it("every executable command contract has a machine-readable Commander help scope", async () => {
+    for (const spec of CLI_COMMANDS) {
+      const c = capture(false);
+      const argv = [spec.noun, spec.verb, "--help"].filter((v): v is string => v !== undefined);
+      const code = await run(argv, c.out, services());
+      expect(code, argv.join(" ")).toBe(ExitCode.OK);
+      const help = JSON.parse(c.stdout()) as {
+        command: string;
+        commands: Array<{ noun: string; verb?: string }>;
+      };
+      expect(help.command).toBe(["gla", spec.noun, spec.verb].filter(Boolean).join(" "));
+      const expectedCommand =
+        spec.verb === undefined ? { noun: spec.noun } : { noun: spec.noun, verb: spec.verb };
+      expect(help.commands).toEqual(
+        expect.arrayContaining([expect.objectContaining(expectedCommand)]),
+      );
+      expect(c.stderr()).toBe("");
+    }
+  });
+
+  it("accepts Commander long-option value syntax while preserving the JSON contract", async () => {
+    const version = capture(false);
+    expect(await run(["version", "--output=json"], version.out, services())).toBe(ExitCode.OK);
+    expect(JSON.parse(version.stdout())).toEqual({
+      client: CLI_VERSION,
+      connection: "in-process",
+    });
+
+    const catalog = capture(false);
+    expect(await run(["catalog", "list", "--kind=Launcher"], catalog.out, services())).toBe(
+      ExitCode.OK,
+    );
+    expect(JSON.parse(catalog.stdout()).map((e: { name: string }) => e.name)).toEqual([
+      "launcher-process",
+    ]);
+
+    const task = capture(false);
+    expect(
+      await run(
+        [
+          "task",
+          "create",
+          "--intent=register on acme",
+          "--recipient=tg:user:123",
+          "--fields=task_id,state",
+        ],
+        task.out,
+        services(),
+      ),
+    ).toBe(ExitCode.OK);
+    expect(Object.keys(JSON.parse(task.stdout())).sort()).toEqual(["state", "task_id"]);
+  });
+
   it("root machine help lists current executable commands separately from deferred surfaces", async () => {
     const c = capture(false);
     expect(await run(["--help"], c.out, services())).toBe(ExitCode.OK);
@@ -251,6 +372,9 @@ describe("gla current contract/schema/help (GLA-094)", () => {
       deferred_surfaces: Array<{ surface: string }>;
     };
     const commands = help.commands.map((cmd) => [cmd.noun, cmd.verb].filter(Boolean).join(" "));
+    expect(
+      help.commands.find((cmd) => cmd.noun === "session" && cmd.verb === "create"),
+    ).not.toHaveProperty("repeatableFlags");
     expect(commands).toEqual(
       expect.arrayContaining([
         "whoami",
@@ -396,7 +520,8 @@ describe("gla current contract/schema/help (GLA-094)", () => {
       [["help", "task", "create"], "usage.bad_argument"],
     ] as const) {
       const c = capture(false);
-      expect(await run(argv, c.out, services())).toBe(ExitCode.USAGE);
+      const code = await run(argv, c.out, services());
+      expect(code, argv.join(" ")).toBe(ExitCode.USAGE);
       expect(c.stdout()).toBe("");
       expect(JSON.parse(c.stderr()).error.code).toBe(expectedCode);
     }

@@ -21,7 +21,9 @@ import {
   isGlaError,
   redactOperatorEgress,
 } from "@gla/kernel";
+import { Command, InvalidArgumentError } from "commander";
 import {
+  CLI_COMMANDS,
   type CliCommandSpec,
   commandSpecsForNoun,
   currentNouns,
@@ -67,20 +69,35 @@ interface ParsedArgs {
   missingValueFlags: string[];
   /** an unknown/invalid global flag, if any (→ usage error) */
   badFlag?: string;
+  /** a Commander parse failure translated into GLA's stable JSON usage taxonomy */
+  parseError?: CliParseError;
   /** a documented future surface requested before it is supported by the current contract */
   unsupported?: { surface: string; message: string };
 }
 
-/** Flags that may be repeated (collected into {@link ParsedArgs.repeated}, not overwritten). */
-const REPEATABLE_FLAGS = new Set(["mount", "detector", "entrypoint"]);
+interface CliParseError {
+  code: "usage.bad_flag" | "usage.bad_argument";
+  message: string;
+  detail: Record<string, unknown>;
+}
+
+interface FlagDefinition {
+  source: string;
+  commanderSyntax: string;
+  longName: string;
+  shortName: string | undefined;
+  valueRequired: boolean;
+  repeatable: boolean;
+  optionKey: string;
+}
 
 function redactHandoffReadModel<T>(value: T): T {
   return redactOperatorEgress(value) as T;
 }
 
-/** Global flags consume a following value; command flags are parsed loosely and validated per-command. */
-function parseArgs(argv: readonly string[]): ParsedArgs {
-  const out: ParsedArgs = {
+/** Build the neutral parsed-argument shape consumed by the dispatcher. */
+function emptyParsedArgs(): ParsedArgs {
+  return {
     output: "auto",
     quiet: false,
     help: false,
@@ -90,117 +107,522 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     repeated: new Map(),
     missingValueFlags: [],
   };
-  let optsEnded = false;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === undefined) continue;
-    // POSIX end-of-options marker. Also lets `pnpm gla -- <args>` work.
-    if (!optsEnded && arg === "--") {
-      optsEnded = true;
+}
+
+/** Parse argv through a Commander program generated from {@link CLI_COMMANDS}. */
+function parseArgs(argv: readonly string[]): ParsedArgs {
+  const parsed = emptyParsedArgs();
+  parsed.help = hasHelpToken(argv);
+
+  const unsupported = scanDeferredGlobalSurface(argv);
+  if (unsupported !== undefined) {
+    parsed.unsupported = unsupported;
+    return parsed;
+  }
+
+  const argvForCommander = stripHelpTokens(argv);
+  parsed.positionals = extractCommandTokens(argvForCommander);
+  const missingValue = missingValueBeforeCommander(argvForCommander, parsed.positionals);
+  if (missingValue !== undefined) {
+    parsed.parseError = missingValue;
+    return parsed;
+  }
+  const program = buildCommanderProgram(parsed);
+
+  try {
+    program.parse(argvForCommander, { from: "user" });
+  } catch (e) {
+    applyCommanderGlobalOptions(parsed, program);
+    const parseError = parseErrorForCommander(e, argvForCommander, parsed.positionals);
+    if (parseError !== undefined) {
+      parsed.parseError = parseError;
+    }
+    return parsed;
+  }
+
+  applyCommanderGlobalOptions(parsed, program);
+  return parsed;
+}
+
+function buildCommanderProgram(parsed: ParsedArgs): Command {
+  const program = new Command("gla");
+  program
+    .exitOverride()
+    .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+    .showHelpAfterError(false)
+    .showSuggestionAfterError(false)
+    .helpOption(false)
+    .addHelpCommand(false)
+    .option("-o, --output <mode>", "output mode", parseOutputModeOption)
+    .option("--fields <a,b,c>", "field mask", parseFieldMaskOption)
+    .option("-q, --quiet", "suppress non-result chatter")
+    .option("--no-input", "never prompt for interactive input");
+
+  const groups = new Map<string, Command>();
+  for (const spec of CLI_COMMANDS) {
+    const parent =
+      spec.verb === undefined
+        ? program
+        : (groups.get(spec.noun) ?? createCommandGroup(program, groups, spec.noun));
+    const commandSyntax = [
+      spec.verb ?? spec.noun,
+      ...spec.args.map((arg) => commanderArgSyntax(arg, parsed.help)),
+    ].join(" ");
+    const command = parent
+      .command(commandSyntax)
+      .description(spec.summary)
+      .allowExcessArguments(false)
+      .addHelpCommand(false)
+      .helpOption(false);
+
+    const flags = flagDefinitionsForSpec(spec);
+    for (const flag of flags) {
+      if (flag.repeatable) {
+        command.option(flag.commanderSyntax, flag.source, collectRepeatedOption, []);
+      } else if (flag.valueRequired) {
+        command.option(flag.commanderSyntax, flag.source);
+      } else {
+        command.option(flag.commanderSyntax, flag.source);
+      }
+    }
+
+    command.action((...actionArgs: unknown[]) => {
+      const commanderCommand = actionArgs.at(-1);
+      if (!(commanderCommand instanceof Command)) {
+        return;
+      }
+      const positionals = actionArgs
+        .slice(0, -2)
+        .filter((value): value is string => typeof value === "string");
+      parsed.positionals = [spec.noun, ...(spec.verb ? [spec.verb] : []), ...positionals];
+      collectCommandOptions(parsed, spec, commanderCommand);
+    });
+  }
+
+  return program;
+}
+
+function createCommandGroup(program: Command, groups: Map<string, Command>, noun: string): Command {
+  const group = program
+    .command(noun)
+    .description(`${noun} commands`)
+    .addHelpCommand(false)
+    .helpOption(false);
+  groups.set(noun, group);
+  return group;
+}
+
+function commanderArgSyntax(arg: string, helpRequested: boolean): string {
+  if (arg.startsWith("[")) {
+    return arg;
+  }
+  return helpRequested ? `[${arg}]` : `<${arg}>`;
+}
+
+function parseOutputModeOption(value: string): OutputMode {
+  if (value === "json" || value === "text") {
+    return value;
+  }
+  throw new InvalidArgumentError("expected json or text");
+}
+
+function parseFieldMaskOption(value: string): string[] {
+  return value
+    .split(",")
+    .map((field) => field.trim())
+    .filter((field) => field.length > 0);
+}
+
+function collectRepeatedOption(value: string, previous: string[] | undefined): string[] {
+  return [...(previous ?? []), value];
+}
+
+function applyCommanderGlobalOptions(parsed: ParsedArgs, program: Command): void {
+  const opts = program.opts() as {
+    output?: OutputMode;
+    fields?: string[];
+    quiet?: boolean;
+    input?: boolean;
+  };
+  if (opts.output !== undefined) {
+    parsed.output = opts.output;
+  }
+  if (opts.fields !== undefined) {
+    parsed.fields = opts.fields;
+  }
+  if (opts.quiet === true) {
+    parsed.quiet = true;
+  }
+  if (opts.input === false) {
+    // The current CLI never prompts; accept the flag as a no-op so scripts can be explicit.
+    parsed.noInput = true;
+  }
+}
+
+function collectCommandOptions(parsed: ParsedArgs, spec: CliCommandSpec, command: Command): void {
+  const opts = command.opts() as Record<string, unknown>;
+  for (const flag of flagDefinitionsForSpec(spec)) {
+    const value = opts[flag.optionKey];
+    if (value === undefined) {
       continue;
     }
-    if (optsEnded) {
-      out.positionals.push(arg);
-      continue;
-    }
-    switch (arg) {
-      case "-h":
-      case "--help":
-        out.help = true;
-        break;
-      case "-q":
-      case "--quiet":
-        out.quiet = true;
-        break;
-      case "--no-input":
-        // The current CLI never prompts; accept the flag as a no-op so scripts can be explicit.
-        out.noInput = true;
-        break;
-      case "-o":
-      case "--output": {
-        const val = argv[++i];
-        if (val === "json" || val === "text") {
-          out.output = val;
-        } else if (val === "ndjson") {
-          out.unsupported = {
-            surface: "output ndjson",
-            message: "ndjson output is deferred until streaming commands exist",
-          };
-        } else {
-          out.badFlag = `${arg} ${val ?? ""}`.trim();
-        }
-        break;
-      }
-      case "--fields": {
-        const val = argv[++i];
-        if (val !== undefined && !val.startsWith("-")) {
-          out.fields = val
-            .split(",")
-            .map((f) => f.trim())
-            .filter((f) => f.length > 0);
-        } else {
-          out.badFlag = `${arg} ${val ?? ""}`.trim();
-        }
-        break;
-      }
-      case "--context": {
-        const val = argv[++i];
-        out.unsupported = {
-          surface: "--context",
-          message: `context selection is deferred; use GLA_ENDPOINT or --endpoint for the current local profile${val ? ` (got "${val}")` : ""}`,
-        };
-        break;
-      }
-      case "--trace-id": {
-        const val = argv[++i];
-        out.unsupported = {
-          surface: "--trace-id",
-          message: `trace correlation is deferred until audit/event support is implemented${val ? ` (got "${val}")` : ""}`,
-        };
-        break;
-      }
-      case "-f":
-      case "--file": {
-        // The assembly spec file for `session create -f <spec>` (a short flag taking a value).
-        const val = argv[++i];
-        if (val !== undefined && !val.startsWith("-")) {
-          out.flags.set("file", val);
-        } else {
-          out.badFlag = `${arg} ${val ?? ""}`.trim();
-        }
-        break;
-      }
-      default:
-        if (arg.startsWith("--")) {
-          // A command-scoped flag: `--name value` or a boolean `--name`.
-          const name = arg.slice(2);
-          const next = argv[i + 1];
-          const takesValue = next !== undefined && !next.startsWith("-");
-          if (REPEATABLE_FLAGS.has(name)) {
-            // Repeatable: collect each occurrence's value in order (e.g. --mount a --mount b).
-            const list = out.repeated.get(name) ?? [];
-            if (takesValue) {
-              list.push(next);
-              i++;
-            } else {
-              out.missingValueFlags.push(name);
-            }
-            out.repeated.set(name, list);
-          } else if (takesValue) {
-            out.flags.set(name, next);
-            i++;
-          } else {
-            out.flags.set(name, true);
-            out.missingValueFlags.push(name);
-          }
-        } else if (arg.startsWith("-")) {
-          out.badFlag = arg;
-        } else {
-          out.positionals.push(arg);
-        }
+    if (flag.repeatable) {
+      parsed.repeated.set(
+        flag.longName,
+        Array.isArray(value) ? value.map(String) : [String(value)],
+      );
+    } else if (flag.valueRequired) {
+      parsed.flags.set(flag.longName, String(value));
+    } else if (value === true) {
+      parsed.flags.set(flag.longName, true);
     }
   }
-  return out;
+}
+
+function hasHelpToken(argv: readonly string[]): boolean {
+  return argv.some((arg) => arg === "-h" || arg === "--help");
+}
+
+function stripHelpTokens(argv: readonly string[]): string[] {
+  return argv.filter((arg) => arg !== "-h" && arg !== "--help");
+}
+
+function scanDeferredGlobalSurface(
+  argv: readonly string[],
+): { surface: string; message: string } | undefined {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    const [name, equalsValue] = splitEqualsOption(arg);
+    if (name === "-o" || name === "--output") {
+      const value = equalsValue ?? argv[i + 1];
+      if (value === "ndjson") {
+        return {
+          surface: "output ndjson",
+          message: "ndjson output is deferred until streaming commands exist",
+        };
+      }
+      if (equalsValue === undefined && arg !== "--output=ndjson") {
+        i++;
+      }
+      continue;
+    }
+    if (name === "--context") {
+      const value = equalsValue ?? valueAfterOption(argv, i);
+      return {
+        surface: "--context",
+        message: `context selection is deferred; use GLA_ENDPOINT or --endpoint for the current local profile${value ? ` (got "${value}")` : ""}`,
+      };
+    }
+    if (name === "--trace-id") {
+      const value = equalsValue ?? valueAfterOption(argv, i);
+      return {
+        surface: "--trace-id",
+        message: `trace correlation is deferred until audit/event support is implemented${value ? ` (got "${value}")` : ""}`,
+      };
+    }
+  }
+  return undefined;
+}
+
+function valueAfterOption(argv: readonly string[], index: number): string | undefined {
+  const next = argv[index + 1];
+  return next !== undefined && !next.startsWith("-") ? next : undefined;
+}
+
+function splitEqualsOption(arg: string): [name: string, value: string | undefined] {
+  const eq = arg.indexOf("=");
+  if (eq < 0) {
+    return [arg, undefined];
+  }
+  return [arg.slice(0, eq), arg.slice(eq + 1)];
+}
+
+function parseErrorForCommander(
+  error: unknown,
+  argv: readonly string[],
+  positionals: string[],
+): CliParseError | undefined {
+  if (!isCommanderParseError(error)) {
+    return undefined;
+  }
+  const command = commandSpecForPositionals(positionals);
+  switch (error.code) {
+    case "commander.help":
+    case "commander.unknownCommand": {
+      if (positionals[0] === "help") {
+        const flag = firstUnsupportedHelpAliasFlag(argv);
+        return flag === undefined ? undefined : badFlagParseError(flag, undefined);
+      }
+      return undefined;
+    }
+    case "commander.unknownOption":
+    case "commander.invalidArgument": {
+      const flag = extractFlagFromCommanderMessage(error.message) ?? firstUnknownFlag(argv);
+      return badFlagParseError(flag ?? error.message, command);
+    }
+    case "commander.optionMissingArgument": {
+      const flag = extractFlagFromCommanderMessage(error.message) ?? firstUnknownFlag(argv);
+      return missingValueParseError(flag ?? error.message, command);
+    }
+    case "commander.missingArgument":
+    case "commander.excessArguments": {
+      const unexpectedBooleanValues =
+        command === undefined ? [] : unexpectedBooleanValueFlags(argv, command.spec);
+      if (command !== undefined && unexpectedBooleanValues.length > 0) {
+        return unexpectedBooleanValueParseError(unexpectedBooleanValues, command);
+      }
+      return command === undefined ? undefined : badArgumentParseError(command, positionals);
+    }
+    default:
+      return undefined;
+  }
+}
+
+function missingValueBeforeCommander(
+  argv: readonly string[],
+  positionals: string[],
+): CliParseError | undefined {
+  const command = commandSpecForPositionals(positionals);
+  const valueFlags = new Map<string, string>();
+  valueFlags.set("-o", "-o");
+  valueFlags.set("--output", "--output");
+  valueFlags.set("--fields", "--fields");
+  if (command !== undefined) {
+    for (const flag of flagDefinitionsForSpec(command.spec)) {
+      if (!flag.valueRequired) {
+        continue;
+      }
+      valueFlags.set(`--${flag.longName}`, `--${flag.longName}`);
+      if (flag.shortName !== undefined) {
+        valueFlags.set(flag.shortName, flag.shortName);
+      }
+    }
+  }
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined || arg === "--") {
+      continue;
+    }
+    const [name, inlineValue] = splitEqualsOption(arg);
+    const flag = valueFlags.get(name);
+    if (flag === undefined || inlineValue !== undefined) {
+      continue;
+    }
+    const next = argv[i + 1];
+    if (next === undefined || next.startsWith("-")) {
+      return missingValueParseError(flag, command);
+    }
+  }
+  return undefined;
+}
+
+function firstUnsupportedHelpAliasFlag(argv: readonly string[]): string | undefined {
+  const allowed = new Set(["-o", "--output", "--fields", "-q", "--quiet", "--no-input"]);
+  for (const arg of argv) {
+    if (!arg.startsWith("-") || arg === "--") {
+      continue;
+    }
+    const [name] = splitEqualsOption(arg);
+    if (!allowed.has(name)) {
+      return name;
+    }
+  }
+  return undefined;
+}
+
+function isCommanderParseError(error: unknown): error is { code: string; message: string } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    "message" in error &&
+    typeof (error as { code: unknown }).code === "string" &&
+    typeof (error as { message: unknown }).message === "string"
+  );
+}
+
+function extractFlagFromCommanderMessage(message: string): string | undefined {
+  const option = message.match(/option '([^']+)'/);
+  const unknown = message.match(/unknown option '([^']+)'/);
+  const value = option?.[1] ?? unknown?.[1];
+  return value?.split(/[,\s]/)[0];
+}
+
+function firstUnknownFlag(argv: readonly string[]): string | undefined {
+  return argv.find((arg) => arg.startsWith("-") && arg !== "--");
+}
+
+function commandSpecForPositionals(
+  positionals: string[],
+): { spec: CliCommandSpec; argStart: number; command: string } | undefined {
+  const [noun, verb] = positionals;
+  if (noun === undefined) {
+    return undefined;
+  }
+  const exact = commandSpecForParsedArgs(noun, verb);
+  if (exact !== undefined) {
+    return exact;
+  }
+  const root = findCommandSpec(noun, undefined);
+  if (root === undefined) {
+    return undefined;
+  }
+  return { spec: root, argStart: 1, command: `gla ${root.noun}` };
+}
+
+function badFlagParseError(
+  flag: string,
+  command: { spec: CliCommandSpec; command: string } | undefined,
+): CliParseError {
+  if (command === undefined) {
+    return {
+      code: "usage.bad_flag",
+      message: `unknown or invalid flag: ${flag}`,
+      detail: { flags: [flag], flag },
+    };
+  }
+  const allowed = [...allowedFlagNames(command.spec)].map((f) => `--${f}`);
+  return {
+    code: "usage.bad_flag",
+    message: `unsupported flag(s) for ${command.command}: ${flag}`,
+    detail: { flags: [flag], allowed_flags: allowed },
+  };
+}
+
+function missingValueParseError(
+  flag: string,
+  command: { spec: CliCommandSpec; command: string } | undefined,
+): CliParseError {
+  if (command === undefined) {
+    return {
+      code: "usage.bad_flag",
+      message: `missing value for flag: ${flag}`,
+      detail: { flags: [flag], missing_values: [flag] },
+    };
+  }
+  return {
+    code: "usage.bad_flag",
+    message: `missing value for flag(s) on ${command.command}: ${flag}`,
+    detail: {
+      flags: [flag],
+      missing_values: [flag],
+      allowed_flags: [...allowedFlagNames(command.spec)].map((f) => `--${f}`),
+    },
+  };
+}
+
+function badArgumentParseError(
+  command: { spec: CliCommandSpec; argStart: number; command: string },
+  positionals: string[],
+): CliParseError {
+  const supplied = positionals.slice(command.argStart);
+  const min = requiredArgCount(command.spec);
+  const max = command.spec.args.length;
+  return {
+    code: "usage.bad_argument",
+    message: `bad arguments for ${command.command}: expected ${usageTextForSpec(command.spec)}`,
+    detail: {
+      command: command.command,
+      expected: command.spec.args,
+      supplied,
+      min_args: min,
+      max_args: max,
+    },
+  };
+}
+
+function unexpectedBooleanValueParseError(
+  flags: string[],
+  command: { spec: CliCommandSpec; command: string },
+): CliParseError {
+  return {
+    code: "usage.bad_flag",
+    message: `unexpected value for flag(s) on ${command.command}: ${flags.join(", ")}`,
+    detail: {
+      flags,
+      unexpected_values: flags,
+      allowed_flags: [...allowedFlagNames(command.spec)].map((f) => `--${f}`),
+    },
+  };
+}
+
+function unexpectedBooleanValueFlags(argv: readonly string[], spec: CliCommandSpec): string[] {
+  const flags = flagDefinitionsForSpec(spec).filter((flag) => !flag.valueRequired);
+  const names = new Map<string, FlagDefinition>();
+  for (const flag of flags) {
+    names.set(`--${flag.longName}`, flag);
+    if (flag.shortName !== undefined) {
+      names.set(flag.shortName, flag);
+    }
+  }
+  const unexpected: string[] = [];
+  for (let i = 0; i < argv.length - 1; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    const [name, equalsValue] = splitEqualsOption(arg);
+    const flag = names.get(name);
+    if (flag === undefined) {
+      continue;
+    }
+    const next = equalsValue ?? argv[i + 1];
+    if (next !== undefined && !next.startsWith("-")) {
+      unexpected.push(`--${flag.longName}`);
+    }
+  }
+  return [...new Set(unexpected)];
+}
+
+function extractCommandTokens(argv: readonly string[]): string[] {
+  const positionals: string[] = [];
+  const valueFlags = allValueFlagAliases();
+  let optionsEnded = false;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (!optionsEnded && arg === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (optionsEnded) {
+      positionals.push(arg);
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      const [name, inlineValue] = splitEqualsOption(arg);
+      if (inlineValue === undefined && valueFlags.has(name)) {
+        const next = argv[i + 1];
+        if (next !== undefined && !next.startsWith("-")) {
+          i++;
+        }
+      }
+      continue;
+    }
+    positionals.push(arg);
+  }
+  return positionals;
+}
+
+function allValueFlagAliases(): Set<string> {
+  const aliases = new Set(["-o", "--output", "--fields", "--endpoint", "--context", "--trace-id"]);
+  for (const spec of CLI_COMMANDS) {
+    for (const flag of flagDefinitionsForSpec(spec)) {
+      if (!flag.valueRequired) {
+        continue;
+      }
+      aliases.add(`--${flag.longName}`);
+      if (flag.shortName !== undefined) {
+        aliases.add(flag.shortName);
+      }
+    }
+  }
+  return aliases;
 }
 
 /**
@@ -238,71 +660,12 @@ export async function run(
   services: CliServices = defaultServices(),
 ): Promise<number> {
   const parsed = parseArgs(argv);
-
-  if (parsed.badFlag) {
-    out.fail({
-      code: "usage.bad_flag",
-      message: `unknown or invalid flag: ${parsed.badFlag}`,
-      detail: { flag: parsed.badFlag },
-      skill: "interpret-gla-rejections",
-      retryable: false,
-    });
-    return ExitCode.USAGE;
-  }
-  if (parsed.unsupported) {
-    return unsupportedError(out, parsed.unsupported.surface, parsed.unsupported.message);
-  }
+  const preflight = validateParsedArgsBeforeDispatch(parsed, out);
+  if (preflight !== undefined) return preflight;
 
   const [noun, verb] = parsed.positionals;
 
-  if (noun === undefined) {
-    const rootInputError = validateNoCommandInputs(parsed, out, "gla");
-    if (rootInputError !== undefined) {
-      return rootInputError;
-    }
-  }
-  if (noun === "help") {
-    const helpAliasError = validateHelpAlias(parsed, out);
-    if (helpAliasError !== undefined) {
-      return helpAliasError;
-    }
-  }
-
-  // `gla --help` / `gla -h` / `gla help` / bare `gla` → usage on stdout, success.
-  if (parsed.help || noun === undefined || noun === "help") {
-    const helpScopeError = validateHelpScope(parsed, out, noun, verb);
-    if (helpScopeError !== undefined) {
-      return helpScopeError;
-    }
-    const helpContractError = validateHelpContractInputs(parsed, out, noun, verb);
-    if (helpContractError !== undefined) {
-      return helpContractError;
-    }
-    const scopeNoun = noun === "help" ? undefined : noun;
-    out.emit(schemaPayload(scopeNoun, scopeNoun === undefined ? undefined : verb), () =>
-      usageText(scopeNoun, scopeNoun === undefined ? undefined : verb),
-    );
-    return ExitCode.OK;
-  }
-
   try {
-    const deferred = findDeferredCliSurface(noun, verb);
-    if (deferred !== undefined) {
-      return unsupportedError(out, deferred.surface, deferred.message);
-    }
-    const argError = validateCommandArgs(parsed, out, noun, verb);
-    if (argError !== undefined) {
-      return argError;
-    }
-    const flagError = validateCommandFlags(parsed, out, noun, verb);
-    if (flagError !== undefined) {
-      return flagError;
-    }
-    const fieldError = validateFieldMask(parsed, out, noun, verb);
-    if (fieldError !== undefined) {
-      return fieldError;
-    }
-
     switch (noun) {
       case "schema": {
         const schemaNoun = verb;
@@ -679,6 +1042,83 @@ export async function run(
   }
 }
 
+/** Validate parse/usage failures that must happen before any bridge or daemon connection. */
+export function preflightUsage(argv: readonly string[], out: Output): number | undefined {
+  return validateParsedArgsBeforeDispatch(parseArgs(argv), out);
+}
+
+function validateParsedArgsBeforeDispatch(parsed: ParsedArgs, out: Output): number | undefined {
+  if (parsed.parseError !== undefined) {
+    out.fail({
+      code: parsed.parseError.code,
+      message: parsed.parseError.message,
+      detail: parsed.parseError.detail,
+      skill: "interpret-gla-rejections",
+      retryable: false,
+    });
+    return ExitCode.USAGE;
+  }
+  if (parsed.badFlag) {
+    out.fail({
+      code: "usage.bad_flag",
+      message: `unknown or invalid flag: ${parsed.badFlag}`,
+      detail: { flag: parsed.badFlag },
+      skill: "interpret-gla-rejections",
+      retryable: false,
+    });
+    return ExitCode.USAGE;
+  }
+  if (parsed.unsupported) {
+    return unsupportedError(out, parsed.unsupported.surface, parsed.unsupported.message);
+  }
+
+  const [noun, verb] = parsed.positionals;
+
+  if (noun === undefined) {
+    const rootInputError = validateNoCommandInputs(parsed, out, "gla");
+    if (rootInputError !== undefined) {
+      return rootInputError;
+    }
+  }
+  if (noun === "help") {
+    const helpAliasError = validateHelpAlias(parsed, out);
+    if (helpAliasError !== undefined) {
+      return helpAliasError;
+    }
+  }
+
+  // `gla --help` / `gla -h` / `gla help` / bare `gla` -> usage on stdout, success.
+  if (parsed.help || noun === undefined || noun === "help") {
+    const helpScopeError = validateHelpScope(parsed, out, noun, verb);
+    if (helpScopeError !== undefined) {
+      return helpScopeError;
+    }
+    const helpContractError = validateHelpContractInputs(parsed, out, noun, verb);
+    if (helpContractError !== undefined) {
+      return helpContractError;
+    }
+    const scopeNoun = noun === "help" ? undefined : noun;
+    out.emit(schemaPayload(scopeNoun, scopeNoun === undefined ? undefined : verb), () =>
+      usageText(scopeNoun, scopeNoun === undefined ? undefined : verb),
+    );
+    return ExitCode.OK;
+  }
+
+  const deferred = findDeferredCliSurface(noun, verb);
+  if (deferred !== undefined) {
+    return unsupportedError(out, deferred.surface, deferred.message);
+  }
+  const argError = validateCommandArgs(parsed, out, noun, verb);
+  if (argError !== undefined) {
+    return argError;
+  }
+  const flagError = validateCommandFlags(parsed, out, noun, verb);
+  if (flagError !== undefined) {
+    return flagError;
+  }
+  return validateFieldMask(parsed, out, noun, verb);
+}
+
 function schemaScopeExists(noun: string, verb?: string): boolean {
   if (verb !== undefined) {
     return findCommandSpec(noun, verb) !== undefined;
@@ -974,24 +1414,45 @@ function validateCommandFlags(
 }
 
 function allowedFlagNames(spec: CliCommandSpec): Set<string> {
-  return flagNamesMatching(spec, /--([a-z0-9-]+)/g);
+  return new Set(flagDefinitionsForSpec(spec).map((flag) => flag.longName));
 }
 
 function valueRequiredFlagNames(spec: CliCommandSpec): Set<string> {
-  return flagNamesMatching(spec, /--([a-z0-9-]+)\s+<[^>]+>/g);
+  return new Set(
+    flagDefinitionsForSpec(spec)
+      .filter((flag) => flag.valueRequired)
+      .map((flag) => flag.longName),
+  );
 }
 
-function flagNamesMatching(spec: CliCommandSpec, pattern: RegExp): Set<string> {
-  const names = new Set<string>();
-  for (const flag of spec.flags) {
-    for (const match of flag.matchAll(pattern)) {
-      const name = match[1];
-      if (name !== undefined) {
-        names.add(name);
-      }
-    }
+function flagDefinitionsForSpec(spec: CliCommandSpec): FlagDefinition[] {
+  const repeatable = new Set(spec.repeatableFlags ?? []);
+  return spec.flags.map((source) => flagDefinitionFromContract(source, repeatable));
+}
+
+function flagDefinitionFromContract(source: string, repeatable: Set<string>): FlagDefinition {
+  const [aliases = source, valueToken] = source.split(/\s+/, 2);
+  const parts = aliases.split("/");
+  const shortName = parts.find((part) => /^-[a-zA-Z]$/.test(part));
+  const longAlias = parts.find((part) => part.startsWith("--"));
+  if (longAlias === undefined) {
+    throw new Error(`CLI command contract flag is missing a long name: ${source}`);
   }
-  return names;
+  const longName = longAlias.slice(2);
+  const valueRequired = valueToken?.startsWith("<") === true;
+  return {
+    source,
+    commanderSyntax: `${aliases.replace("/", ", ")}${valueToken ? ` ${valueToken}` : ""}`,
+    longName,
+    shortName,
+    valueRequired,
+    repeatable: repeatable.has(longName),
+    optionKey: commanderOptionKey(longName),
+  };
+}
+
+function commanderOptionKey(longName: string): string {
+  return longName.replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase());
 }
 
 function emitCommandResult(
