@@ -93,8 +93,11 @@ describe("validateAssembly — collects EVERY defect in one pass, each with a JS
         ...WELL_FORMED.spec,
         auth: { use: "authentik" },
         authProvider: { use: "authentik" },
+        AuthProvider: { use: "authentik" },
         channel: { use: "channel-cli" },
+        ChannelAdapter: { use: "channel-cli" },
         secretStore: { use: "secret-store-reference" },
+        SecretStore: { use: "secret-store-reference" },
       },
     });
 
@@ -104,8 +107,11 @@ describe("validateAssembly — collects EVERY defect in one pass, each with a JS
         expect.arrayContaining([
           "spec.auth",
           "spec.authProvider",
+          "spec.AuthProvider",
           "spec.channel",
+          "spec.ChannelAdapter",
           "spec.secretStore",
+          "spec.SecretStore",
         ]),
       );
     }

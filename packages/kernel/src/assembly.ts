@@ -72,7 +72,15 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-const APP_INFRA_PROVIDER_SPEC_KEYS = ["auth", "authProvider", "channel", "secretStore"] as const;
+const APP_INFRA_PROVIDER_SPEC_KEYS = [
+  "auth",
+  "authProvider",
+  "AuthProvider",
+  "channel",
+  "ChannelAdapter",
+  "secretStore",
+  "SecretStore",
+] as const;
 
 /** Validate one `PartRef` node (its `use` is a non-empty string; `params`, if present, an object). */
 function validatePartRef(node: unknown, path: string, defects: AssemblyDefect[]): void {

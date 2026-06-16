@@ -1,6 +1,6 @@
 # Provider Runtime Consumption UX
 
-> **Status:** provider graph UX specification for `GLA-107.13`.
+> **Status:** executable runtime-consumption UX for `GLA-110.10`.
 > **Scope:** the runtime-agent experience for discovering registered providers and templates, understanding schemas
 > and skills, dry-running a session proposal, submitting a session, and returning to task execution. This is a
 > distinct UX flow from provider authoring and operator install/update. Write restrictions are constraints inside
@@ -28,14 +28,14 @@ agent should be able to recover from interruption by re-reading the same entitie
 | Entry point | Purpose | Primary output |
 |---|---|---|
 | `gla whoami` | Identify the connected agent and allowed operation set for this install. | Identity, connection mode, and allowed task/session/handoff operations. |
-| `gla catalog list [--kind <kind>] [--available]` | Discover registered provider/template entities and system-derived availability. | Provider/template ids, families, capabilities, availability states, and diagnostic summaries. |
-| `gla catalog show <provider-id>` | Inspect one registered provider before selecting or overriding it. | Provider manifest projection, family, capabilities, compatibility, dependency/probe status, typed `config_schema`, and skill links. |
+| `gla catalog list --kind <family> [--available]` | Discover capsule providers by runtime family (`launcher`, `entrypoint`, `connector`, `workspace`, `detector`). | Provider ids, families, capabilities, availability states, dependency evidence, provenance, selected-default source, and diagnostic summaries. |
+| `gla catalog show <provider-id>` | Inspect one registered provider before selecting or overriding it. | Provider manifest projection, family, capabilities, dependency/probe status, typed `config_schema`, provenance, selected-default source, resolved config, and diagnostics. |
 | `gla template list [--available]` | Find assemblable capsule templates in the active graph. | Template ids, purpose, dependency posture, and availability. |
-| `gla template show <id>` | Inspect a template before composing a session. | Required parts, fixed parts, open parameters, compatible providers, defaults, and dependency status. |
+| `gla template show <id>` | Inspect a template before composing a session. | Required parts, fixed/open parts, per-part default provider ids, per-part `defaultSource`, `defaultSources`, compatible providers, template dependencies, and diagnostics. |
 | `gla schema [session create]` | Load the machine-readable input/output and error contract for session proposal. | `AssemblySpec` shape, command flags, exit codes, and stable error codes. |
 | `gla skill list [--for <template>]` | Discover procedural knowledge relevant to the selected surface. | Skill ids and summaries keyed to templates/providers. |
 | `gla skill show <id>` | Load recovery and use instructions for the task. | Skill body with provider/template usage and recovery guidance. |
-| `gla session create ... --dry-run` | Check admission without provisioning a capsule. | Accepted/rejected outcome with stable diagnostics and recovery pointers. |
+| `gla session create ... --dry-run` | Check admission without provisioning a capsule. | Accepted/rejected outcome with stable diagnostics and recovery pointers. Capsule overrides are only `--launcher`, `--entrypoint`, `--connector`, `--workspace`, and `--detector`, or their equivalent `AssemblySpec` fields. |
 | `gla session create ...` | Submit the same accepted proposal for provisioning. | Session id, state, capsule descriptor, and connector descriptor with secret refs. |
 | `gla session get <id>` / `gla session connector <id>` | Resume after interruption. | Current session state and connector descriptor for a live capsule. |
 
@@ -56,8 +56,10 @@ Runtime consumption reads the active graph. It does not mutate the graph.
 | Session | Existing task/session state, live connector descriptors, and redacted lifecycle diagnostics for resuming work. |
 
 Provider-specific details belong in catalog, schema, template, and skill output. Task/session commands should not
-grow provider-specific flags for every provider; they submit provider-neutral assembly data and let admission resolve
-the graph.
+grow provider-specific flags for app infrastructure providers. The runtime override surface is intentionally limited to
+capsule providers: `launcher`, `entrypoint`, `connector`, `workspace`, and `detector`. `AuthProvider`,
+`ChannelAdapter`, and `SecretStore` are deployment selections and are rejected if they appear in an `AssemblySpec` or
+as command flags.
 
 ## 4. Runtime Consumption Journey
 
@@ -66,12 +68,13 @@ the graph.
 2. **Discover available shapes.** The agent lists templates and catalog entities, usually with `--available` first,
    then widens the view if it needs to understand why an expected option is absent.
 3. **Inspect the candidate template.** `template show` explains required parts, fixed parts, open parameters,
-   compatible providers, selected defaults, dependency posture, and skill pointers.
+   compatible providers, selected defaults, each default's source, dependency posture, diagnostics, and skill pointers.
 4. **Read provider details, schemas, and skills.** The agent loads `catalog show` for any provider it may select or
    override, `gla schema session create`, provider/template schemas, and relevant skills before writing a proposal.
 5. **Compose the `AssemblySpec`.** The agent starts from a trusted template, fills open parameters, chooses only
-   compatible registered providers where the template allows selection, and supplies only provider-declared typed
-   config values.
+   compatible registered capsule providers where the template allows selection, and supplies only provider-declared
+   typed config values. The only runtime provider override fields are `launcher`, `entrypoints`, `connector`,
+   `workspace`, and `detectors`.
 6. **Dry-run admission.** `session create --dry-run` runs mutate-defaults plus validate without provisioning. The
    agent fixes schema, compatibility, dependency, policy, or template-fixed errors before trying again.
 7. **Submit the proposal.** The agent submits the same accepted spec without `--dry-run`. Admission resolves template
@@ -105,7 +108,9 @@ pointer when procedural recovery is useful.
 | Diagnostic area | Example defect | Runtime recovery path |
 |---|---|---|
 | Unavailable provider | Selected `auth-oidc-acme` has no accepted WPM evidence or its required probe fails. | Choose an available compatible provider/template default or request operator install/update repair. |
+| Not installed provider | A provider id named by `catalog show` or an assembly override is not registered in this install. | Re-read `catalog list --kind <family>` and choose an installed provider, or request operator install/update. |
 | Incompatible selection | Template requires a connector transport that the selected entrypoint provider does not support. | Remove the selection, choose a compatible provider from `template show`, or choose another template. |
+| Ambiguous default | A template open part requires explicit compatibility evidence but no relation proves the default safe. | Choose a provider from a compatible template, or hand the package back to operator install/update/provider authoring for repair. |
 | Schema error | `AssemblySpec` contains an unknown field, wrong type, out-of-range value, or provider config outside `config_schema`. | Re-read `gla schema`, fix the field, and dry-run again. |
 | Template-fixed override | The proposal tries to override fixed isolation tier, assurance policy, namespace posture, public-edge route shape, or another fixed part. | Remove the override or choose a template/profile that exposes the desired part as open. |
 | Missing skills | A selected template/provider has no skill or recovery pointer for the agent-facing behavior it exposes. | Use schema/template data only if sufficient; otherwise report an authoring or install/update gap. |
@@ -135,6 +140,7 @@ Not allowed inside runtime consumption:
 - write selected provider profiles, profile overlays, provider-set composition, or rollback snapshots;
 - write WPM receipts, dependency binding evidence, daemon config, boot config, route config, or public-edge setup;
 - load executable provider code or register provider modules after daemon boot;
+- select or override `AuthProvider`, `ChannelAdapter`, or `SecretStore` through runtime session creation;
 - edit provider-owned state namespaces except through the provider-neutral runtime operations that own that state;
 - bypass Access Gateway grants, recipient binding, revocation, auth assurance, or admission policy by selecting a
   different provider id.

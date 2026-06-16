@@ -13,9 +13,12 @@ import {
   type ProviderInstallInventoryInput,
   type ProviderInstallPackageInput,
   type ProviderManifest,
+  type ProviderProfileManifest,
+  type StoreContent,
   createTemplatePackageSkeleton,
   defaultStoreContent,
   referenceWpmDependencyBindings,
+  resolveProviderGraphProjection,
 } from "@gla/catalog";
 import { EMPTY_CONFIG_SCHEMA, glaError } from "@gla/kernel";
 import { describe, expect, it, vi } from "vitest";
@@ -161,6 +164,85 @@ function providerInstallInventory(
     dependencyBindings: referenceWpmDependencyBindings(),
     ...overrides,
   };
+}
+
+const RUNTIME_REQUIRED_PARTS = {
+  launcher: "launcher-process",
+  entrypoint: "entrypoint-novnc",
+  connector: "connector-cdp",
+  workspace: "workspace-profile",
+  detector: "url-watcher",
+} as const;
+
+const RUNTIME_OPEN_PARTS = ["entrypoint", "connector", "workspace", "detector"] as const;
+
+function runtimeTemplatePackage(opts: { compatible?: boolean } = {}) {
+  const compatible = opts.compatible ?? true;
+  return createTemplatePackageSkeleton({
+    packageId: compatible ? "runtime-browser-handoff-package" : "runtime-ambiguous-package",
+    templateId: "browser-handoff",
+    requiredParts: RUNTIME_REQUIRED_PARTS,
+    openParts: [...RUNTIME_OPEN_PARTS],
+    compatibleProviders: compatible
+      ? {
+          entrypoint: ["entrypoint-novnc"],
+          connector: ["connector-cdp"],
+          workspace: ["workspace-profile"],
+          detector: ["url-watcher"],
+        }
+      : {},
+    providerDefaults: {
+      "url-watcher": { complete_on: "/dashboard" },
+    },
+  }).manifest;
+}
+
+function runtimeProviderProfile(): ProviderProfileManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "ProviderProfile",
+    metadata: { name: "runtime-reference", version: "0.1.0" },
+    spec: {
+      select: {
+        AuthProvider: "auth-webauthn",
+        ChannelAdapter: "channel-cli",
+        SecretStore: "secret-store-reference",
+        Launcher: "launcher-process",
+        HumanEntrypoint: "entrypoint-novnc",
+        AgentConnector: "connector-cdp",
+        Workspace: "workspace-profile",
+        CompletionDetector: "url-watcher",
+      },
+    },
+  };
+}
+
+function runtimeBridge(
+  opts: {
+    compatible?: boolean;
+    dependencyBindings?: ReturnType<typeof referenceWpmDependencyBindings>;
+  } = {},
+): AgentBridge {
+  const templatePackage = runtimeTemplatePackage(
+    opts.compatible === undefined ? {} : { compatible: opts.compatible },
+  );
+  const content: StoreContent = defaultStoreContent();
+  content.providers = [...content.providers, AUTH_WEBAUTHN, SECRET_STORE];
+  content.templates = structuredClone(templatePackage.spec.templates);
+  const dependencyBindings = opts.dependencyBindings ?? referenceWpmDependencyBindings();
+  const graph = resolveProviderGraphProjection({
+    providerSet: {
+      id: "runtime-reference",
+      providers: content.providers,
+    },
+    templatePackages: [templatePackage],
+    baseProfile: runtimeProviderProfile(),
+    dependencyBindings,
+    configValidationMode: "runtime",
+  });
+  return new AgentBridge({
+    catalog: new CatalogService({ content, dependencyBindings, providerGraph: graph }),
+  });
 }
 
 describe("gla exit codes", () => {
@@ -589,6 +671,22 @@ describe("gla current contract/schema/help (GLA-094)", () => {
         flags: ["--timeout <dur>"],
       }),
     ]);
+
+    const template = capture(false);
+    expect(await run(["schema", "template", "show"], template.out, services())).toBe(ExitCode.OK);
+    const templateSchema = JSON.parse(template.stdout()) as {
+      commands: Array<{ fields?: string[] }>;
+    };
+    expect(templateSchema.commands[0]?.fields).toEqual(
+      expect.arrayContaining([
+        "availability",
+        "dependencies",
+        "compatibilityConstraints",
+        "packageProvenance",
+        "defaultSources",
+        "diagnostics",
+      ]),
+    );
   });
 
   it("deferred nouns, deferred auth login/logout, and ndjson fail with stable unsupported diagnostics", async () => {
@@ -1537,6 +1635,180 @@ describe("gla catalog list (GLA-017 AC#3)", () => {
   });
 });
 
+describe("gla runtime provider consumption (GLA-110.10)", () => {
+  it("lists and inspects capsule providers, shows graph defaults, and dry-runs a capsule override", async () => {
+    const bridge = runtimeBridge();
+    const list = capture(false);
+    expect(
+      await run(["catalog", "list", "--kind", "launcher", "--available"], list.out, {
+        bridge,
+      }),
+    ).toBe(ExitCode.OK);
+    expect(JSON.parse(list.stdout())).toEqual([
+      expect.objectContaining({
+        name: "launcher-process",
+        family: "launcher",
+        defaultSource: expect.objectContaining({
+          source: "base-profile-select",
+          providerId: "launcher-process",
+        }),
+      }),
+    ]);
+
+    const provider = capture(false);
+    expect(await run(["catalog", "show", "launcher-process"], provider.out, { bridge })).toBe(
+      ExitCode.OK,
+    );
+    expect(JSON.parse(provider.stdout())).toMatchObject({
+      name: "launcher-process",
+      family: "launcher",
+      available: true,
+      defaultSource: {
+        source: "base-profile-select",
+        providerId: "launcher-process",
+      },
+      requires: [expect.objectContaining({ dependency: "browser-runtime", status: "bound" })],
+      diagnostics: [expect.objectContaining({ code: "provider.available" })],
+    });
+
+    const template = capture(false);
+    expect(await run(["template", "show", "browser-handoff"], template.out, { bridge })).toBe(
+      ExitCode.OK,
+    );
+    const templateShow = JSON.parse(template.stdout());
+    expect(templateShow.parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          part: "launcher",
+          provider: "launcher-process",
+          defaultSource: expect.objectContaining({
+            source: "template-package-default",
+            templatePackage: "runtime-browser-handoff-package",
+          }),
+        }),
+        expect.objectContaining({
+          part: "detector",
+          provider: "url-watcher",
+          defaultSource: expect.objectContaining({
+            source: "template-package-default",
+            templatePackage: "runtime-browser-handoff-package",
+          }),
+        }),
+      ]),
+    );
+    expect(templateShow.compatibleProviders.connector).toEqual(
+      expect.arrayContaining(["connector-cdp"]),
+    );
+    expect(templateShow.compatibleProviders.detector).toEqual(
+      expect.arrayContaining(["url-watcher"]),
+    );
+    expect(templateShow.defaultSources).toMatchObject({
+      launcher: { source: "template-package-default", providerId: "launcher-process" },
+      detector: { source: "template-package-default", providerId: "url-watcher" },
+    });
+
+    const dir = mkdtempSync(join(tmpdir(), "gla-runtime-provider-"));
+    try {
+      const path = specFile(dir, {
+        ...OK_ASSEMBLY,
+        spec: {
+          ...OK_ASSEMBLY.spec,
+          connector: { use: "connector-cdp" },
+          detectors: [{ use: "url-watcher", params: { complete_on: "/dashboard" } }],
+        },
+      });
+      const dryRun = capture(false);
+      expect(
+        await run(["session", "create", "-f", path, "--dry-run"], dryRun.out, { bridge }),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(dryRun.stdout())).toMatchObject({
+        decision: "accept",
+        dry_run: true,
+        capsule_plan: {
+          providers: expect.arrayContaining([
+            expect.objectContaining({ role: "connector", providerId: "connector-cdp" }),
+            expect.objectContaining({ role: "detector", providerId: "url-watcher" }),
+          ]),
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces runtime provider diagnostics for not-installed, evidence-missing, incompatible, and ambiguous-default cases", async () => {
+    const missing = capture(false);
+    expect(
+      await run(["catalog", "show", "provider-not-installed"], missing.out, {
+        bridge: runtimeBridge(),
+      }),
+    ).toBe(ExitCode.NOT_FOUND);
+    expect(JSON.parse(missing.stderr()).error.code).toBe("catalog.unknown");
+
+    const evidence = capture(false);
+    expect(
+      await run(["catalog", "show", "launcher-process"], evidence.out, {
+        bridge: runtimeBridge({ dependencyBindings: [] }),
+      }),
+    ).toBe(ExitCode.OK);
+    const evidenceShow = JSON.parse(evidence.stdout());
+    expect(evidenceShow).toMatchObject({
+      availability: "unavailable",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.dependency_unavailable",
+          dependency: "browser-runtime",
+          dependencyStatus: "unbound",
+        }),
+      ]),
+    });
+
+    const dir = mkdtempSync(join(tmpdir(), "gla-runtime-provider-negative-"));
+    try {
+      const path = specFile(dir, {
+        ...OK_ASSEMBLY,
+        spec: {
+          ...OK_ASSEMBLY.spec,
+          detectors: [{ use: "connector-cdp" }],
+        },
+      });
+      const incompatible = capture(false);
+      expect(
+        await run(["session", "create", "-f", path, "--dry-run"], incompatible.out, {
+          bridge: runtimeBridge(),
+        }),
+      ).toBe(ExitCode.POLICY);
+      const error = JSON.parse(incompatible.stderr()).error;
+      expect(error).toMatchObject({
+        code: "policy.denied",
+        detail: {
+          part: "detector",
+          use: "connector-cdp",
+          compatibleWith: expect.arrayContaining(["url-watcher"]),
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const ambiguous = capture(false);
+    expect(
+      await run(["template", "show", "browser-handoff"], ambiguous.out, {
+        bridge: runtimeBridge({ compatible: false }),
+      }),
+    ).toBe(ExitCode.OK);
+    expect(JSON.parse(ambiguous.stdout())).toMatchObject({
+      availability: "unavailable",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.compatibility_ambiguous",
+          detail: { part: "workspace" },
+        }),
+      ]),
+    });
+  });
+});
+
 describe("gla skill", () => {
   it("`skill show <id>` emits the SKILL.md body, exit 0", async () => {
     const c = capture(false);
@@ -1693,8 +1965,11 @@ describe("gla session create — dry-run (admission only)", () => {
           ...OK_ASSEMBLY.spec,
           auth: { use: "auth-webauthn" },
           authProvider: { use: "authentik" },
+          AuthProvider: { use: "auth-webauthn" },
           channel: { use: "channel-cli" },
+          ChannelAdapter: { use: "channel-cli" },
           secretStore: { use: "secret-store-reference" },
+          SecretStore: { use: "secret-store-reference" },
         },
       });
       const c = capture(false);
@@ -1706,10 +1981,30 @@ describe("gla session create — dry-run (admission only)", () => {
         expect.arrayContaining([
           "spec.auth",
           "spec.authProvider",
+          "spec.AuthProvider",
           "spec.channel",
+          "spec.ChannelAdapter",
           "spec.secretStore",
+          "spec.SecretStore",
         ]),
       );
+      const flag = capture(false);
+      expect(
+        await run(
+          [
+            "session",
+            "create",
+            "--template",
+            "browser-handoff",
+            "--auth-provider",
+            "auth-webauthn",
+            "--dry-run",
+          ],
+          flag.out,
+          services(),
+        ),
+      ).toBe(ExitCode.USAGE);
+      expect(JSON.parse(flag.stderr()).error.code).toBe("usage.bad_flag");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
