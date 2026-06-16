@@ -36,6 +36,23 @@ as public nouns.
 ProviderHost as a public architecture noun is therefore retired even if existing implementation mechanics survive behind
 the registry during migration.
 
+## 2.1. Compatibility Boundary
+
+`packages/app/src/provider-compat.ts` is the only app-owned compatibility adapter for legacy provider-set/profile
+runtime inputs during GLA-110 migration.
+
+| Legacy surface | Compatibility owner | Allowed callers | Removal condition |
+|---|---|---|---|
+| `AppProviderSet.modules` | `packages/app/src/provider-compat.ts` | App composition may call `legacyProviderSetRegistry()` only to turn an explicitly supplied legacy set into a sealed `ProviderRegistry`. | Removed after distribution entrypoints, tests, and install/update UX no longer accept `providerSet`. |
+| `ProviderSelectionProfile` and broad `ProviderProfileManifest` conversion | `packages/app/src/provider-compat.ts` plus catalog validation for manifest parsing | App composition may consume the converted shape only to preserve old `providerProfileId` / `providerProfile` inputs. | Removed after app deployment config manifests and template packages replace broad profile inputs in CLI/API docs. |
+| `defaultConfig` / `defaultServices` callbacks | `packages/app/src/provider-compat.ts` | Runtime composition may invoke these only through `legacyProviderSetDefaultConfig()` and `legacyProviderSetDefaultServices()`. | Removed after provider factory config and test service seams are explicit non-provider inputs. |
+| `entrypointClientAssets` / `templateProbes` callbacks | `packages/app/src/provider-compat.ts` | Runtime composition may merge these only through `legacyProviderSetEntrypointClientAssets()` and `legacyProviderSetTemplateProbes()`. | Removed after registry/catalog asset descriptors and explicit probe maps cover all reference and extension packages. |
+
+Boundary tests must fail if `packages/app/src/composition.ts` or default distribution code reads those legacy members
+directly again. `packages/app/src/index.ts` may continue to export `referenceProviderSet` only as a deprecated migration
+object; the default reference app path must use `ProviderRegistry`, app deployment defaults, capsule defaults, explicit
+entrypoint assets, and explicit template probes.
+
 ## 3. Provider Family Assignment
 
 Every provider family belongs to exactly one selection surface.

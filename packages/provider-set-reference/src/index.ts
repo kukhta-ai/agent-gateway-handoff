@@ -19,6 +19,7 @@ import {
   BROWSER_HANDOFF_TEMPLATE,
   CHANNEL_CLI_MANIFEST,
   PROVIDER_MANIFESTS,
+  type Probe,
   type ProviderManifest,
   type ProviderProfileManifest,
   type ProviderProfileSelection,
@@ -125,6 +126,24 @@ export interface ReferenceRuntimeProviderProfile {
   detector: ProviderId;
   channel: ProviderId;
   secretStore: ProviderId;
+}
+
+/** App deployment provider defaults selected by a named reference profile. */
+export interface ReferenceAppDeploymentConfig {
+  auth: ProviderId;
+  channel: ProviderId;
+  secretStore: ProviderId;
+  providerConfig?: Record<string, Record<string, unknown>>;
+}
+
+/** Capsule provider defaults selected by a named reference template/profile. */
+export interface ReferenceCapsuleProviderSelection {
+  launcher: ProviderId;
+  connector: ProviderId;
+  workspace: ProviderId;
+  entrypoint: ProviderId;
+  detector: ProviderId;
+  providerConfig?: Record<string, Record<string, unknown>>;
 }
 
 /** Operator-facing read model for a named reference profile. */
@@ -308,6 +327,39 @@ export function referenceProviderRuntimeProfile(
     detector: selectionProviderId(select.CompletionDetector),
     channel: selectionProviderId(select.ChannelAdapter),
     secretStore: selectionProviderId(select.SecretStore),
+  };
+}
+
+function selectedProviderConfig(
+  profileId: ReferenceProviderProfileId,
+  providerIds: readonly ProviderId[],
+): Record<string, Record<string, unknown>> | undefined {
+  const config = referenceProviderProfile(profileId).manifest.spec.config ?? {};
+  const selectedConfig: Record<string, Record<string, unknown>> = {};
+  for (const providerId of providerIds) {
+    const values = config[providerId];
+    if (values !== undefined && Object.keys(values).length > 0) {
+      selectedConfig[providerId] = structuredClone(values);
+    }
+  }
+  return Object.keys(selectedConfig).length > 0 ? selectedConfig : undefined;
+}
+
+/** App deployment defaults for AuthProvider, ChannelAdapter, and SecretStore only. */
+export function referenceAppDeploymentConfigForProfile(
+  profileId: ReferenceProviderProfileId = REFERENCE_PROFILE_SCENARIO_01_ID,
+): ReferenceAppDeploymentConfig {
+  const profile = referenceProviderRuntimeProfile(profileId);
+  const providerConfig = selectedProviderConfig(profileId, [
+    profile.auth,
+    profile.channel,
+    profile.secretStore,
+  ]);
+  return {
+    auth: profile.auth,
+    channel: profile.channel,
+    secretStore: profile.secretStore,
+    ...(providerConfig !== undefined ? { providerConfig } : {}),
   };
 }
 
@@ -995,6 +1047,11 @@ export interface ReferenceTemplateProviderDefaults {
   detector?: ProviderId;
 }
 
+/** Template reachability probes supplied by the reference package bootstrap data. */
+export const referenceTemplateProbes: Readonly<Record<string, Probe>> = {
+  "browser-handoff": () => "available",
+};
+
 /** Template provider defaults selected by a named reference profile. */
 export function referenceTemplateProviderDefaultsForProfile(
   profileId: ReferenceProviderProfileId = REFERENCE_PROFILE_SCENARIO_01_ID,
@@ -1019,6 +1076,32 @@ export function referenceTemplateProviderDefaultsForProfile(
     ...(defaults?.CompletionDetector !== undefined
       ? { detector: selectionProviderId(defaults.CompletionDetector) }
       : {}),
+  };
+}
+
+/** Capsule defaults for the reference browser-handoff template. */
+export function referenceCapsuleProviderSelectionForProfile(
+  profileId: ReferenceProviderProfileId = REFERENCE_PROFILE_SCENARIO_01_ID,
+): ReferenceCapsuleProviderSelection {
+  const runtimeProfile = referenceProviderRuntimeProfile(profileId);
+  const defaults = referenceTemplateProviderDefaultsForProfile(profileId);
+  const selection = {
+    launcher: defaults.launcher ?? runtimeProfile.launcher,
+    connector: defaults.connector ?? runtimeProfile.connector,
+    workspace: defaults.workspace ?? runtimeProfile.workspace,
+    entrypoint: defaults.entrypoint ?? runtimeProfile.entrypoint,
+    detector: defaults.detector ?? runtimeProfile.detector,
+  };
+  const providerConfig = selectedProviderConfig(profileId, [
+    selection.launcher,
+    selection.connector,
+    selection.workspace,
+    selection.entrypoint,
+    selection.detector,
+  ]);
+  return {
+    ...selection,
+    ...(providerConfig !== undefined ? { providerConfig } : {}),
   };
 }
 

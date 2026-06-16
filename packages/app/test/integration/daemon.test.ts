@@ -46,6 +46,7 @@ import { DaemonBridgeClient, Output, type OutputStreams, run } from "@gla/cli";
 import type { RecipientRef } from "@gla/kernel";
 import {
   DETECTOR_USER_DONE_PROVIDER_ID,
+  LAUNCHER_PROCESS_PROVIDER_ID,
   REFERENCE_PROFILE_LOCAL_DEV_ID,
 } from "@gla/provider-set-reference";
 import { chromium } from "playwright-core";
@@ -230,6 +231,8 @@ async function startDaemon(opts: {
   deliverySink?: { write(line: string): void };
   appDeploymentConfig?: ServeOptions["appDeploymentConfig"];
   capsuleProviders?: ServeOptions["capsuleProviders"];
+  capsuleProviderConfig?: ServeOptions["capsuleProviderConfig"];
+  launcherMode?: ServeOptions["launcherMode"] | "unset";
   log?: ServeOptions["log"];
 }): Promise<DaemonHandle> {
   const sock = join(scratch("gla-daemon-sock-"), "gla.sock");
@@ -243,10 +246,13 @@ async function startDaemon(opts: {
       ? { appDeploymentConfig: opts.appDeploymentConfig }
       : {}),
     ...(opts.capsuleProviders !== undefined ? { capsuleProviders: opts.capsuleProviders } : {}),
+    ...(opts.capsuleProviderConfig !== undefined
+      ? { capsuleProviderConfig: opts.capsuleProviderConfig }
+      : {}),
     dependencyBindings: referenceWpmDependencyBindings(),
     rpID: "localhost",
     expectedOrigin: opts.publicBaseUrl,
-    launcherMode: "headless",
+    ...(opts.launcherMode !== "unset" ? { launcherMode: opts.launcherMode ?? "headless" } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
     deliverySink: opts.deliverySink ?? { write: () => {} }, // quiet by default; tests may capture recipient links.
     log: opts.log ?? (() => {}), // quiet in tests unless a test captures the startup banner.
@@ -421,6 +427,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     const handle = await startDaemon({
       publicBaseUrl: "https://203.0.113.10/",
       providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      launcherMode: "unset",
     });
     expect(handle.bridge.templateShow("browser-handoff").parts).toEqual(
       expect.arrayContaining([
@@ -430,12 +437,19 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         }),
       ]),
     );
+    expect(handle.bridge.catalogShow(LAUNCHER_PROCESS_PROVIDER_ID)).toMatchObject({
+      resolvedConfig: { mode: "headless" },
+    });
   });
 
   it("split capsule provider config is forwarded into the live daemon stack", async () => {
     const handle = await startDaemon({
       publicBaseUrl: "https://203.0.113.10/",
       capsuleProviders: { detector: DETECTOR_USER_DONE_PROVIDER_ID },
+      capsuleProviderConfig: {
+        [LAUNCHER_PROCESS_PROVIDER_ID]: { mode: "headless" },
+      },
+      launcherMode: "unset",
     });
     expect(handle.bridge.templateShow("browser-handoff").parts).toEqual(
       expect.arrayContaining([
@@ -445,6 +459,9 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         }),
       ]),
     );
+    expect(handle.bridge.catalogShow(LAUNCHER_PROCESS_PROVIDER_ID)).toMatchObject({
+      resolvedConfig: { mode: "headless" },
+    });
   });
 
   it("split app deployment config is forwarded into the live daemon stack", async () => {

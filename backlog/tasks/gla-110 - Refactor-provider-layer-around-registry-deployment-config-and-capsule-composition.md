@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-06-16 09:45'
-updated_date: '2026-06-16 09:54'
+updated_date: '2026-06-16 20:07'
 labels:
   - provider-refactor
   - architecture
@@ -44,7 +44,7 @@ Tracking parent for the provider-layer refactor. Treat the executable implementa
 - [ ] #4 Public functions and exported types are documented.
 - [ ] #5 No dead code or unused exports are introduced.
 - [ ] #6 The core import-boundary holds: core depends only on ports, never on concrete adapters.
-- [ ] #7 All subtasks GLA-110.01 through GLA-110.13 are Done before the parent is marked Done.
-- [ ] #8 The parent final summary links to the final contract, migration guidance, and cross-layer verification evidence.
-- [ ] #9 Backlog status shows no open provider-refactor subtasks that are required for the approved refactor scope.
+- [ ] #7 The parent final summary links to the final contract, migration guidance, and cross-layer verification evidence.
+- [ ] #8 Backlog status shows no open provider-refactor subtasks that are required for the approved refactor scope.
+- [ ] #9 All subtasks GLA-110.01 through GLA-110.14 are Done before the parent is marked Done.
 <!-- DOD:END -->
