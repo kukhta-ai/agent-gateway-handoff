@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.02 done; pending integration"
-branch: feature/provider-refactor-task-GLA-110.02
+phase_name: "Autonomous build — provider-layer refactor GLA-110.03 ready"
+branch: feature/provider-graph
 epic: provider-refactor-110
-active_story: GLA-110.02
-review_cycle: 1
+active_story: null
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.13"
   current_branch: "feature/provider-graph"
-  next_ready_sequence: "GLA-110.02 is Done on its story branch; merge back to feature/provider-graph before starting GLA-110.03."
-  note: "2026-06-16: GLA-110.02 implemented ProviderRegistry boot boundary, app registry input, registry sealing, fail-closed duplicate/compat diagnostics, reference registry constructor, and focused tests. pnpm gate passed; reviewer Goodall re-review approved after app-boundary sealing fix."
+  next_ready_sequence: "GLA-110.03 is next after GLA-110.02 completed and merged into feature/provider-graph."
+  note: "2026-06-16: GLA-110.02 completed and merged. ProviderRegistry boot boundary, app registry input, registry sealing, fail-closed duplicate/compat diagnostics, reference registry constructor, and focused tests are on feature/provider-graph. pnpm gate passed; reviewer Goodall re-review approved after app-boundary sealing fix."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T10:55:00Z"
+last_updated: "2026-06-16T10:56:00Z"
