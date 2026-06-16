@@ -50,7 +50,7 @@ import {
 } from "@gla/provider-set-reference";
 import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it } from "vitest";
-import { endpointIsLocal, parseServeArgs } from "../../src/daemon.js";
+import { type ServeOptions, endpointIsLocal, parseServeArgs } from "../../src/daemon.js";
 import { type DaemonHandle, serve } from "../../src/index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
@@ -228,6 +228,9 @@ async function startDaemon(opts: {
   providerProfileId?: string;
   workspaceRoot?: string;
   deliverySink?: { write(line: string): void };
+  appDeploymentConfig?: ServeOptions["appDeploymentConfig"];
+  capsuleProviders?: ServeOptions["capsuleProviders"];
+  log?: ServeOptions["log"];
 }): Promise<DaemonHandle> {
   const sock = join(scratch("gla-daemon-sock-"), "gla.sock");
   const handle = await serve({
@@ -236,13 +239,17 @@ async function startDaemon(opts: {
     bridgeEndpoint: sock,
     publicBaseUrl: opts.publicBaseUrl,
     ...(opts.providerProfileId !== undefined ? { providerProfileId: opts.providerProfileId } : {}),
+    ...(opts.appDeploymentConfig !== undefined
+      ? { appDeploymentConfig: opts.appDeploymentConfig }
+      : {}),
+    ...(opts.capsuleProviders !== undefined ? { capsuleProviders: opts.capsuleProviders } : {}),
     dependencyBindings: referenceWpmDependencyBindings(),
     rpID: "localhost",
     expectedOrigin: opts.publicBaseUrl,
     launcherMode: "headless",
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
     deliverySink: opts.deliverySink ?? { write: () => {} }, // quiet by default; tests may capture recipient links.
-    log: () => {}, // quiet in tests.
+    log: opts.log ?? (() => {}), // quiet in tests unless a test captures the startup banner.
   });
   liveHandles.push(handle);
   return handle;
@@ -423,6 +430,37 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         }),
       ]),
     );
+  });
+
+  it("split capsule provider config is forwarded into the live daemon stack", async () => {
+    const handle = await startDaemon({
+      publicBaseUrl: "https://203.0.113.10/",
+      capsuleProviders: { detector: DETECTOR_USER_DONE_PROVIDER_ID },
+    });
+    expect(handle.bridge.templateShow("browser-handoff").parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          part: "detector",
+          provider: DETECTOR_USER_DONE_PROVIDER_ID,
+        }),
+      ]),
+    );
+  });
+
+  it("split app deployment config is forwarded into the live daemon stack", async () => {
+    const logs: string[] = [];
+    const handle = await startDaemon({
+      publicBaseUrl: "https://gla.example/team-a/",
+      appDeploymentConfig: {
+        auth: "authentik",
+        providerConfig: {
+          authentik: authentikConfig("https://gla.example/team-a/auth/callback"),
+        },
+      },
+      log: (line) => void logs.push(line),
+    });
+    expect(handle.authDiagnostics().summary).toMatch(/authentik/i);
+    expect(logs.join("\n")).toContain("@gla/auth-authentik");
   });
 
   it("public-base-url: a link minted through the daemon (enrollInvite) uses the PUBLIC base, not loopback", async () => {

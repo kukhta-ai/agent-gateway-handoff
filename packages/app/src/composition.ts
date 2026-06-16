@@ -116,7 +116,7 @@ const deliveryToStdout: DeliverySink = {
   write: (line) => void process.stdout.write(`${line}\n`),
 };
 
-/** The boot-time selected providers for every runtime family the app composes. */
+/** The legacy flat boot-time selected providers for every runtime family the app composes. */
 export interface ProviderSelectionProfile {
   auth: ProviderId;
   launcher: ProviderId;
@@ -127,6 +127,42 @@ export interface ProviderSelectionProfile {
   channel: ProviderId;
   secretStore: ProviderId;
 }
+
+/** App infrastructure providers selected at deployment/app boot, not by capsule assembly. */
+export interface AppDeploymentConfig {
+  /** AuthProvider selected for gateway/enrollment/step-up. */
+  auth: ProviderId;
+  /** ChannelAdapter selected for deployment messaging. */
+  channel: ProviderId;
+  /** SecretStore selected for deployment secret storage. */
+  secretStore: ProviderId;
+  /** App-level provider config/defaults keyed by provider id. */
+  providerConfig?: Record<string, Record<string, unknown>>;
+}
+
+/** App deployment config input accepted by composition APIs. */
+export interface AppDeploymentConfigInput {
+  /** AuthProvider override for app boot. */
+  auth?: ProviderId;
+  /** ChannelAdapter override for app boot. */
+  channel?: ProviderId;
+  /** SecretStore override for app boot. */
+  secretStore?: ProviderId;
+  /** App-level provider config/defaults keyed by provider id. */
+  providerConfig?: Record<string, Record<string, unknown>>;
+}
+
+/** Capsule runtime providers selected by template/assembly, not by app deployment config. */
+export interface CapsuleProviderSelection {
+  launcher: ProviderId;
+  connector: ProviderId;
+  workspace: ProviderId;
+  entrypoint: ProviderId;
+  detector: ProviderId;
+}
+
+/** Capsule provider selection input accepted by composition APIs during migration. */
+export type CapsuleProviderSelectionInput = Partial<CapsuleProviderSelection>;
 
 /** Provider-owned compatibility inputs exposed by legacy app options while defaults migrate into profiles. */
 export interface ProviderDefaultConfigArgs {
@@ -175,6 +211,10 @@ export interface AppProviderSet {
 export interface ProviderCompositionOptions {
   /** Boot-time executable provider registry. Preferred over legacy provider-set module discovery. */
   providerRegistry?: ProviderRegistry;
+  /** App infrastructure provider selection for AuthProvider, ChannelAdapter, and SecretStore. */
+  appDeploymentConfig?: AppDeploymentConfigInput;
+  /** Capsule provider choices for Launcher, Workspace, HumanEntrypoint, AgentConnector, and CompletionDetector. */
+  capsuleProviders?: CapsuleProviderSelectionInput;
   /** Trusted install/boot-time provider set. Required unless a `providerHost` and full `providerProfile` are supplied. */
   providerSet?: AppProviderSet;
   /** Prebuilt trusted Provider Host, mainly for tests or external composition. */
@@ -217,6 +257,69 @@ function requireProviderRegistry(opts: ProviderCompositionOptions): ProviderHost
 
 function requireProviderHost(opts: ProviderCompositionOptions): ProviderHost {
   return requireProviderRegistry(opts);
+}
+
+function appDeploymentSelectionInput(
+  input: AppDeploymentConfigInput | undefined,
+): Partial<ProviderSelectionProfile> {
+  return {
+    ...(input?.auth !== undefined ? { auth: input.auth } : {}),
+    ...(input?.channel !== undefined ? { channel: input.channel } : {}),
+    ...(input?.secretStore !== undefined ? { secretStore: input.secretStore } : {}),
+  };
+}
+
+function capsuleSelectionInput(
+  input: CapsuleProviderSelectionInput | undefined,
+): Partial<ProviderSelectionProfile> {
+  return {
+    ...(input?.launcher !== undefined ? { launcher: input.launcher } : {}),
+    ...(input?.connector !== undefined ? { connector: input.connector } : {}),
+    ...(input?.workspace !== undefined ? { workspace: input.workspace } : {}),
+    ...(input?.entrypoint !== undefined ? { entrypoint: input.entrypoint } : {}),
+    ...(input?.detector !== undefined ? { detector: input.detector } : {}),
+  };
+}
+
+function appDeploymentFromProfile(
+  profile: ProviderSelectionProfile,
+  providerConfigSources: readonly (Record<string, Record<string, unknown>> | undefined)[],
+): AppDeploymentConfig {
+  const providerConfig: Record<string, Record<string, unknown>> = {};
+  for (const providerId of [profile.auth, profile.channel, profile.secretStore]) {
+    for (const source of providerConfigSources) {
+      const values = source?.[providerId];
+      if (hasEntries(values)) {
+        providerConfig[providerId] = {
+          ...(providerConfig[providerId] ?? {}),
+          ...structuredClone(values),
+        };
+      }
+    }
+  }
+  return {
+    auth: profile.auth,
+    channel: profile.channel,
+    secretStore: profile.secretStore,
+    ...(Object.keys(providerConfig).length > 0 ? { providerConfig } : {}),
+  };
+}
+
+function capsuleSelectionFromProfile(profile: ProviderSelectionProfile): CapsuleProviderSelection {
+  return {
+    launcher: profile.launcher,
+    connector: profile.connector,
+    workspace: profile.workspace,
+    entrypoint: profile.entrypoint,
+    detector: profile.detector,
+  };
+}
+
+function deploymentProviderConfig(
+  deployment: AppDeploymentConfig,
+  providerId: ProviderId,
+): Record<string, unknown> | undefined {
+  return deployment.providerConfig?.[providerId];
 }
 
 function selectionProviderId(selection: unknown): string | undefined {
@@ -303,6 +406,8 @@ function requireSelectedProfile(
     ...(opts.providerSet?.profile ?? {}),
     ...(namedManifest !== undefined ? providerSelectionFromManifest(namedManifest) : {}),
     ...(opts.providerProfile ?? {}),
+    ...appDeploymentSelectionInput(opts.appDeploymentConfig),
+    ...capsuleSelectionInput(opts.capsuleProviders),
     ...overrides,
   };
   for (const key of [
@@ -336,8 +441,17 @@ function providerConfig(
   family: RuntimeProviderFamily,
   providerId: ProviderId,
   legacy: Record<string, unknown> = {},
+  defaults?: Record<string, unknown>,
 ): Record<string, unknown> {
-  return explicit ?? providerSet?.defaultConfig?.({ family, providerId, legacy }) ?? {};
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  const mergedLegacy = { ...(defaults ?? {}), ...legacy };
+  const configured = providerSet?.defaultConfig?.({ family, providerId, legacy: mergedLegacy });
+  if (configured !== undefined) {
+    return configured;
+  }
+  return defaults !== undefined ? mergedLegacy : {};
 }
 
 function providerServiceBindings(
@@ -456,6 +570,59 @@ function selectedProviderProfileManifest(
     profile,
     profileId !== undefined ? `${profileId}+runtime-override` : undefined,
   );
+}
+
+interface ProviderSelectionResolutionOverrides {
+  deployment?: AppDeploymentConfigInput;
+  capsule?: CapsuleProviderSelectionInput;
+  legacy?: Partial<ProviderSelectionProfile>;
+}
+
+interface ProviderSelectionResolution {
+  profile: ProviderSelectionProfile;
+  deployment: AppDeploymentConfig;
+  capsule: CapsuleProviderSelection;
+  profileManifest: ProviderProfileManifest;
+}
+
+function resolveProviderSelections(
+  opts: ProviderCompositionOptions,
+  overrides: ProviderSelectionResolutionOverrides = {},
+): ProviderSelectionResolution {
+  const mergedOverrides: Partial<ProviderSelectionProfile> = {
+    ...appDeploymentSelectionInput(overrides.deployment),
+    ...capsuleSelectionInput(overrides.capsule),
+    ...(overrides.legacy ?? {}),
+  };
+  const profile = requireSelectedProfile(opts, mergedOverrides);
+  const profileManifest = selectedProviderProfileManifest(opts, profile, mergedOverrides);
+  const deployment = appDeploymentFromProfile(profile, [
+    profileManifest.spec.config,
+    opts.appDeploymentConfig?.providerConfig,
+    overrides.deployment?.providerConfig,
+  ]);
+  return {
+    profile,
+    deployment,
+    capsule: capsuleSelectionFromProfile(profile),
+    profileManifest,
+  };
+}
+
+/** Resolve app infrastructure provider selection without capsule provider fields. */
+export function resolveAppDeploymentConfig(
+  opts: ProviderCompositionOptions,
+  overrides: AppDeploymentConfigInput = {},
+): AppDeploymentConfig {
+  return resolveProviderSelections(opts, { deployment: overrides }).deployment;
+}
+
+/** Resolve capsule provider selection without app infrastructure provider fields. */
+export function resolveCapsuleProviderSelection(
+  opts: ProviderCompositionOptions,
+  overrides: CapsuleProviderSelectionInput = {},
+): CapsuleProviderSelection {
+  return resolveProviderSelections(opts, { capsule: overrides }).capsule;
 }
 
 function providerSetDefaultConfig(
@@ -669,17 +836,17 @@ function addRuntimeParams(
 /** Compose against an explicit provider set/profile. Default wiring is supplied by distribution entrypoints. */
 export function createApp(opts: ProviderCompositionOptions = {}): App {
   const providerHost = requireProviderHost(opts);
-  const profile = requireSelectedProfile(opts);
+  const { deployment, capsule } = resolveProviderSelections(opts);
   const wiring: Wiring = {
     kernel: KERNEL_MODULE,
     policy: POLICY_CEDAR_MODULE,
-    auth: providerModuleId(providerHost, "auth", profile.auth),
-    launcher: providerModuleId(providerHost, "launcher", profile.launcher),
-    connector: providerModuleId(providerHost, "connector", profile.connector),
-    workspace: providerModuleId(providerHost, "workspace", profile.workspace),
-    detector: providerModuleId(providerHost, "detector", profile.detector),
-    channel: providerModuleId(providerHost, "channel", profile.channel),
-    secretStore: providerModuleId(providerHost, "secret-store", profile.secretStore),
+    auth: providerModuleId(providerHost, "auth", deployment.auth),
+    launcher: providerModuleId(providerHost, "launcher", capsule.launcher),
+    connector: providerModuleId(providerHost, "connector", capsule.connector),
+    workspace: providerModuleId(providerHost, "workspace", capsule.workspace),
+    detector: providerModuleId(providerHost, "detector", capsule.detector),
+    channel: providerModuleId(providerHost, "channel", deployment.channel),
+    secretStore: providerModuleId(providerHost, "secret-store", deployment.secretStore),
   };
   return {
     wiring,
@@ -732,15 +899,23 @@ function buildAuthProvider(
   providerSet: AppProviderSet | undefined,
   profile: ProviderSelectionProfile,
   graphContext?: ProviderGraphRuntimeContext | undefined,
+  configDefaults?: Record<string, unknown> | undefined,
 ): { provider: AuthProviderPort; module: string } {
   const providerId = selection.authProvider ?? profile.auth;
-  const config = providerConfig(selection.authProviderConfig, providerSet, "auth", providerId, {
-    rpID: webauthn.rpID,
-    rpName: webauthn.rpName,
-    expectedOrigin: Array.isArray(webauthn.expectedOrigin)
-      ? webauthn.expectedOrigin
-      : [webauthn.expectedOrigin],
-  });
+  const config = providerConfig(
+    selection.authProviderConfig,
+    providerSet,
+    "auth",
+    providerId,
+    {
+      rpID: webauthn.rpID,
+      rpName: webauthn.rpName,
+      expectedOrigin: Array.isArray(webauthn.expectedOrigin)
+        ? webauthn.expectedOrigin
+        : [webauthn.expectedOrigin],
+    },
+    configDefaults,
+  );
   const graphInputs =
     graphContext !== undefined
       ? graphProviderCreateInputs(graphContext, "auth", providerId, config)
@@ -1097,12 +1272,13 @@ export interface CreateBridgeOptions extends ProviderCompositionOptions {
  */
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
   const providerHost = requireProviderHost(opts);
-  const profile = requireSelectedProfile(opts);
+  const selections = resolveProviderSelections(opts);
+  const profile = selections.profile;
   const graphContext = providerGraphRuntimeContext({
     providerHost,
     providerSet: opts.providerSet,
     profile,
-    profileManifest: selectedProviderProfileManifest(opts, profile),
+    profileManifest: selections.profileManifest,
     dependencyBindings: opts.dependencyBindings,
     configValidationProviderIds: [],
     templateProbes: opts.templateProbes,
@@ -1334,16 +1510,24 @@ export function createProvisioningBridge(
   opts: CreateProvisioningBridgeOptions = {},
 ): ProvisioningStack {
   const providerHost = requireProviderHost(opts);
-  const providerProfileOverrides: Partial<ProviderSelectionProfile> = {
+  const capsuleProviderOverrides: CapsuleProviderSelectionInput = {
     ...(opts.launcherProvider !== undefined ? { launcher: opts.launcherProvider } : {}),
     ...(opts.workspaceProvider !== undefined ? { workspace: opts.workspaceProvider } : {}),
     ...(opts.connectorProvider !== undefined ? { connector: opts.connectorProvider } : {}),
     ...(opts.entrypointProvider !== undefined ? { entrypoint: opts.entrypointProvider } : {}),
     ...(opts.detectorProvider !== undefined ? { detector: opts.detectorProvider } : {}),
+  };
+  const deploymentOverrides: AppDeploymentConfigInput = {
     ...(opts.channelProvider !== undefined ? { channel: opts.channelProvider } : {}),
     ...(opts.handoff?.authProvider !== undefined ? { auth: opts.handoff.authProvider } : {}),
   };
-  const profile = requireSelectedProfile(opts, providerProfileOverrides);
+  const selections = resolveProviderSelections(opts, {
+    deployment: deploymentOverrides,
+    capsule: capsuleProviderOverrides,
+  });
+  const profile = selections.profile;
+  const deployment = selections.deployment;
+  const capsule = selections.capsule;
   const state =
     opts.stateRoot !== undefined
       ? DaemonStateRoot.open({
@@ -1354,12 +1538,12 @@ export function createProvisioningBridge(
   let stateOwnedByStack = false;
   try {
     verifyProviderStateRecovery(state, providerHost);
-    const launcherProviderId = profile.launcher;
-    const workspaceProviderId = profile.workspace;
-    const connectorProviderId = profile.connector;
-    const entrypointProviderId = profile.entrypoint;
-    const detectorProviderId = profile.detector;
-    const channelProviderId = profile.channel;
+    const launcherProviderId = capsule.launcher;
+    const workspaceProviderId = capsule.workspace;
+    const connectorProviderId = capsule.connector;
+    const entrypointProviderId = capsule.entrypoint;
+    const detectorProviderId = capsule.detector;
+    const channelProviderId = deployment.channel;
     const launcherBootConfig = providerConfig(
       opts.launcherProviderConfig,
       opts.providerSet,
@@ -1419,16 +1603,24 @@ export function createProvisioningBridge(
       {
         ...(opts.handoff?.deliverySink !== undefined ? { delivery: "injected" } : {}),
       },
+      deploymentProviderConfig(deployment, channelProviderId),
     );
     const authBootConfig =
       opts.handoff !== undefined
-        ? providerConfig(opts.handoff.authProviderConfig, opts.providerSet, "auth", profile.auth, {
-            rpID: opts.handoff.rpID ?? "localhost",
-            rpName: opts.handoff.rpName ?? "GLA",
-            expectedOrigin: Array.isArray(opts.handoff.expectedOrigin)
-              ? opts.handoff.expectedOrigin
-              : [opts.handoff.expectedOrigin],
-          })
+        ? providerConfig(
+            opts.handoff.authProviderConfig,
+            opts.providerSet,
+            "auth",
+            deployment.auth,
+            {
+              rpID: opts.handoff.rpID ?? "localhost",
+              rpName: opts.handoff.rpName ?? "GLA",
+              expectedOrigin: Array.isArray(opts.handoff.expectedOrigin)
+                ? opts.handoff.expectedOrigin
+                : [opts.handoff.expectedOrigin],
+            },
+            deploymentProviderConfig(deployment, deployment.auth),
+          )
         : undefined;
     const runtimeAssemblyParams: Record<string, Record<string, unknown>> = {};
     addRuntimeParams(runtimeAssemblyParams, launcherProviderId, launcherBootConfig);
@@ -1437,13 +1629,13 @@ export function createProvisioningBridge(
     addRuntimeParams(runtimeAssemblyParams, entrypointProviderId, entrypointBootConfig);
     addRuntimeParams(runtimeAssemblyParams, detectorProviderId, detectorBootConfig);
     addRuntimeParams(runtimeAssemblyParams, channelProviderId, channelBootConfig);
-    addRuntimeParams(runtimeAssemblyParams, profile.auth, authBootConfig);
+    addRuntimeParams(runtimeAssemblyParams, deployment.auth, authBootConfig);
     const configValidationProviderIds = [
       launcherProviderId,
       workspaceProviderId,
       connectorProviderId,
       ...(opts.handoff !== undefined
-        ? [profile.auth, channelProviderId, entrypointProviderId]
+        ? [deployment.auth, channelProviderId, entrypointProviderId]
         : []),
       ...(opts.handoff?.completion !== undefined ? [detectorProviderId] : []),
     ];
@@ -1452,7 +1644,7 @@ export function createProvisioningBridge(
       providerHost,
       providerSet: opts.providerSet,
       profile,
-      profileManifest: selectedProviderProfileManifest(opts, profile, providerProfileOverrides),
+      profileManifest: selections.profileManifest,
       dependencyBindings: opts.dependencyBindings,
       runtimeAssemblyParams,
       configValidationProviderIds,
@@ -1588,7 +1780,7 @@ export function createProvisioningBridge(
     let handoffDeps: HandoffDeps | undefined;
     let completionDeps: CompletionDeps | undefined;
     /** The auth module actually wired behind the AuthProviderPort (doc §7 wiring record). */
-    let authModule: string = providerModuleId(providerHost, "auth", profile.auth);
+    let authModule: string = providerModuleId(providerHost, "auth", deployment.auth);
     /** The operator enrollment action (wired when handoff is, since the same gateway then fronts enrollment). */
     let enrollInvite:
       | ((recipient: RecipientRef) => Promise<{ link: string; grant: OpaqueToken; nonce: string }>)
@@ -1614,7 +1806,7 @@ export function createProvisioningBridge(
         },
         providerStateRoot(state),
         providerDependencyEvidence(
-          h.authProvider ?? profile.auth,
+          h.authProvider ?? deployment.auth,
           opts.dependencyBindings,
           providerHost,
           profile,
@@ -1623,6 +1815,7 @@ export function createProvisioningBridge(
         opts.providerSet,
         profile,
         graphContext,
+        deploymentProviderConfig(deployment, deployment.auth),
       );
       authModule = selected.module;
       identity =
@@ -2124,17 +2317,21 @@ export interface EnrollmentStack {
  */
 export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): EnrollmentStack {
   const providerHost = requireProviderHost(opts);
-  const profile = requireSelectedProfile(opts, {
-    ...(opts.authProvider !== undefined ? { auth: opts.authProvider } : {}),
-    ...(opts.channelProvider !== undefined ? { channel: opts.channelProvider } : {}),
+  const selections = resolveProviderSelections(opts, {
+    deployment: {
+      ...(opts.authProvider !== undefined ? { auth: opts.authProvider } : {}),
+      ...(opts.channelProvider !== undefined ? { channel: opts.channelProvider } : {}),
+    },
   });
+  const profile = selections.profile;
+  const deployment = selections.deployment;
   // Provider selection (doc §1/§7): the selected provider profile supplies the default. A pre-built
   // `authProviderOverride` wins, so delegated enrollment paths can still be tested end-to-end with no real network.
   let authProvider: AuthProviderPort;
   let authModule: string;
   if (opts.authProviderOverride !== undefined) {
     authProvider = opts.authProviderOverride;
-    authModule = opts.authModuleOverride ?? providerModuleId(providerHost, "auth", profile.auth);
+    authModule = opts.authModuleOverride ?? providerModuleId(providerHost, "auth", deployment.auth);
   } else {
     const built = buildAuthProvider(
       {
@@ -2149,10 +2346,12 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
         expectedOrigin: opts.expectedOrigin,
       },
       undefined,
-      providerDependencyEvidence(profile.auth, opts.dependencyBindings, providerHost, profile),
+      providerDependencyEvidence(deployment.auth, opts.dependencyBindings, providerHost, profile),
       providerHost,
       opts.providerSet,
       profile,
+      undefined,
+      deploymentProviderConfig(deployment, deployment.auth),
     );
     authProvider = built.provider;
     authModule = built.module;
@@ -2163,15 +2362,16 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
     providerHost,
     providerSet: opts.providerSet,
     profile,
-    providerId: profile.channel,
+    providerId: deployment.channel,
     config: providerConfig(
       opts.channelProviderConfig,
       opts.providerSet,
       "channel",
-      profile.channel,
+      deployment.channel,
       {
         ...(opts.deliverySink !== undefined ? { delivery: "injected" } : {}),
       },
+      deploymentProviderConfig(deployment, deployment.channel),
     ),
     identity,
     ...(opts.dependencyBindings !== undefined

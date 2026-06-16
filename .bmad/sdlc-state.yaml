@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.03 ready"
-branch: feature/provider-graph
+phase_name: "Autonomous build — provider-layer refactor GLA-110.03 done; ready to integrate"
+branch: feature/provider-refactor-task-GLA-110.03
 epic: provider-refactor-110
-active_story: null
-review_cycle: 0
+active_story: GLA-110.03
+review_cycle: 1
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.13"
   current_branch: "feature/provider-graph"
-  next_ready_sequence: "GLA-110.03 is next after GLA-110.02 completed and merged into feature/provider-graph."
-  note: "2026-06-16: GLA-110.02 completed and merged. ProviderRegistry boot boundary, app registry input, registry sealing, fail-closed duplicate/compat diagnostics, reference registry constructor, and focused tests are on feature/provider-graph. pnpm gate passed; reviewer Goodall re-review approved after app-boundary sealing fix."
+  next_ready_sequence: "GLA-110.03 is Done on feature/provider-refactor-task-GLA-110.03 and ready to merge back to feature/provider-graph."
+  note: "2026-06-16: GLA-110.03 completed. AppDeploymentConfig now selects AuthProvider, ChannelAdapter, SecretStore, and app providerConfig separately from CapsuleProviderSelection for Launcher, Workspace, HumanEntrypoint, AgentConnector, and CompletionDetector. Goodall review found a daemon serve() forwarding blocker; fix forwarded appDeploymentConfig/capsuleProviders and deployment auth providerConfig into live daemon boot. Re-review approved. pnpm gate passed with 81 files / 887 passed / 15 skipped."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -118,7 +118,7 @@ provider_refactor_110_specialists:
   ux: {spawned: true, id: "019ecfe8-6bac-7893-a621-054bfe1c9615", nickname: "Confucius", open: true, resumable: true, role: "provider authoring, install/update, and runtime consumption UX separation", last_skill: "bmad-ux loaded/resolved; unattended run blocked by artifact-producing Create/Update/Validate modes and no-edit initialization constraint; docs-driven fallback recorded"}
   sm: {spawned: true, id: "019ecfe8-92ac-78b2-a02e-3b940ba8763a", nickname: "Leibniz", open: true, resumable: true, role: "story sequencing, create-story evidence, and backlog readiness", last_skill: "bmad-create-story loaded/resolved; unattended run blocked by missing sprint-status/story artifacts and artifact writes; Backlog.md/docs fallback recorded"}
   worker: {spawned: true, id: "019ecfe8-d9be-7100-b1df-1e5d50999552", nickname: "Banach", open: true, resumable: true, role: "provider-layer implementation and E2E/contract test generation", last_skill: "bmad-dev-story and bmad-qa-generate-e2e-tests loaded/resolved; unattended run blocked by missing BMAD story artifact and initialization no-edit constraint; docs/backlog fallback recorded"}
-  reviewer: {spawned: true, id: "019ecfe8-fe09-7790-9d13-d17110e8848f", nickname: "Goodall", open: true, resumable: true, role: "TEA/test/security and independent story review", last_skill: "bmad-story-automator-review plus bmad-testarch-trace/NFR/test-review loaded/resolved; unattended run blocked by choice prompts or artifact writes under no-edit init; review fallback recorded"}
+  reviewer: {spawned: true, id: "019ecfe8-fe09-7790-9d13-d17110e8848f", nickname: "Goodall", open: true, resumable: true, role: "TEA/test/security and independent story review", last_skill: "GLA-110.03 story-automator-review fallback: initial daemon serve() split-config forwarding blocker found; fix re-reviewed APPROVE with focused split tests and pnpm gate evidence"}
   investigator: {spawned: true, id: "019ecfe9-29ce-75a1-a436-5f44a075fd54", nickname: "Hume", open: true, resumable: true, role: "root-cause analysis for provider-layer regressions", last_skill: "bmad-investigate loaded/resolved; unattended run blocked by investigation case-file write and outcome pause under no-edit init; read-only fault-map fallback recorded"}
 
 gates_pending: ["human approval to open PR against dev"]
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T10:56:00Z"
+last_updated: "2026-06-16T11:42:00Z"
