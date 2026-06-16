@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.03 done; ready to integrate"
-branch: feature/provider-refactor-task-GLA-110.03
+phase_name: "Autonomous build — provider-layer refactor GLA-110.04 ready"
+branch: feature/provider-graph
 epic: provider-refactor-110
-active_story: GLA-110.03
-review_cycle: 1
+active_story: null
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.13"
   current_branch: "feature/provider-graph"
-  next_ready_sequence: "GLA-110.03 is Done on feature/provider-refactor-task-GLA-110.03 and ready to merge back to feature/provider-graph."
-  note: "2026-06-16: GLA-110.03 completed. AppDeploymentConfig now selects AuthProvider, ChannelAdapter, SecretStore, and app providerConfig separately from CapsuleProviderSelection for Launcher, Workspace, HumanEntrypoint, AgentConnector, and CompletionDetector. Goodall review found a daemon serve() forwarding blocker; fix forwarded appDeploymentConfig/capsuleProviders and deployment auth providerConfig into live daemon boot. Re-review approved. pnpm gate passed with 81 files / 887 passed / 15 skipped."
+  next_ready_sequence: "GLA-110.04 is next after GLA-110.03 completed and merged into feature/provider-graph."
+  note: "2026-06-16: GLA-110.03 completed and merged. AppDeploymentConfig now selects AuthProvider, ChannelAdapter, SecretStore, and app providerConfig separately from CapsuleProviderSelection for Launcher, Workspace, HumanEntrypoint, AgentConnector, and CompletionDetector. Goodall review found a daemon serve() forwarding blocker; fix forwarded appDeploymentConfig/capsuleProviders and deployment auth providerConfig into live daemon boot. Re-review approved. pnpm gate passed with 81 files / 887 passed / 15 skipped."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T11:42:00Z"
+last_updated: "2026-06-16T11:45:00Z"
