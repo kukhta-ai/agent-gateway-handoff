@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.11 ready to merge"
-branch: feature/provider-refactor-task-GLA-110.11
+phase_name: "Autonomous build — provider-layer refactor ready for GLA-110.12"
+branch: feature/provider-graph
 epic: provider-refactor-110
-active_story: GLA-110.11
-review_cycle: 2
+active_story: null
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-refactor-task-GLA-110.11"
-  next_ready_sequence: "GLA-110.11 is Done on its story branch and ready to merge into feature/provider-graph."
-  note: "2026-06-16: GLA-110.11 completed. Provider client asset provenance now flows through catalog/doctor/runtime composition with filesystem-derived missing/mutable/unverifiable facts; local overrides do not inherit packaged evidence; focused tests and full pnpm run gate passed; Goodall re-review APPROVE."
+  current_branch: "feature/provider-graph"
+  next_ready_sequence: "GLA-110.11 is Done and merged into feature/provider-graph; next ready task is GLA-110.12."
+  note: "2026-06-16: GLA-110.11 completed and merged. Provider client asset provenance now flows through catalog/doctor/runtime composition with filesystem-derived missing/mutable/unverifiable facts; local overrides do not inherit packaged evidence; focused tests and full pnpm run gate passed; Goodall re-review APPROVE."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T22:35:00Z"
+last_updated: "2026-06-16T22:36:00Z"
