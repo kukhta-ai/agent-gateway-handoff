@@ -87,6 +87,8 @@ available. They are safe for operator egress and do not echo secrets.
 - selected capsule defaults;
 - template defaults and compatibility constraints;
 - package provenance, docs, tests, and evidence posture where available;
+- browser-client asset provenance and mutability for entrypoint providers, distinguishing packaged,
+  WPM-evidence-backed, local override, read-only, mutable, missing, and unverifiable roots;
 - unresolved provider graph, dependency, compatibility, and evidence diagnostics.
 
 Doctor is read-only. A FAIL report blocks handoff to runtime consumption until the operator repairs, chooses another

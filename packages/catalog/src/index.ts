@@ -789,6 +789,8 @@ export interface IndexedEntity extends CatalogEntity {
   packageProvenance?: ProviderGraphPackageProvenance;
   /** Default provider sources by template part role, when this row is a graph-backed template. */
   defaultSources?: Record<string, ProviderGraphDefaultSource>;
+  /** Browser-client asset provenance/readiness projected for entrypoint providers. */
+  clientAssets?: ProviderClientAssetReport[];
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
 }
@@ -813,7 +815,10 @@ export interface CatalogDiagnostic {
     | "graph.unresolved_relation"
     | "graph.dependency_unavailable"
     | "graph.compatibility_ambiguous"
-    | "graph.config_invalid";
+    | "graph.config_invalid"
+    | "graph.client_asset_mutable"
+    | "graph.client_asset_missing"
+    | "graph.client_asset_unverifiable";
   message: string;
   provider?: string;
   part?: string;
@@ -1460,6 +1465,8 @@ export interface CatalogProviderInfo {
   defaultSource?: ProviderGraphDefaultSource;
   resolvedConfig?: Record<string, unknown>;
   config_schema?: ConfigSchema;
+  /** Browser-client asset provenance/readiness for entrypoint providers. */
+  clientAssets?: ProviderClientAssetReport[];
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
 }
@@ -1675,6 +1682,63 @@ export interface ProviderGraphCompatibilityConstraints {
   compatibleProviders?: Record<string, string[]>;
 }
 
+/** Runtime/catalog source category for browser-client assets owned by an entrypoint provider. */
+export type ProviderClientAssetSource = "package" | "wpm-evidence" | "local-override";
+
+/** Observable asset readiness facts shown in catalog and doctor output. */
+export type ProviderClientAssetState =
+  | "packaged"
+  | "evidence-backed"
+  | "local-override"
+  | "read-only"
+  | "mutable"
+  | "missing"
+  | "unverifiable";
+
+/** Browser-client asset source observed by runtime boot or supplied by operator inventory/doctor input. */
+export interface ProviderClientAssetSourceInput {
+  providerId: string;
+  ref: string;
+  source: ProviderClientAssetSource;
+  root?: string;
+  readOnly?: boolean;
+  exists?: boolean;
+  verified?: boolean;
+  package?: string;
+  env?: string;
+  cacheControl?: string;
+  evidence?: {
+    source: "wpm-receipt";
+    bundleId?: string;
+    bundleVersion?: string;
+    taskId?: string;
+    refs?: string[];
+  };
+}
+
+/** Catalog/doctor projection for one browser-client asset ref. */
+export interface ProviderClientAssetReport {
+  providerId: string;
+  ref: string;
+  source: ProviderClientAssetSource;
+  states: ProviderClientAssetState[];
+  status: "ready" | "mutable" | "missing" | "unverifiable";
+  readOnly: boolean | "unknown";
+  package?: string;
+  env?: string;
+  cacheControl?: string;
+  provenance: {
+    source: "provider-manifest" | "runtime-mount" | "wpm-receipt" | "local-override";
+    package?: string;
+    env?: string;
+    bundleId?: string;
+    bundleVersion?: string;
+    taskId?: string;
+    refs?: string[];
+  };
+  diagnostics: CatalogDiagnostic[];
+}
+
 /** Provider-set manifest inputs consumed by deterministic graph projection. */
 export interface ProviderGraphProviderSetInput {
   /** Stable provider-set identity for diagnostics. */
@@ -1713,6 +1777,8 @@ export interface ProviderGraphResolvedProvider {
   dependencies: IndexedDependencyBinding[];
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
+  /** Browser-client asset provenance/readiness projected for entrypoint providers. */
+  clientAssets: ProviderClientAssetReport[];
   provenance: ProviderGraphProvenance;
   defaultSource: ProviderGraphDefaultSource;
   config: Record<string, unknown>;
@@ -1729,6 +1795,8 @@ export interface ProviderGraphProviderFact {
   dependencies: IndexedDependencyBinding[];
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
+  /** Browser-client asset provenance/readiness projected for entrypoint providers. */
+  clientAssets: ProviderClientAssetReport[];
   provenance: ProviderGraphProvenance;
 }
 
@@ -1765,6 +1833,8 @@ export interface ResolveProviderGraphProjectionInput {
   baseProfile: ProviderProfileManifest;
   overlays?: readonly ProviderProfileOverlayManifest[];
   dependencyBindings?: DependencyBindingSource;
+  /** Runtime or operator-observed browser-client asset sources keyed by provider id/ref. */
+  clientAssetSources?: readonly ProviderClientAssetSourceInput[];
   probes?: ProbeRegistry;
   /** Part roles whose family contract requires explicit compatibility evidence. */
   compatibilityRequiredParts?: readonly string[];
@@ -2730,6 +2800,170 @@ function addDependencyDiagnostics(
   }
 }
 
+function assetSource(value: unknown): ProviderClientAssetSource | undefined {
+  return value === "package" || value === "wpm-evidence" || value === "local-override"
+    ? value
+    : undefined;
+}
+
+function providerClientAssetDeclarations(
+  provider: ProviderManifest,
+): ProviderClientAssetSourceInput[] {
+  const assets = provider.spec.capability.clientAssets;
+  if (!Array.isArray(assets)) {
+    return [];
+  }
+  return assets.flatMap((asset): ProviderClientAssetSourceInput[] => {
+    if (!isRecord(asset) || typeof asset.ref !== "string" || asset.ref.length === 0) {
+      return [];
+    }
+    const source = assetSource(asset.source) ?? "package";
+    return [
+      {
+        providerId: provider.metadata.name,
+        ref: asset.ref,
+        source,
+        ...(typeof asset.package === "string" ? { package: asset.package } : {}),
+        ...(typeof asset.env === "string" ? { env: asset.env } : {}),
+        ...(typeof asset.cacheControl === "string" ? { cacheControl: asset.cacheControl } : {}),
+      },
+    ];
+  });
+}
+
+function clientAssetKey(asset: { providerId: string; ref: string }): string {
+  return `${asset.providerId}\u0000${asset.ref}`;
+}
+
+function clientAssetProvenance(
+  source: ProviderClientAssetSource,
+  declaration: ProviderClientAssetSourceInput | undefined,
+  observed: ProviderClientAssetSourceInput | undefined,
+): ProviderClientAssetReport["provenance"] {
+  const evidence = observed?.evidence;
+  const packageName =
+    observed?.package ?? (source === "package" ? declaration?.package : undefined);
+  const env = observed?.env ?? declaration?.env;
+  const provenanceSource =
+    source === "local-override"
+      ? "local-override"
+      : source === "wpm-evidence" || evidence?.source === "wpm-receipt"
+        ? "wpm-receipt"
+        : observed !== undefined
+          ? "runtime-mount"
+          : "provider-manifest";
+  return {
+    source: provenanceSource,
+    ...(packageName !== undefined ? { package: packageName } : {}),
+    ...(env !== undefined ? { env } : {}),
+    ...(evidence?.bundleId !== undefined ? { bundleId: evidence.bundleId } : {}),
+    ...(evidence?.bundleVersion !== undefined ? { bundleVersion: evidence.bundleVersion } : {}),
+    ...(evidence?.taskId !== undefined ? { taskId: evidence.taskId } : {}),
+    ...(evidence?.refs !== undefined ? { refs: [...evidence.refs] } : {}),
+  };
+}
+
+function clientAssetReport(
+  provider: ProviderManifest,
+  declaration: ProviderClientAssetSourceInput | undefined,
+  observed: ProviderClientAssetSourceInput | undefined,
+): ProviderClientAssetReport {
+  const source = observed?.source ?? declaration?.source ?? "package";
+  const states = new Set<ProviderClientAssetState>();
+  if (source === "package") {
+    states.add("packaged");
+  } else if (source === "wpm-evidence") {
+    states.add("evidence-backed");
+  } else {
+    states.add("local-override");
+  }
+  const readOnly = observed?.readOnly ?? "unknown";
+  if (observed?.exists === false) {
+    states.add("missing");
+  }
+  if (readOnly === true) {
+    states.add("read-only");
+  } else if (readOnly === false) {
+    states.add("mutable");
+  } else {
+    states.add("unverifiable");
+  }
+  if (observed?.verified === false) {
+    states.add("unverifiable");
+  }
+  const status: ProviderClientAssetReport["status"] = states.has("missing")
+    ? "missing"
+    : states.has("mutable")
+      ? "mutable"
+      : states.has("unverifiable")
+        ? "unverifiable"
+        : "ready";
+  const ref = observed?.ref ?? declaration?.ref ?? "";
+  const diagnosticByStatus: Record<
+    Exclude<ProviderClientAssetReport["status"], "ready">,
+    CatalogDiagnostic["code"]
+  > = {
+    mutable: "graph.client_asset_mutable",
+    missing: "graph.client_asset_missing",
+    unverifiable: "graph.client_asset_unverifiable",
+  };
+  const diagnostics: CatalogDiagnostic[] =
+    status === "ready"
+      ? []
+      : [
+          {
+            code: diagnosticByStatus[status],
+            message: `provider client asset "${ref}" is ${status}`,
+            provider: provider.metadata.name,
+            family: provider.spec.family,
+            detail: { ref, states: [...states], source },
+          },
+        ];
+  const packageName =
+    observed?.package ?? (source === "package" ? declaration?.package : undefined);
+  const env = observed?.env ?? declaration?.env;
+  const cacheControl = observed?.cacheControl ?? declaration?.cacheControl;
+  return {
+    providerId: provider.metadata.name,
+    ref,
+    source,
+    states: [...states],
+    status,
+    readOnly,
+    ...(packageName !== undefined ? { package: packageName } : {}),
+    ...(env !== undefined ? { env } : {}),
+    ...(cacheControl !== undefined ? { cacheControl } : {}),
+    provenance: clientAssetProvenance(source, declaration, observed),
+    diagnostics,
+  };
+}
+
+function providerClientAssetReports(
+  provider: ProviderManifest,
+  input: ResolveProviderGraphProjectionInput,
+): ProviderClientAssetReport[] {
+  const declarations = providerClientAssetDeclarations(provider);
+  const observedByKey = new Map(
+    (input.clientAssetSources ?? [])
+      .filter((asset) => asset.providerId === provider.metadata.name)
+      .map((asset) => [clientAssetKey(asset), asset]),
+  );
+  const used = new Set<string>();
+  const reports: ProviderClientAssetReport[] = declarations.map((declaration) => {
+    const key = clientAssetKey(declaration);
+    used.add(key);
+    return clientAssetReport(provider, declaration, observedByKey.get(key));
+  });
+  for (const observed of input.clientAssetSources ?? []) {
+    const key = clientAssetKey(observed);
+    if (observed.providerId !== provider.metadata.name || used.has(key)) {
+      continue;
+    }
+    reports.push(clientAssetReport(provider, undefined, observed));
+  }
+  return reports.sort((a, b) => a.ref.localeCompare(b.ref));
+}
+
 /**
  * Build the deterministic provider graph projection for one selected provider set/profile.
  *
@@ -2774,6 +3008,7 @@ export function resolveProviderGraphProjection(
     const dependencies = dependenciesById.get(provider.metadata.name) ?? [];
     const availability = availabilityById.get(provider.metadata.name) ?? "unavailable";
     const authAssurance = authAssuranceCapabilityOf(provider);
+    const clientAssets = providerClientAssetReports(provider, input);
     providerFacts.push({
       providerId: provider.metadata.name,
       runtimeFamily: provider.spec.family,
@@ -2782,6 +3017,7 @@ export function resolveProviderGraphProjection(
       availability,
       dependencies: structuredClone(dependencies),
       ...(authAssurance !== undefined ? { authAssurance } : {}),
+      clientAssets: structuredClone(clientAssets),
       provenance: structuredClone(
         providerProvenances.get(provider.metadata.name) ?? defaultProviderProvenance(provider),
       ),
@@ -2801,6 +3037,7 @@ export function resolveProviderGraphProjection(
     addDependencyDiagnostics(diagnostics, { providerId }, dependencies);
     const config = resolveProviderConfig(input, providerId, manifest, diagnostics);
     const authAssurance = authAssuranceCapabilityOf(manifest);
+    const clientAssets = providerClientAssetReports(manifest, input);
     selectedProviders.push({
       family,
       runtimeFamily: PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY[family],
@@ -2810,6 +3047,7 @@ export function resolveProviderGraphProjection(
       availability,
       dependencies: structuredClone(dependencies),
       ...(authAssurance !== undefined ? { authAssurance } : {}),
+      clientAssets: structuredClone(clientAssets),
       provenance: structuredClone(
         providerProvenances.get(providerId) ?? defaultProviderProvenance(manifest),
       ),
@@ -3065,6 +3303,9 @@ function entityWithProviderGraph(
     ...(graphTemplate?.defaultSources !== undefined
       ? { defaultSources: structuredClone(graphTemplate.defaultSources) }
       : {}),
+    ...(graphProvider?.clientAssets !== undefined && graphProvider.clientAssets.length > 0
+      ? { clientAssets: structuredClone(graphProvider.clientAssets) }
+      : {}),
     ...(graphProvider?.authAssurance !== undefined
       ? { authAssurance: structuredClone(graphProvider.authAssurance) }
       : {}),
@@ -3230,6 +3471,9 @@ export function toAdmissionCatalogFromProviderGraphProjection(
         info.resolvedConfig = structuredClone(selected.config);
       }
       info.config_schema = provider.manifest.spec.config_schema ?? EMPTY_CONFIG_SCHEMA;
+      if (provider.clientAssets.length > 0) {
+        info.clientAssets = structuredClone(provider.clientAssets);
+      }
       if (provider.authAssurance !== undefined) {
         info.authAssurance = structuredClone(provider.authAssurance);
       }
@@ -3253,6 +3497,7 @@ export interface ProviderGraphDoctorProvider {
   diagnostics: CatalogDiagnostic[];
   provenance: ProviderGraphProvenance;
   defaultSource?: ProviderGraphDefaultSource;
+  clientAssets?: ProviderClientAssetReport[];
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
 }
@@ -3317,6 +3562,9 @@ export function providerGraphDoctorReport(
       provenance: structuredClone(provider.provenance),
       ...(selectedProvider?.defaultSource !== undefined
         ? { defaultSource: structuredClone(selectedProvider.defaultSource) }
+        : {}),
+      ...(provider.clientAssets.length > 0
+        ? { clientAssets: structuredClone(provider.clientAssets) }
         : {}),
       ...(provider.authAssurance !== undefined
         ? { authAssurance: structuredClone(provider.authAssurance) }
@@ -3412,6 +3660,7 @@ export interface ProviderInstallInventoryInput {
     >
   >;
   dependencyBindings?: DependencyBinding[];
+  clientAssetSources?: readonly ProviderClientAssetSourceInput[];
 }
 
 /** Stable diagnostic codes produced before provider graph activation. */
@@ -3470,6 +3719,7 @@ export interface ProviderInstallInventorySummary {
   templateDefaults: Record<string, unknown>;
   compatibilityRelations: ProviderInstallCompatibilityRelation[];
   evidenceRequirements: ProviderInstallEvidenceRequirement[];
+  clientAssets: ProviderClientAssetReport[];
 }
 
 /** Diff between the currently active inventory and the candidate inventory. */
@@ -3871,6 +4121,16 @@ function providerInstallInventorySummary(
       capsuleDefaults[family] = providerId;
     }
   }
+  const assetGraphInput: ResolveProviderGraphProjectionInput = {
+    providerManifests: providers,
+    baseProfile: installBaseProfile(inventory),
+    ...(inventory.clientAssetSources !== undefined
+      ? { clientAssetSources: inventory.clientAssetSources }
+      : {}),
+  };
+  const clientAssets = providers.flatMap((provider) =>
+    providerClientAssetReports(provider, assetGraphInput),
+  );
 
   return {
     ...(inventory.inventoryId !== undefined ? { inventoryId: inventory.inventoryId } : {}),
@@ -3887,6 +4147,7 @@ function providerInstallInventorySummary(
         `${b.layer}:${b.ownerId}:${b.dependency}`,
       ),
     ),
+    clientAssets,
   };
 }
 
@@ -3981,6 +4242,9 @@ function doctorForInstallInventory(
     baseProfile: installBaseProfile(inventory),
     ...(inventory.dependencyBindings !== undefined
       ? { dependencyBindings: inventory.dependencyBindings }
+      : {}),
+    ...(inventory.clientAssetSources !== undefined
+      ? { clientAssetSources: inventory.clientAssetSources }
       : {}),
     configValidationMode: "runtime",
   });
@@ -4098,6 +4362,9 @@ export function planProviderInstallUpdate(input: ProviderInstallPlanInput): Prov
     baseProfile: installBaseProfile(candidate.input),
     ...(candidate.input.dependencyBindings !== undefined
       ? { dependencyBindings: candidate.input.dependencyBindings }
+      : {}),
+    ...(candidate.input.clientAssetSources !== undefined
+      ? { clientAssetSources: candidate.input.clientAssetSources }
       : {}),
     configValidationMode: "runtime",
   });

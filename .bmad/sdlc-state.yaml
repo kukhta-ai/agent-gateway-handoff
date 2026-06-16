@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor ready for GLA-110.11"
-branch: feature/provider-graph
+phase_name: "Autonomous build — provider-layer refactor GLA-110.11 ready to merge"
+branch: feature/provider-refactor-task-GLA-110.11
 epic: provider-refactor-110
-active_story: null
-review_cycle: 0
+active_story: GLA-110.11
+review_cycle: 2
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-graph"
-  next_ready_sequence: "GLA-110.10 is Done and merged into feature/provider-graph; next ready task is GLA-110.11."
-  note: "2026-06-16: GLA-110.10 completed and merged. Executable runtime consumption UX uses catalog/template/session dry-run surfaces for capsule provider discovery/defaults/overrides, rejects deployment-provider override paths, exposes runtime diagnostics, and has Goodall approval plus focused/full gate evidence. DoD audit confirmed GLA-110 through GLA-110.14 have task-specific DoD entries."
+  current_branch: "feature/provider-refactor-task-GLA-110.11"
+  next_ready_sequence: "GLA-110.11 is Done on its story branch and ready to merge into feature/provider-graph."
+  note: "2026-06-16: GLA-110.11 completed. Provider client asset provenance now flows through catalog/doctor/runtime composition with filesystem-derived missing/mutable/unverifiable facts; local overrides do not inherit packaged evidence; focused tests and full pnpm run gate passed; Goodall re-review APPROVE."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -115,10 +115,10 @@ provider_graph_107_specialists:
 
 provider_refactor_110_specialists:
   architect: {spawned: true, id: "019ecfe8-3773-7b22-beed-6d099213ed0b", nickname: "Archimedes", open: true, resumable: true, role: "provider-layer target contract, migration map, and architecture boundary review", last_skill: "bmad-agent-architect and bmad-create-architecture loaded/resolved; unattended run blocked by interactive PRD/input confirmation and architecture artifact writes; docs-driven fallback recorded"}
-  ux: {spawned: true, id: "019ecfe8-6bac-7893-a621-054bfe1c9615", nickname: "Confucius", open: true, resumable: true, role: "provider authoring, install/update, and runtime consumption UX separation", last_skill: "GLA-110.10 bmad-ux docs/code-driven sidecar completed; executable runtime catalog/template/session flow and capsule-only override boundary checked"}
-  sm: {spawned: true, id: "019ecfe8-92ac-78b2-a02e-3b940ba8763a", nickname: "Leibniz", open: true, resumable: true, role: "story sequencing, create-story evidence, and backlog readiness", last_skill: "GLA-110.10 bmad-create-story fallback completed; AC mapping, non-goals, files, and stale-command risks recorded"}
-  worker: {spawned: true, id: "019ecfe8-d9be-7100-b1df-1e5d50999552", nickname: "Banach", open: true, resumable: true, role: "provider-layer implementation and E2E/contract test generation", last_skill: "GLA-110.10 runtime provider consumption UX implemented; focused runtime/assembly/doc tests and full pnpm run gate passed"}
-  reviewer: {spawned: true, id: "019ecfe8-fe09-7790-9d13-d17110e8848f", nickname: "Goodall", open: true, resumable: true, role: "TEA/test/security and independent story review", last_skill: "GLA-110.10 story-automator-review fallback APPROVE; no blocking findings, residual catalog.unknown taxonomy risk noted"}
+  ux: {spawned: true, id: "019ecfe8-6bac-7893-a621-054bfe1c9615", nickname: "Confucius", open: true, resumable: true, role: "provider authoring, install/update, and runtime consumption UX separation", last_skill: "GLA-110.11 bmad-ux sidecar completed; asset provenance rows, mutability states, and no raw path leakage checked"}
+  sm: {spawned: true, id: "019ecfe8-92ac-78b2-a02e-3b940ba8763a", nickname: "Leibniz", open: true, resumable: true, role: "story sequencing, create-story evidence, and backlog readiness", last_skill: "GLA-110.11 bmad-create-story fallback completed; scope and compatibility with provider-layer refactor checked"}
+  worker: {spawned: true, id: "019ecfe8-d9be-7100-b1df-1e5d50999552", nickname: "Banach", open: true, resumable: true, role: "provider-layer implementation and E2E/contract test generation", last_skill: "GLA-110.11 client asset provenance implemented; focused asset tests and full pnpm run gate passed"}
+  reviewer: {spawned: true, id: "019ecfe8-fe09-7790-9d13-d17110e8848f", nickname: "Goodall", open: true, resumable: true, role: "TEA/test/security and independent story review", last_skill: "GLA-110.11 story-automator-review APPROVE after false-ready and package-marker fixes"}
   investigator: {spawned: true, id: "019ecfe9-29ce-75a1-a436-5f44a075fd54", nickname: "Hume", open: true, resumable: true, role: "root-cause analysis for provider-layer regressions", last_skill: "bmad-investigate loaded/resolved; unattended run blocked by investigation case-file write and outcome pause under no-edit init; read-only fault-map fallback recorded"}
 
 gates_pending: ["human approval to open PR against dev"]
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T22:00:00Z"
+last_updated: "2026-06-16T22:35:00Z"

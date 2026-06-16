@@ -35,6 +35,9 @@ describe("provider install/update UX documentation", () => {
       "verified: true",
       "rollback snapshot",
       "leaves the previously active inventory observable and unchanged",
+      "browser-client asset provenance and mutability",
+      "packaged",
+      "local override",
     ]) {
       expect(doc).toContain(requiredPhrase);
     }

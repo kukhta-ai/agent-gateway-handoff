@@ -162,6 +162,18 @@ function providerInstallInventory(
       CompletionDetector: "url-watcher",
     },
     dependencyBindings: referenceWpmDependencyBindings(),
+    clientAssetSources: [
+      {
+        providerId: "entrypoint-novnc",
+        ref: "entrypoint-novnc.novnc",
+        source: "package",
+        package: "@novnc/novnc",
+        root: "/opt/gla/assets/novnc",
+        readOnly: true,
+        exists: true,
+        verified: true,
+      },
+    ],
     ...overrides,
   };
 }
@@ -1074,6 +1086,19 @@ describe("gla current contract/schema/help (GLA-094)", () => {
             AuthProvider: "auth-webauthn",
             Launcher: "launcher-process",
           },
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              providerId: "entrypoint-novnc",
+              clientAssets: expect.arrayContaining([
+                expect.objectContaining({
+                  ref: "entrypoint-novnc.novnc",
+                  source: "package",
+                  status: "ready",
+                  states: expect.arrayContaining(["packaged", "read-only"]),
+                }),
+              ]),
+            }),
+          ]),
         },
         activation: {
           rejectedAttemptsLeaveActiveUnchanged: true,
@@ -1116,8 +1141,29 @@ describe("gla current contract/schema/help (GLA-094)", () => {
         inventory: {
           deploymentDefaults: { AuthProvider: "auth-webauthn" },
           capsuleDefaults: { Launcher: "launcher-process" },
+          clientAssets: expect.arrayContaining([
+            expect.objectContaining({
+              ref: "entrypoint-novnc.novnc",
+              source: "package",
+              status: "ready",
+            }),
+          ]),
         },
-        doctor: { status: "PASS" },
+        doctor: {
+          status: "PASS",
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              providerId: "entrypoint-novnc",
+              clientAssets: expect.arrayContaining([
+                expect.objectContaining({
+                  ref: "entrypoint-novnc.novnc",
+                  source: "package",
+                  status: "ready",
+                }),
+              ]),
+            }),
+          ]),
+        },
       });
 
       const badCandidate = providerInstallInventory({

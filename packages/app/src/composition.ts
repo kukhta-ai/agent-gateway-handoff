@@ -11,6 +11,8 @@
 // session create` (no --dry-run) provisions a live capsule and returns `{capsule, connector}`, and `gla
 // session connector` re-emits it.
 
+import { lstatSync, statSync } from "node:fs";
+
 // Concrete adapters (the outward side) — importable ONLY from this composition root until their provider
 // families migrate behind Provider Host:
 import { AdmissionService } from "@gla/admission";
@@ -23,6 +25,7 @@ import {
   type DependencyBinding,
   type IndexedDependencyBinding,
   type Probe,
+  type ProviderClientAssetSourceInput,
   type ProviderGraphDiagnostic,
   type ProviderGraphDoctorReport,
   type ProviderGraphProjectionResult,
@@ -664,6 +667,7 @@ function providerGraphRuntimeContext(opts: {
   runtimeAssemblyParams?: Record<string, Record<string, unknown>> | undefined;
   configValidationProviderIds?: readonly ProviderId[] | undefined;
   templateProbes?: Readonly<Record<string, Probe>> | undefined;
+  entrypointClientAssets?: readonly EntrypointClientAssetMount[] | undefined;
 }): ProviderGraphRuntimeContext {
   const content = providerStoreContent(opts.providerHost);
   const templatePackages = [runtimeCapsuleTemplatePackage(opts.capsule)];
@@ -687,6 +691,9 @@ function providerGraphRuntimeContext(opts: {
       : {}),
     ...(opts.runtimeAssemblyParams !== undefined
       ? { runtimeAssemblyParams: opts.runtimeAssemblyParams }
+      : {}),
+    ...(opts.entrypointClientAssets !== undefined
+      ? { clientAssetSources: providerClientAssetSources(opts.entrypointClientAssets) }
       : {}),
     configValidationMode: "factory",
     ...(opts.configValidationProviderIds !== undefined
@@ -1057,6 +1064,47 @@ function providerEntrypointClientAssets(
   host: ProviderHost,
 ): EntrypointClientAssetMount[] {
   return [...(assets ?? []), ...legacyProviderSetEntrypointClientAssets(providerSet, host)];
+}
+
+function providerClientAssetSources(
+  assets: readonly EntrypointClientAssetMount[],
+): ProviderClientAssetSourceInput[] {
+  return assets.map((asset) => {
+    const source = asset.source ?? "package";
+    const facts = clientAssetFilesystemFacts(asset, source);
+    return {
+      providerId: asset.providerId,
+      ref: asset.ref,
+      source,
+      root: asset.root,
+      ...facts,
+      ...(asset.package !== undefined ? { package: asset.package } : {}),
+      ...(asset.env !== undefined ? { env: asset.env } : {}),
+      ...(asset.cacheControl !== undefined ? { cacheControl: asset.cacheControl } : {}),
+      ...(asset.evidence !== undefined ? { evidence: structuredClone(asset.evidence) } : {}),
+    };
+  });
+}
+
+function clientAssetFilesystemFacts(
+  asset: EntrypointClientAssetMount,
+  source: ProviderClientAssetSourceInput["source"],
+): Pick<ProviderClientAssetSourceInput, "exists" | "verified" | "readOnly"> {
+  try {
+    if (lstatSync(asset.root).isSymbolicLink()) {
+      return { exists: true, verified: false, readOnly: false };
+    }
+    const rootStats = statSync(asset.root);
+    if (!rootStats.isDirectory()) {
+      return { exists: true, verified: false, readOnly: false };
+    }
+    const forbiddenWritableBits =
+      source === "local-override" || source === "wpm-evidence" ? 0o222 : 0o022;
+    const readOnly = asset.readOnly === true && (rootStats.mode & forbiddenWritableBits) === 0;
+    return { exists: true, verified: readOnly, readOnly };
+  } catch {
+    return { exists: false, verified: false };
+  }
 }
 
 interface ConnectorLifecycleMethods {
@@ -1492,6 +1540,11 @@ export interface CreateBridgeOptions extends ProviderCompositionOptions {
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
   const providerHost = requireProviderHost(opts);
   const selections = resolveProviderSelections(opts);
+  const entrypointClientAssets = providerEntrypointClientAssets(
+    opts.entrypointClientAssets,
+    opts.providerSet,
+    providerHost,
+  );
   const graphContext = providerGraphRuntimeContext({
     providerHost,
     providerSet: opts.providerSet,
@@ -1500,6 +1553,7 @@ export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
     dependencyBindings: opts.dependencyBindings,
     configValidationProviderIds: [],
     templateProbes: opts.templateProbes,
+    entrypointClientAssets,
   });
   const catalogOptions = graphContext.catalogOptions;
   const catalog = new CatalogService(catalogOptions);
@@ -1874,6 +1928,11 @@ export function createProvisioningBridge(
       ...(opts.handoff?.completion !== undefined ? [detectorProviderId] : []),
     ];
 
+    const entrypointClientAssets = providerEntrypointClientAssets(
+      opts.entrypointClientAssets,
+      opts.providerSet,
+      providerHost,
+    );
     const graphContext = providerGraphRuntimeContext({
       providerHost,
       providerSet: opts.providerSet,
@@ -1883,6 +1942,7 @@ export function createProvisioningBridge(
       runtimeAssemblyParams,
       configValidationProviderIds,
       templateProbes: opts.templateProbes,
+      entrypointClientAssets,
     });
     const catalogOptions = graphContext.catalogOptions;
     const catalog = new CatalogService(catalogOptions);
@@ -2204,11 +2264,7 @@ export function createProvisioningBridge(
         // gateway's common contract; gateway code never names provider method claims.
         ...(authAssurancePolicy !== undefined ? { authAssurancePolicy } : {}),
         // Entrypoint providers own browser-client assets; the gateway only sees generic static mounts.
-        entrypointClientAssets: providerEntrypointClientAssets(
-          opts.entrypointClientAssets,
-          opts.providerSet,
-          providerHost,
-        ),
+        entrypointClientAssets,
       });
       route = new RouteController({ gateway });
       handoffDeps = {
