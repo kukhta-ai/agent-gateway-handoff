@@ -91,7 +91,13 @@ export type CatalogShowResult =
       Partial<
         Pick<
           CatalogProviderInfo,
-          "dependencies" | "diagnostics" | "config_schema" | "authAssurance"
+          | "dependencies"
+          | "diagnostics"
+          | "provenance"
+          | "defaultSource"
+          | "resolvedConfig"
+          | "config_schema"
+          | "authAssurance"
         >
       >)
   | (IndexedEntity & Partial<TemplateShowResult>);

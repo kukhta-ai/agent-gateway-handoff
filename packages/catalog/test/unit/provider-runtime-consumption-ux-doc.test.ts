@@ -28,9 +28,12 @@ describe("provider runtime consumption UX documentation", () => {
     for (const requiredPhrase of [
       "catalog",
       "gla catalog show <provider-id>",
+      "gla catalog list --kind <family> [--available]",
       "Provider detail",
       "config_schema",
       "template",
+      "defaultSource",
+      "compatible providers",
       "schema",
       "skill",
       "gla session create ... --dry-run",
@@ -59,7 +62,9 @@ describe("provider runtime consumption UX documentation", () => {
   it("covers required diagnostics and recovery paths", () => {
     for (const requiredPhrase of [
       "Unavailable provider",
+      "Not installed provider",
       "Incompatible selection",
+      "Ambiguous default",
       "Schema error",
       "Template-fixed override",
       "Missing skills",
@@ -77,6 +82,9 @@ describe("provider runtime consumption UX documentation", () => {
       "write selected provider profiles",
       "write WPM receipts",
       "daemon config",
+      "AuthProvider",
+      "ChannelAdapter",
+      "SecretStore",
       "constraints inside",
     ]) {
       expect(doc).toContain(requiredPhrase);
