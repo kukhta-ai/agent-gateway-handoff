@@ -70,9 +70,9 @@ For public-edge transport requirements, these are also required:
 - query strings, `Cookie`, `Authorization`, and `Sec-WebSocket-Protocol` are redacted or not logged;
 - the current reachability probe is the template's current runtime-health input, not gateway authorization evidence.
 
-At app composition time, provider probes come from Provider Host and template probes come from the selected provider
-set or explicit composition options. A declared provider or template probe that is not registered fails closed as
-`unavailable`; WPM receipt evidence alone cannot synthesize current reachability.
+At app composition time, provider probes come from ProviderRegistry/internal factory metadata and template probes come
+from template descriptors or explicit composition options. A declared provider or template probe that is not
+registered fails closed as `unavailable`; WPM receipt evidence alone cannot synthesize current reachability.
 
 Missing binding evidence, incomplete machine-readable fields, disabled state, failed last WPM probe, or a degraded
 current runtime probe makes the provider not available. Pure in-tree providers with no host-touching dependency

@@ -13,7 +13,7 @@ doctor-verified a provider graph on this host. Its job is to inspect what this i
 `AssemblySpec`, dry-run admission, submit a session proposal, and then continue the task through the returned
 connector and handoff surfaces.
 
-The runtime agent is not trying to create provider package source, select a provider profile, satisfy host
+The runtime agent is not trying to create provider package source, select app deployment config, satisfy host
 dependencies, write WPM receipts, or mutate daemon boot config. Those belong to earlier flows. Runtime consumption
 answers one question:
 
@@ -32,7 +32,7 @@ agent should be able to recover from interruption by re-reading the same entitie
 | `gla catalog show <provider-id>` | Inspect one registered provider before selecting or overriding it. | Provider manifest projection, family, capabilities, dependency/probe status, typed `config_schema`, provenance, selected-default source, resolved config, browser-client asset provenance/readiness, and diagnostics. |
 | `gla template list [--available]` | Find assemblable capsule templates in the active graph. | Template ids, purpose, dependency posture, and availability. |
 | `gla template show <id>` | Inspect a template before composing a session. | Required parts, fixed/open parts, per-part default provider ids, per-part `defaultSource`, `defaultSources`, compatible providers, template dependencies, and diagnostics. |
-| `gla schema [session create]` | Load the machine-readable input/output and error contract for session proposal. | `AssemblySpec` shape, command flags, exit codes, and stable error codes. |
+| `gla schema session create` | Load the machine-readable input/output and error contract for session proposal. | `AssemblySpec` shape, command flags, exit codes, and stable error codes. |
 | `gla skill list [--for <template>]` | Discover procedural knowledge relevant to the selected surface. | Skill ids and summaries keyed to templates/providers. |
 | `gla skill show <id>` | Load recovery and use instructions for the task. | Skill body with provider/template usage and recovery guidance. |
 | `gla session create ... --dry-run` | Check admission without provisioning a capsule. | Accepted/rejected outcome with stable diagnostics and recovery pointers. Capsule overrides are only `--launcher`, `--entrypoint`, `--connector`, `--workspace`, and `--detector`, or their equivalent `AssemblySpec` fields. |
@@ -48,7 +48,7 @@ Runtime consumption reads the active graph. It does not mutate the graph.
 
 | Surface | What the agent learns |
 |---|---|
-| Catalog | Provider/template ids, families, capabilities, selected-profile projection, availability, dependency/probe summaries, and diagnostic codes. |
+| Catalog | Provider/template ids, families, capabilities, selected-default projection, availability, dependency/probe summaries, and diagnostic codes. |
 | Provider detail | One provider's manifest projection, typed `config_schema`, compatibility relations, dependency/probe status, and skills/docs links. |
 | Template | Fixed parts, open parameters, defaulted parts, compatible providers, template dependencies, and skills/docs links. |
 | Schema | `AssemblySpec` shape, provider-detail output, provider `config_schema` bounds, command flags, output shapes, exit-code taxonomy, and error code names. |
@@ -83,7 +83,7 @@ as command flags.
    opens and waits handoffs when needed, inspects completion, and completes or revokes the task/session.
 
 The success path is deliberately ordinary: the agent should not need to know which provider is the default provider
-globally. It sees named ids, compatibility, schema, availability, and the selected profile's projection.
+globally. It sees named ids, compatibility, schema, availability, and the selected default projection.
 
 ## 5. Provider And Template States
 
@@ -112,7 +112,7 @@ pointer when procedural recovery is useful.
 | Incompatible selection | Template requires a connector transport that the selected entrypoint provider does not support. | Remove the selection, choose a compatible provider from `template show`, or choose another template. |
 | Ambiguous default | A template open part requires explicit compatibility evidence but no relation proves the default safe. | Choose a provider from a compatible template, or hand the package back to operator install/update/provider authoring for repair. |
 | Schema error | `AssemblySpec` contains an unknown field, wrong type, out-of-range value, or provider config outside `config_schema`. | Re-read `gla schema`, fix the field, and dry-run again. |
-| Template-fixed override | The proposal tries to override fixed isolation tier, assurance policy, namespace posture, public-edge route shape, or another fixed part. | Remove the override or choose a template/profile that exposes the desired part as open. |
+| Template-fixed override | The proposal tries to override fixed isolation tier, assurance policy, namespace posture, public-edge route shape, or another fixed part. | Remove the override or choose a template that exposes the desired part as open. |
 | Missing skills | A selected template/provider has no skill or recovery pointer for the agent-facing behavior it exposes. | Use schema/template data only if sufficient; otherwise report an authoring or install/update gap. |
 | Client asset problem | An entrypoint client asset is a local override, mutable, missing, or unverifiable instead of packaged or WPM-evidence-backed read-only assets. | Do not treat it as packaged immutable evidence; choose another compatible entrypoint or escalate to operator install/update. |
 | Dry-run admission failure | Admission rejects because of policy, dependency, capability, compatibility, not-found, conflict, or mount constraints. | Branch on the stable code, repair the proposal locally when possible, then retry dry-run before real submission. |
@@ -120,7 +120,7 @@ pointer when procedural recovery is useful.
 | Resume failure | `session connector <id>` cannot return a live connector because the session is terminal or no capsule exists. | Read `session get`, create a new admitted session if the task still allows work, or report terminal state. |
 
 The diagnostic copy should say what the agent can do next. If the fix belongs to another flow, name that flow:
-provider authoring for missing package docs/tests/skills, operator install/update for profile/WPM/daemon repair.
+provider authoring for missing package docs/tests/skills, operator install/update for deployment/WPM/daemon repair.
 
 ## 7. Write Restrictions As UX Constraints
 
@@ -132,13 +132,15 @@ Allowed inside runtime consumption:
 - write a local `AssemblySpec` draft and task-owned scratch artifacts;
 - create, read, complete, or revoke task/session/handoff entities through admitted runtime commands;
 - attach host mounts only when the agent already has filesystem access and policy/admission allows them;
-- read catalog, template, schema, skill, session, event, and audit surfaces;
+- read catalog, template, schema, skill, and session surfaces; event and audit reads are future/deferred unless
+  promoted into the current executable CLI contract;
 - submit dry-run and real session proposals against already registered providers.
 
 Not allowed inside runtime consumption:
 
 - write provider code, provider package manifests, contract tests, or skill/docs source;
-- write selected provider profiles, profile overlays, provider-set composition, or rollback snapshots;
+- write app deployment config, capsule template defaults, legacy provider-profile/provider-set composition, or rollback
+  snapshots;
 - write WPM receipts, dependency binding evidence, daemon config, boot config, route config, or public-edge setup;
 - load executable provider code or register provider modules after daemon boot;
 - select or override `AuthProvider`, `ChannelAdapter`, or `SecretStore` through runtime session creation;
@@ -169,7 +171,7 @@ provider graph.
 ## 9. Non-Goals
 
 - No provider package source authoring.
-- No profile selection, overlay application, WPM receipt writing, daemon restart, or rollback.
+- No app deployment config selection, profile overlay application, WPM receipt writing, daemon restart, or rollback.
 - No marketplace/version solver.
 - No dynamic provider hot-loading.
 - No provider-specific task/session command surface.

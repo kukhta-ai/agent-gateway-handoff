@@ -4,10 +4,13 @@
 
 This is the spine for every point where GLA leans on a third party to cover a capability — the capsule runtime, channels, auth, secret stores, document editors, completion detection. They are all the same kind of thing, extended the same way, and the goal is that an operator can add a capability by *dropping in a package*, never by editing the core.
 
-The canonical realization of this model is now the **provider graph**: every runtime pluggable layer is a
-`ProviderFamily`, every runtime implementation including the default is a `ProviderPackage`, capsule templates are
-catalog `TemplatePackage`s, defaults are selected by a trusted `ProviderProfile`, and templates/session assemblies
-resolve to available compatible provider subgraphs. See
+The canonical realization of this model is now the **provider graph** behind the target provider-layer split: every
+runtime pluggable layer is a `ProviderFamily`, every runtime implementation including the default is a
+`ProviderPackage`, executable packages register into `ProviderRegistry`, app infrastructure defaults live in
+`AppDeploymentConfig`, capsule defaults live in catalog `TemplatePackage` / `CapsuleTemplate` data, and
+`AssemblySpec` supplies only per-session capsule deltas. `CapabilityCatalog` projects that evidence read-only, and
+the `Admission Resolver` turns a proposal into a validated plan. See
+`architecture/provider-layer-refactor-contract.md` and
 `architecture/provider-graph-defaults-and-extension-plan.md` for the default-provider rule and horizontal extension
 plan.
 
@@ -38,13 +41,13 @@ Adding a capability is therefore adding a *package*, not changing core code. Dis
 
 So **"self-registration" means a package describes itself so the operator's install is turnkey** (drop it in → it manifests → it's usable) — *not* an open endpoint that anything pushes code to at runtime. This is the existing GLA↔`wpm` split: `wpm` (the agent-native installer) stands the dependency up on the operator's host and writes its `DependencyBinding`; GLA reads it. Extensibility is an operator power; the runtime agent only ever consumes what's already registered. This is the line that lets GLA be maximally extensible *and* keep providers trusted — which matters most for launchers, since they run code and own security-bearing configuration (§7).
 
-In the current runtime implementation this line is enforced by **Provider Host** plus a boot-time **provider set**.
-A provider set is trusted distribution/install-time code: it imports concrete provider packages, registers their
-modules, and names the selected provider profile. Generic app composition consumes that provider set/profile and
-derives wiring and catalog views from Provider Host metadata. Runtime requests may select among already-registered
-provider ids where a surface allows it, but they cannot register executable provider code or load a new provider
-package after daemon boot. See `architecture/provider-host-extension-architecture.md` and
-`architecture/provider-author-workflow.md`, and
+In the current migration implementation this line is enforced by a sealed `ProviderRegistry` backed by internal
+ProviderHost factory mechanics. Legacy provider-set/profile inputs are compatibility readers only: distribution code
+may still adapt them into registry boot data, `AppDeploymentConfig`, template defaults, explicit probes, and client
+asset evidence, but they are not target architecture nouns. Runtime requests may select among already-registered
+capsule provider ids where a template allows it, but they cannot register executable provider code or load a new
+provider package after daemon boot. See `architecture/provider-layer-refactor-contract.md`,
+`architecture/provider-host-extension-architecture.md`, `architecture/provider-author-workflow.md`, and
 `architecture/provider-graph-defaults-and-extension-plan.md`.
 
 ---
@@ -144,7 +147,8 @@ Two consequences follow, and they are the whole point:
 - **Allowlist-by-construction.** The agent never submits arbitrary native config that GLA has to screen for safety; it can only set values that *conform to a declared typed schema*, checked offline at admission. "Validate untrusted runtime config for safety" — the hard, fragile problem — dissolves, because there is no arbitrary config to validate, only schema conformance.
 - **The trusted author draws the line.** *Which* native knobs become options, and their bounds, is decided by the provider/template author at install-time (every `required` list / `enum` / range choice). That is exactly the cognition-vs-enforcement boundary — fixed once by a trusted party, never negotiated by the runtime agent.
 
-How an agent *composes* a spec against these schemas — introspect → `--set` / `-f` → `--dry-run` → submit — is the subject of `04-capsule-assembly.md`.
+How an agent *composes* a spec against these schemas — introspect → `-f` or current capsule part flags →
+`--dry-run` → submit — is the subject of `04-capsule-assembly.md`.
 
 ---
 

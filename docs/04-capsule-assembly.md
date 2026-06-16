@@ -63,7 +63,7 @@ The **fully-specified** form makes the structure explicit and overrides a defaul
 
 ## 2. The authoring flow — five moves
 
-1. **Orient by capability, then introspect the template.** From the task the agent knows the *shape* it needs — "a browser a human can drive + an agent handle + completion detection" — and discovers what is available rather than assuming. `gla template show browser-handoff` returns the required part-families, the compatible/default providers per family, each backing dependency's binding status, template-level dependency evidence such as `edge-proxy`, and the template's **open-parameter schema** — which params it *must* fill (here `url-watcher.complete_on`) and which it *may*. `gla schema session create` gives the spec shape; `gla skill show browser-handoff` gives the recipe in prose. The agent learns the holes; it does not guess them. For mounts specifically, `gla policy mounts` returns the operator's allowed-set, denylist, and default mode — so the agent composes within the bound rather than discovering it by rejection.
+1. **Orient by capability, then introspect the template.** From the task the agent knows the *shape* it needs — "a browser a human can drive + an agent handle + completion detection" — and discovers what is available rather than assuming. `gla template show browser-handoff` returns the required part-families, the compatible/default providers per family, each backing dependency's binding status, template-level dependency evidence such as `edge-proxy`, and the template's **open-parameter schema** — which params it *must* fill (here `url-watcher.complete_on`) and which it *may*. `gla schema session create` gives the spec shape; `gla skill show browser-handoff` gives the recipe in prose. The agent learns the holes; it does not guess them. Mount policy is enforced by admission during `gla session create --dry-run`; the current executable CLI does not expose a separate `gla policy mounts` read command.
 
 2. **Start from the template.** A template is a *preset plus constraints*: it pins the structure and the security-bearing config and exposes only a small set of open parameters. The starting point is just `{ template, recipient }`.
 
@@ -81,11 +81,11 @@ gla catalog show docker            # a provider's manifest, incl. its typed conf
 # compose + admission-check only (mutate defaults -> validate; nothing provisioned)
 gla session create --task T -f assembly.json --dry-run
 
-# or compose imperatively, client-side, with typed --set:
+# or compose imperatively, client-side, with current capsule part flags:
 gla session create --template browser-handoff \
   --recipient tg:user:123 \
-  --set detectors.url-watcher.complete_on=/dashboard \
-  --set launcher.memory=1Gi \
+  --detector detector-url-watcher \
+  --launcher launcher-process \
   --dry-run
 
 # provision (drop --dry-run) -> {session_id, connector:{cdp_url, secret_ref}}
@@ -105,15 +105,15 @@ Every value the agent may set lives inside some provider's `config_schema` — a
 
 That is **allowlist-by-construction**, and it is the clean resolution of the otherwise-fragile "validate arbitrary runtime config for safety" problem. There is no arbitrary config; there is only conformance to a declared schema.
 
-**Composition is a projection of the schema, not a hand-written command set.** The same `config_schema` is surfaced three equivalent ways, all generated from the one declaration: a declarative file (`-f assembly.json`), typed flags (`--set <path>=<value>`), and machine-readable introspection (`gla schema`, `gla catalog show`). New providers cost the author *a schema*, not a bespoke command per option — and there is nothing to keep in sync, because the flags and the file validate against the same schema. (`--set` is the typed form of the `--template <id> [parts…]` flags in `05-cli-and-entities.md`; `--set` and `catalog show` extend the command reference there.)
+**Composition is a projection of the schema, not a hand-written command set.** The same `config_schema` is surfaced through the declarative file (`-f assembly.json`), current capsule part flags (`--template`, `--launcher`, `--entrypoint`, `--connector`, `--workspace`, `--detector`, and `--mount`), and machine-readable introspection (`gla schema`, `gla catalog show`). New providers cost the author *a schema*, not a bespoke command per option — and there is nothing to keep in sync, because the flags and the file validate against the same schema. A future generic `--set <path>=<value>` projection may extend this contract, but it is not part of the current executable CLI surface.
 
-**Composition state is client-side.** The agent accumulates `--set`s (or writes the file), dry-runs, and submits *one* resolved `AssemblySpec`; GLA's edge stays stateless and the untrusted agent holds no server-side draft. (A server-side draft is possible but buys little here, so it is deferred.)
+**Composition state is client-side.** The agent accumulates an `AssemblySpec` file or current capsule part flags, dry-runs, and submits *one* resolved spec; GLA's edge stays stateless and the untrusted agent holds no server-side draft. (A server-side draft is possible but buys little here, so it is deferred.)
 
 This shape is well-precedented; GLA is borrowing, not inventing:
 
 - **Terraform** — each provider declares a typed schema that *is* the contract with its users (`Required` / `Optional` / `Default` / `ValidateFunc`, range and enum validators), and Terraform validates config against it **offline**, before any backend call. This is the model for `config_schema` and for dry-run-as-offline-validation.
 - **kubectl** — imperative commands compose a manifest you then `--dry-run=client -o yaml` and apply, instead of writing YAML from scratch. Its *cautionary* lesson is equally load-bearing: hand-authored per-option commands cover only a subset of the real surface (`create deployment` has no `--replicas`; `expose` cannot set a nodePort), so they drift — which is exactly why GLA generates the option surface from one schema rather than hand-writing commands.
-- **Firecracker** — a *runtime* that builds a microVM from a sequence of typed, validated config calls (`/machine-config`, `/drives`, `/network-interfaces`) before `InstanceStart`, *and* accepts the same thing as a single `--config-file`. That single-document / sequence equivalence is precisely `-f` vs `--set` over one schema.
+- **Firecracker** — a *runtime* that builds a microVM from a sequence of typed, validated config calls (`/machine-config`, `/drives`, `/network-interfaces`) before `InstanceStart`, *and* accepts the same thing as a single `--config-file`. That single-document / sequence equivalence is the precedent for `-f` plus schema-projected flags over one schema.
 - **`wpm`'s authoring CLI** (the in-project precedent) — a command surface that *verifies and records* a structured artifact and never authors content. GLA's composition follows the same rule for the `AssemblySpec`.
 
 ---
@@ -184,7 +184,7 @@ The agent *can* assemble from scratch by capability: query the catalog for parts
 - Every value the agent sets conforms to a provider's **typed `config_schema`**; off-schema input is rejected offline at admission (**allowlist-by-construction**).
 - The **fixed / open line is set at install-time** by a trusted author, never negotiated by the runtime agent.
 - Admission **resolves** (mutate-merge) then **validates**; the agent never has to produce the full resolved spec.
-- Composition is **client-side**, and the option surface is a **projection of one schema** (`-f` ≡ `--set` ≡ `gla schema`), so a provider costs a schema, not a command set.
+- Composition is **client-side**, and the option surface is a **projection of one schema** (`-f`, capsule part flags, and `gla schema`), so a provider costs a schema, not a command set.
 - **Mounts run with the agent's own authority** — the agent may attach what it can already reach, never GLA-managed, agent-blind resources (secrets, dependency creds) it cannot itself see.
 - *What to mount and in what mode* is the **agent's choice**, bounded only by an operator **allowed-set** that defaults permissive for the single-operator profile.
 - **Persisted bytes live on the host** (a mount target, or the outputs root / task store) and survive reap; only the capsule's **own ephemeral** state is destroyed at teardown.
@@ -196,7 +196,7 @@ The agent *can* assemble from scratch by capability: query the catalog for parts
 
 **Grounded in the source docs:** the `AssemblySpec` as a K8s/Backstage-shaped, JSON-Schema-validated object; admission's mutate-then-validate with Cedar (forbid-wins); "template defaults injection"; parts as catalog kinds discovered by capability; recipient-binding (narrowable only); `--dry-run`; the implicit single-session task; the native-bottom / thin-top split; the agent running outside the capsule (the Agent Bridge); the agent-blind secret-ref and `DependencyBinding` channels; the task as durable cross-session root; reap destroying the capsule's ephemeral workspace; and the two sanctioned native-access paths (contribution workflow; PSS-style profile tiers).
 
-**Synthesized / sharpened here:** the concrete `AssemblySpec` object shape (`use` / `params`, the minimal-vs-full spectrum), the five-move authoring flow, the template-as-overlay / agent-as-delta resolution framing, the "fill the cognition-shaped holes" boundary, the typed-`config_schema` composition mechanism (introspect → `--set` / `-f` → `--dry-run`, client-side, allowlist-by-construction) with its Terraform / kubectl / Firecracker / `wpm` precedents, and the **host-attachment / mount model** (§6) — free agent-chosen `ro`/`rw` mounts for the operator-recipient case, the confused-deputy authority bound, the operator allowed-set defaulting permissive, recipient-scoping as a future seam, and the catastrophic-path denylist — grounded in K8s Pod Security Standards (host access reserved for trusted profiles) and Docker mount semantics (managed volumes / `tmpfs` / `:ro`). The composing-flow integration (the `--mount` flag, `gla policy mounts`, canonicalize-before-validate at admission, the per-launcher mount-capability gate, and uid-scoped mounting as the structural enforcement) is the mechanism folded in here.
+**Synthesized / sharpened here:** the concrete `AssemblySpec` object shape (`use` / `params`, the minimal-vs-full spectrum), the five-move authoring flow, the template-as-overlay / agent-as-delta resolution framing, the typed-`config_schema` composition mechanism (introspect → `-f` or capsule part flags → `--dry-run`, client-side, allowlist-by-construction) with its Terraform / kubectl / Firecracker / `wpm` precedents, and the **host-attachment / mount model** (§6) — free agent-chosen `ro`/`rw` mounts for the operator-recipient case, the confused-deputy authority bound, the operator allowed-set defaulting permissive, recipient-scoping as a future seam, and the catastrophic-path denylist — grounded in K8s Pod Security Standards (host access reserved for trusted profiles) and Docker mount semantics (managed volumes / `tmpfs` / `:ro`). The composing-flow integration (the current `--mount` flag, canonicalize-before-validate at admission, the per-launcher mount-capability gate, and uid-scoped mounting as the structural enforcement) is the mechanism folded in here.
 
 ## Related
 

@@ -29,7 +29,7 @@ describe("provider authoring UX documentation", () => {
     expect(doc).toContain("TemplatePackage");
     expect(doc).toContain("CapsuleTemplate");
     expect(doc).toContain("not a runtime provider factory");
-    expect(doc).toContain("No Provider Host runtime factory");
+    expect(doc).toContain("No executable provider factory");
   });
 
   it("covers diagnostics, recovery, and guarded operations as UX constraints", () => {
@@ -47,10 +47,13 @@ describe("provider authoring UX documentation", () => {
       "not as the journey structure",
       "current executable `gla` CLI",
       "JSON-first authoring flow",
+      "gla provider scaffold --family <family> --id <provider-id> [--version <version>] [--summary <text>]",
+      "gla template-package scaffold --id <package-id> [--template <template-id>]",
     ]) {
       expect(doc).toContain(requiredPhrase);
     }
     expect(doc).not.toMatch(/authority modes?/i);
+    expect(doc).not.toContain("The exact target command names can evolve");
   });
 
   it("is linked from the documentation map and provider author workflow", () => {

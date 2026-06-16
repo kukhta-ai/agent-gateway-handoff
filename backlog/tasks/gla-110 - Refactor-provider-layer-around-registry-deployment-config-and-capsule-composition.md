@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-06-16 09:45'
-updated_date: '2026-06-16 20:07'
+updated_date: '2026-06-16 22:45'
 labels:
   - provider-refactor
   - architecture
@@ -34,6 +34,8 @@ Plan and execute the provider-layer simplification approved by the AS IS / TO BE
 
 <!-- SECTION:NOTES:BEGIN -->
 Tracking parent for the provider-layer refactor. Treat the executable implementation stories as subtasks and start with GLA-110.01; do not attempt to implement the whole epic parent as one story.
+
+2026-06-16 DoD audit: reviewed GLA-110 and subtasks GLA-110.01 through GLA-110.14. Each task carries task-specific DoD items in addition to the shared quality gate; GLA-110.14 was strengthened with final-removal documentation/API scan and reference-scenario verification checks.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
@@ -47,4 +49,5 @@ Tracking parent for the provider-layer refactor. Treat the executable implementa
 - [ ] #7 The parent final summary links to the final contract, migration guidance, and cross-layer verification evidence.
 - [ ] #8 Backlog status shows no open provider-refactor subtasks that are required for the approved refactor scope.
 - [ ] #9 All subtasks GLA-110.01 through GLA-110.14 are Done before the parent is marked Done.
+- [ ] #10 Each provider-refactor subtask has task-specific Definition-of-Done evidence beyond the shared quality gate before the parent is closed.
 <!-- DOD:END -->

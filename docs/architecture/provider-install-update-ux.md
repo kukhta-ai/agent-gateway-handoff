@@ -112,7 +112,7 @@ Allowed inside this flow:
 
 Not allowed inside this flow:
 
-- author provider package source or contract tests; use `gla provider ...` or `gla template-package ...`;
+- author provider package source or contract tests; use the separate provider authoring flow for that work;
 - let runtime users change `AuthProvider`, `ChannelAdapter`, or `SecretStore` deployment selection;
 - hand-write WPM receipts or raw secret values;
 - register executable provider code after daemon boot;

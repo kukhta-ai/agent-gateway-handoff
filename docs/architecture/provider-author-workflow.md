@@ -1,9 +1,9 @@
 # Provider Author Workflow
 
-This is the concrete contribution path for adding a new GLA provider under the ProviderRegistry and internal
-Provider Host architecture. It is intentionally not a public plugin ABI or dynamic hot-loading contract. Providers
-are trusted install-time code registered at boot, then selected by app deployment configuration or capsule
-template/assembly composition.
+This is the concrete contribution path for adding a new GLA provider under the `ProviderRegistry` target architecture
+and the internal Provider Host factory runner. It is intentionally not a public plugin ABI or dynamic hot-loading
+contract. Providers are trusted install-time code registered at boot, then selected by app deployment configuration
+or capsule template/assembly composition.
 
 The default and custom provider path is intentionally the same for runtime layers: every user-facing runtime layer
 is a provider family, every implementation is a provider package, and selected defaults live in app deployment
@@ -18,8 +18,9 @@ spec covers entry points, diagnostics, recovery, and the handoff into operator i
 A provider package owns its adapter code and tests. Today the reference distribution keeps concrete adapters under
 `adapters/<family-name>/` and exposes the selected in-tree provider modules from the reference distribution package.
 
-ProviderRegistry bootstrapping is the approved boundary that imports concrete provider packages and registers them
-with `ProviderHost`. Runtime packages such as `packages/app`, `packages/gateway`, `packages/session`,
+ProviderRegistry bootstrapping is the approved boundary that imports concrete provider packages and may use internal
+`ProviderHost` mechanics to register factories. Runtime packages such as `packages/app`, `packages/gateway`,
+`packages/session`,
 `packages/identity`, `packages/route`, `packages/completion`, `packages/worker`, and `packages/kernel` must not
 import a concrete provider adapter or provider-owned implementation type.
 
@@ -36,8 +37,8 @@ Each provider ships these artifacts together:
 
 - A `ProviderManifest` with stable `metadata.name`, `spec.family`, `capability`, `config_schema` or
   `factory_config_schema`, `probe`, `skills`, optional `requires`, and optional `relations.compatibleWith`.
-- A factory registered through the matching `ProviderRegistrationContext` method, such as `registerLauncher`,
-  `registerAuthProvider`, `registerChannel`, or `registerSecretStore`.
+- A factory registered through the matching internal `ProviderRegistrationContext` method, such as
+  `registerLauncher`, `registerAuthProvider`, `registerChannel`, or `registerSecretStore`.
 - A probe that proves current health and contract availability. Availability is system-derived from WPM
   dependency bindings plus probes, never author-declared.
 - Optional provider-owned state schema. Any state slot that can contain credentials, subjects, attempts, raw
@@ -76,7 +77,7 @@ resolved catalog/provider graph after install and boot probes have produced curr
 
 Host dependencies belong to WPM packages and their install receipts. A provider manifest declares `requires`; WPM
 stands up or adopts the dependency and writes `DependencyBinding` evidence. GLA reads that evidence through Catalog
-and Provider Host checks. Provider code must not treat the existence of a manifest or package as proof that a
+and ProviderRegistry/internal factory checks. Provider code must not treat the existence of a manifest or package as proof that a
 host-touching dependency is usable.
 
 Provider selection is an operator/distribution decision. App deployment configuration names app-infrastructure
@@ -98,7 +99,7 @@ Adding a provider must not require edits to the narrow waist:
   Secret-bearing values cross seams as `secret:` refs and are resolved only by the selected provider/secret
   resolver.
 
-The implementation checkpoint is `pnpm gate`: it includes Provider Host contract tests and boundary checks that
+The implementation checkpoint is `pnpm gate`: it includes provider-layer contract tests and boundary checks that
 fail if runtime packages import concrete migrated providers outside the approved registry/bootstrap boundary. The
 same gate rejects imports of the reference distribution from generic runtime paths; only the explicit default
 distribution entrypoint may select the reference provider modules directly.
@@ -117,6 +118,6 @@ Before a provider package or distribution bootstrap is selectable:
 - Human-entrypoint asset refs are mapped to read-only static roots through catalog/gateway provenance, not by
   gateway/session/core importing provider packages.
 - Contract tests prove a non-reference provider can register, project catalog/read-model output, create runtime
-  ports, and fail closed through Provider Host diagnostics.
+  ports, and fail closed through registry/factory diagnostics.
 - No public API lets users, agents, request payloads, or runtime inputs register executable provider code after
   daemon boot.

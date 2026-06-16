@@ -28,17 +28,18 @@ these commands later, but it should preserve the same state model and diagnostic
 
 | Entry point | Purpose | Primary output |
 |---|---|---|
-| `gla provider scaffold --family <family> --id <provider-id>` | Start a runtime provider package for a known family. | JSON skeleton with `ProviderManifest`, module evidence, docs, contract test refs, changed files, and WPM skeleton refs. |
-| `gla template-package scaffold --id <package-id> --template <template-id>` | Start a catalog `TemplatePackage`. | JSON skeleton with `TemplatePackage`, `CapsuleTemplate`, `template.<id>` defaults, compatibility stubs, docs, and tests. |
+| `gla provider scaffold --family <family> --id <provider-id> [--version <version>] [--summary <text>]` | Start a runtime provider package for a known family. | JSON skeleton with `ProviderManifest`, module evidence, docs, contract test refs, changed files, and WPM skeleton refs. |
+| `gla template-package scaffold --id <package-id> [--template <template-id>] [--launcher <id>] [--entrypoint <id>] [--connector <id>] [--workspace <id>] [--detector <id>] [--open-parts <parts>] [--version <version>] [--summary <text>]` | Start a catalog `TemplatePackage`. | JSON skeleton with `TemplatePackage`, `CapsuleTemplate`, `template.<id>` defaults, compatibility stubs, docs, and tests. |
 | `gla provider validate <path>` | Validate a provider package or local authoring bundle before code review. | Stable diagnostics grouped by manifest, schema, probe, skills/docs, dependencies, redaction, duplicate ids/versions, and tests. |
-| `gla template-package validate <path>` | Validate catalog-only template package completeness. | Stable diagnostics proving consumed defaults/compatibility fields and no Provider Host runtime factory. |
+| `gla template-package validate <path>` | Validate catalog-only template package completeness. | Stable diagnostics proving consumed defaults/compatibility fields and no executable runtime provider factory. |
 | `gla provider test <path>` | Run local provider authoring contract preflight. | Test report with validation-backed pass/fail status, declared contract-test refs, and diagnostics. Package test files are declared for review; this command does not execute external test runners. |
 | `gla template-package test <path>` | Run local template-package authoring contract preflight. | Test report with validation-backed pass/fail status, declared contract-test refs, and diagnostics. Package test files are declared for review; this command does not execute external test runners. |
 | `gla provider inspect <path>` | Show the package as the operator/reviewer will see it. | Read-only summary of family, capabilities, schemas, requirements, skills/docs, tests, and handoff readiness. |
 | `gla template-package inspect <path>` | Show template-package reviewer/operator readiness. | Read-only summary of package id, template ids, defaults, compatibility, docs/tests, and handoff readiness. |
 
-The exact target command names can evolve, but the UX contract is fixed: scaffold, validate, test, inspect, then hand
-off.
+These command names match the current executable CLI contract. Future command names must be marked as deferred or
+future before appearing in this executable flow. The UX contract is fixed: scaffold, validate, test, inspect, then
+hand off.
 
 ## 3. Package Inputs
 
@@ -48,7 +49,8 @@ A runtime provider package is complete only when the author supplies:
 
 - `ProviderManifest` with `apiVersion`, `kind`, `metadata.name`, `metadata.version`, `spec.family`, capability,
   config or factory schema, probe id, skills/docs, optional dependency requirements, and compatibility relations.
-- Provider module code registered through the matching Provider Host family method.
+- Provider module code registered through the matching ProviderRegistry family method, with current internal
+  ProviderHost mechanics hidden behind that boundary.
 - Config and factory schemas that expose only the trusted author-approved option surface.
 - Probe implementation or probe adapter proving current health and contract availability.
 - Skills or docs that let an agent/operator use the provider without hidden implementation knowledge.
@@ -66,7 +68,7 @@ A template package is catalog data, not a runtime provider factory. It is comple
   compatibility requirements.
 - Skills or docs for the template.
 - Tests proving the template resolves against registered providers and rejects fixed-part or incompatible overrides.
-- No Provider Host runtime factory unless the same package also ships a separate runtime provider package.
+- No executable provider factory unless the same package also ships a separate runtime provider package.
 
 ## 4. Authoring Journey
 
@@ -114,13 +116,13 @@ Messages should name the package file, the field or test, and the next repair ac
 | Missing manifest fields | `metadata.name`, `spec.family`, `capability`, or `probe` absent. | Fill the named field or rerun scaffold for the correct family. |
 | Invalid schemas | Config schema has unknown field types, invalid enum/range, or conflicting requirements. | Fix the schema; rerun validation before changing runtime code. |
 | Missing skills or docs | Provider/template ships no usage instructions. | Add a skill or docs entry that explains safe use from catalog output alone. |
-| Missing probes | Runtime provider has no probe or the probe id does not resolve. | Add a probe stub and contract test; template packages do not add Provider Host probes. |
+| Missing probes | Runtime provider has no probe or the probe id does not resolve. | Add a probe stub and contract test; template packages do not add runtime provider probes. |
 | Dependency requirements | Host-touching dependency is used but not declared. | Add `requires` and optional WPM bundle source; WPM receipts are produced in install/update. |
 | Duplicate ids or versions | Provider id/version or template id appears more than once in a local bundle. | Rename or version the duplicate package before install/update can consume it. |
 | Inert or unsupported fields | Template defaults use an unprefixed template id or compatibility uses unsupported keys such as `openParts`. | Use consumed fields such as `template.<template-id>` and `compatibility.requiredParts`. |
 | Redaction failures | Diagnostic, manifest, state sample, asset, or test fixture contains raw secret material. | Replace literal values with `secretRef` or non-sensitive fixtures and rerun redaction tests. |
 | Contract-test failures | Factory, manifest, probe, compatibility, asset, or state behavior disagrees with the contract. | Fix the package code or manifest; do not patch generic app/gateway/session/kernel code. |
-| Template factory confusion | `CapsuleTemplate` or `TemplatePackage` declares a Provider Host runtime factory. | Remove the runtime factory from the template package or split a real provider package out separately. |
+| Template factory confusion | `CapsuleTemplate` or `TemplatePackage` declares an executable runtime factory. | Remove the runtime factory from the template package or split a real provider package out separately. |
 | Narrow-waist import | Runtime packages import a concrete provider or provider-owned type. | Move the import into the provider package or registry bootstrap boundary. |
 
 ## 7. Guarded Operations As UX Constraints
@@ -137,7 +139,8 @@ Not allowed inside this flow:
 
 - write selected app deployment config, capsule template defaults, or install/update overlays for a running deployment;
 - write WPM receipt evidence for a host;
-- mutate daemon config, live Provider Host state, runtime catalogs, routes, grants, sessions, or provider state;
+- mutate daemon config, live ProviderRegistry/internal factory-runner state, runtime catalogs, routes, grants,
+  sessions, or provider state;
 - register executable provider code after daemon boot;
 - make generic app, gateway, session, identity, worker, route, completion, or kernel packages import provider-specific
   implementation types.
