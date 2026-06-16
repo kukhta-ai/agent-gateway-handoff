@@ -147,6 +147,77 @@ describe("Provider Host runtime boundaries", () => {
       }),
     );
   });
+
+  it("would reject retired provider-layer tokens in new protected runtime files", () => {
+    const result = checkProviderBoundaries({
+      extraRuntimeFiles: [
+        {
+          file: "packages/session/src/provider-profile-leak.ts",
+          source:
+            'import type { AppProviderSet, ProviderSelectionProfile } from "@gla/app";\n' +
+            "type Leaked = AppProviderSet & { profile: ProviderSelectionProfile };\n",
+        },
+        {
+          file: "packages/gateway/src/profile-manifest-leak.ts",
+          source:
+            'import type { ProviderProfileManifest } from "@gla/catalog";\n' +
+            "export type Leaked = ProviderProfileManifest;\n",
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "runtime-retired-provider-layer-token",
+          file: "packages/session/src/provider-profile-leak.ts",
+          token: "AppProviderSet",
+        }),
+        expect.objectContaining({
+          kind: "runtime-retired-provider-layer-token",
+          file: "packages/session/src/provider-profile-leak.ts",
+          token: "ProviderSelectionProfile",
+        }),
+        expect.objectContaining({
+          kind: "runtime-retired-provider-layer-token",
+          file: "packages/gateway/src/profile-manifest-leak.ts",
+          token: "ProviderProfileManifest",
+        }),
+      ]),
+    );
+  });
+
+  it("would reject direct provider-set shape and callback reads outside the compatibility adapter", () => {
+    const result = checkProviderBoundaries({
+      extraRuntimeFiles: [
+        {
+          file: "packages/app/src/provider-callback-leak.ts",
+          source:
+            "export function leak(providerSet) {\n" +
+            "  providerSet.defaultConfig?.({ family: 'auth', providerId: 'x', legacy: {} });\n" +
+            "  return providerSet.profiles;\n" +
+            "}\n",
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "runtime-provider-set-shape-read",
+          file: "packages/app/src/provider-callback-leak.ts",
+          token: "providerSet.defaultConfig",
+        }),
+        expect.objectContaining({
+          kind: "runtime-provider-set-shape-read",
+          file: "packages/app/src/provider-callback-leak.ts",
+          token: "providerSet.profiles",
+        }),
+      ]),
+    );
+  });
 });
 
 describe("runtime source/test layout", () => {
