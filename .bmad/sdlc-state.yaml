@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.05 done pending merge"
-branch: feature/provider-refactor-task-GLA-110.05
+phase_name: "Autonomous build — provider-layer refactor ready for GLA-110.06"
+branch: feature/provider-graph
 epic: provider-refactor-110
-active_story: GLA-110.05
-review_cycle: 1
+active_story: null
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.13"
   current_branch: "feature/provider-graph"
-  next_ready_sequence: "GLA-110.05 is Done on the story branch after GLA-110.04 completed and merged; merge back to feature/provider-graph next, then GLA-110.06 is ready."
-  note: "2026-06-16: GLA-110.05 implemented. Catalog projection now exposes graph-backed provenance, default sources, compatibility constraints, package provenance, evidence state, and registry/provider-manifest provenance without AppProviderSet.defaultConfig callback dependency. pnpm gate passed with browser E2E preflight and 893 tests; Goodall re-review APPROVE."
+  next_ready_sequence: "GLA-110.05 is Done and merged into feature/provider-graph. GLA-110.06 is next ready."
+  note: "2026-06-16: GLA-110.05 implemented and merged. Catalog projection now exposes graph-backed provenance, default sources, compatibility constraints, package provenance, evidence state, and registry/provider-manifest provenance without AppProviderSet.defaultConfig callback dependency. pnpm gate passed with browser E2E preflight and 893 tests; Goodall re-review APPROVE."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T13:03:30Z"
+last_updated: "2026-06-16T13:05:35Z"
