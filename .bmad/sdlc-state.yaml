@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.07 complete pending story-branch merge"
-branch: feature/provider-refactor-task-GLA-110.07
+phase_name: "Autonomous build — provider-layer refactor GLA-110.08 ready"
+branch: feature/provider-graph
 epic: provider-refactor-110
-active_story: GLA-110.07
-review_cycle: 3
+active_story: null
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-refactor-task-GLA-110.07"
-  next_ready_sequence: "GLA-110.07 is Done in Backlog.md after full gate and clean independent re-review; merge story branch back to feature/provider-graph, then continue with GLA-110.08."
-  note: "2026-06-16: GLA-110.07 completed. Legacy provider-set/profile composition is no longer the primary runtime spine; compatibility is isolated in provider-compat.ts; default reference boot uses ProviderRegistry, app deployment config, capsule defaults/config, entrypoint assets, and template probes. Goodall final re-review found no remaining blocking findings. Full pnpm run gate passed with 906 tests passed / 15 skipped."
+  current_branch: "feature/provider-graph"
+  next_ready_sequence: "GLA-110.07 is Done and merged into feature/provider-graph; next ready task is GLA-110.08."
+  note: "2026-06-16: GLA-110.07 completed and merged. Legacy provider-set/profile composition is no longer the primary runtime spine; compatibility is isolated in provider-compat.ts; default reference boot uses ProviderRegistry, app deployment config, capsule defaults/config, entrypoint assets, and template probes. Goodall final re-review found no remaining blocking findings. Full pnpm run gate passed with 906 tests passed / 15 skipped."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T20:21:33Z"
+last_updated: "2026-06-16T20:23:29Z"
