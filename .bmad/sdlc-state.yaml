@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.13 complete, ready to merge"
-branch: feature/provider-refactor-task-GLA-110.13
+phase_name: "Autonomous build — provider-layer refactor GLA-110.14 ready"
+branch: feature/provider-graph
 epic: provider-refactor-110
-active_story: GLA-110.13
-review_cycle: 1
+active_story: null
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-refactor-task-GLA-110.13"
-  next_ready_sequence: "GLA-110.13 is Done on its story branch after focused verification, sidecar review hardening, and full gate; next merge back to feature/provider-graph. GLA-110.14 remains pending before parent GLA-110 closure."
-  note: "2026-06-16: GLA-110.13 completed. Added provider-layer regression matrix, doc enforcement, cross-layer provider-registry composition tests for local-dev and delegated-auth target paths, gateway asset evidence agreement, and retired provider-layer boundary scanner/selftests. Focused verification passed (6 files, 177 tests). Full pnpm run gate passed with typecheck, Biome, required browser E2E preflight, and Vitest 82 files / 934 passed / 15 skipped. Parent GLA-110 not closed because GLA-110.14 remains pending."
+  current_branch: "feature/provider-graph"
+  next_ready_sequence: "GLA-110.13 is Done and merged into feature/provider-graph; next ready task is GLA-110.14. Parent GLA-110 remains open until GLA-110.14 is Done."
+  note: "2026-06-16: GLA-110.13 completed and merged. Added provider-layer regression matrix, doc enforcement, cross-layer provider-registry composition tests for local-dev and delegated-auth target paths, gateway asset evidence agreement, and retired provider-layer boundary scanner/selftests. Focused verification passed (6 files, 177 tests). Full pnpm run gate passed with typecheck, Biome, required browser E2E preflight, and Vitest 82 files / 934 passed / 15 skipped. Parent GLA-110 not closed because GLA-110.14 remains pending."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T23:34:00Z"
+last_updated: "2026-06-16T23:35:00Z"
