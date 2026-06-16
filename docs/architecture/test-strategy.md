@@ -30,9 +30,10 @@
 The **import-boundary test** (the deliberate-bad fixture `tools/boundary-check/fixtures/core-importing-adapter.ts`
 must be rejected by `biome ci .`) is exercised inside `vitest run` and re-asserts on every gate run — it sits at
 the unit level conceptually but is the boundary-enforcement selftest (see CONTRIBUTING.md §Quality gate). The
-Provider Host migration adds a project-owned scanner in `tools/boundary-check/provider-boundary.mjs`: migrated
-provider adapters may be imported by provider-set packages and tests, but protected runtime packages must use
-provider ids, kernel ports, `ProviderHost`, or the selected provider set.
+Provider-layer migration adds a project-owned scanner in `tools/boundary-check/provider-boundary.mjs`: migrated
+provider adapters may be imported by registry bootstrap packages, compatibility packages, and tests, but protected
+runtime packages must use provider ids, kernel ports, `ProviderRegistry`, or internal ProviderHost mechanics only
+behind the registry boundary.
 
 ### 1.1a Source and Test Layout
 
@@ -62,8 +63,8 @@ The gate enforces two separate TypeScript contracts:
 - `tsc -p tsconfig.tests.json --noEmit` typechecks all test locations above with the same strict compiler
   options. Runtime `src` directories are not test roots; package-local and app-local `test/` trees are.
 
-Vitest discovers the documented outside-`src` test locations. The browser-E2E preflight and Provider Host
-boundary checks remain part of `pnpm gate`; moving a test changes its path, not its proof strength.
+Vitest discovers the documented outside-`src` test locations. The browser-E2E preflight and provider-layer boundary
+checks remain part of `pnpm gate`; moving a test changes its path, not its proof strength.
 
 ### 1.2 Package-to-level map
 

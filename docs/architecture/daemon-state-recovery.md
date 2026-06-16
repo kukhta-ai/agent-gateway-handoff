@@ -38,7 +38,7 @@ must step up again on a new window.
 
 ## Recovery Rules
 
-- Identity and provider binding state is loaded from Provider Host namespaces before handoff/enrollment requests
+- Identity and provider binding state is loaded from ProviderRegistry/internal ProviderHost namespaces before handoff/enrollment requests
   can reach the public gateway.
 - Authentik pending attempts remain one-time: the adapter still claims and deletes the attempt before token exchange.
 - Expired authentik attempts are rejected by the adapter TTL check after restart; wrong-kind and wrong-recipient

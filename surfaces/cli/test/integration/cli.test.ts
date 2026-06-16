@@ -645,6 +645,54 @@ describe("gla current contract/schema/help (GLA-094)", () => {
     }
   });
 
+  it("provider and capsule UX docs name only executable commands unless explicitly deferred", () => {
+    const currentLeaves = new Set(
+      CLI_COMMANDS.map((command) => [command.noun, command.verb].filter(Boolean).join(" ")),
+    );
+    const currentNouns = new Set(CLI_COMMANDS.map((command) => command.noun));
+    const docs = [
+      "docs/04-capsule-assembly.md",
+      "docs/architecture/provider-graph-defaults-and-extension-plan.md",
+      "docs/architecture/provider-authoring-ux.md",
+      "docs/architecture/provider-install-update-ux.md",
+      "docs/architecture/provider-runtime-consumption-ux.md",
+    ];
+
+    for (const path of docs) {
+      const body = readFileSync(path, "utf8");
+      const commands = [
+        ...body.matchAll(/`(gla\s+[^`]+)`/g),
+        ...body.matchAll(/^\s*(gla\s+[^\n#]+)/gm),
+      ];
+      for (const match of commands) {
+        const raw = match[1]?.trim() ?? "";
+        const index = match.index ?? 0;
+        const context = body.slice(Math.max(0, index - 140), index + raw.length + 140);
+        if (
+          /\b(future|deferred|unsupported|does not expose|not part of the current executable)\b/i.test(
+            context,
+          )
+        ) {
+          continue;
+        }
+        const tokens = raw.replace(/\\$/, "").split(/\s+/);
+        const noun = tokens[1]?.replace(/[<[\](].*$/, "");
+        const verb =
+          noun !== "schema" &&
+          tokens[2] !== undefined &&
+          !tokens[2].startsWith("-") &&
+          !tokens[2].startsWith("<")
+            ? tokens[2].replace(/[<[\](].*$/, "")
+            : undefined;
+        const leaf = [noun, verb].filter(Boolean).join(" ");
+        expect(
+          currentLeaves.has(leaf) || (verb === undefined && currentNouns.has(leaf)),
+          `${path} documents non-executable command without a deferred/future marker: ${raw}`,
+        ).toBe(true);
+      }
+    }
+  });
+
   it("command-scoped machine help exposes noun, verb, flags, output, effect, and exit codes", async () => {
     const c = capture(false);
     expect(await run(["task", "create", "--help"], c.out, services())).toBe(ExitCode.OK);

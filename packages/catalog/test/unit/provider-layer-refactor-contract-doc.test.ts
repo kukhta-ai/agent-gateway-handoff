@@ -133,9 +133,76 @@ describe("provider layer refactor contract documentation", () => {
     }
   });
 
-  it("is linked from the documentation map", () => {
-    expect(repoFile("docs/README.md")).toContain(
-      "architecture/provider-layer-refactor-contract.md",
+  it("maps current artifacts and fields to the refactored model", () => {
+    const rows = rowsByFirstCell(sectionAfter("## 5. Migration Guidance By Artifact"));
+    for (const requiredArtifact of [
+      "Current reference profile ids such as local-dev, single-operator, scenario-01, and hardened-idp",
+      "--provider-profile / providerProfileId / providerProfile",
+      "Legacy --auth-provider and enrollment policy fallback",
+      "AppProviderSet.modules",
+      "defaultConfig(providerId)",
+      "defaultServices()",
+      "entrypointClientAssets()",
+      "templateProbes",
+      "Template defaults keyed by plain template id",
+      "Template compatibility using openParts or unsupported relation keys",
+      "Provider authoring scaffold fields",
+      "Install/update inventory profileId labels",
+    ]) {
+      const row = rows.get(requiredArtifact);
+      expect(row, requiredArtifact).toBeDefined();
+      expect(row?.[1], `${requiredArtifact} target owner`).toBeTruthy();
+      expect(row?.[2], `${requiredArtifact} migration rule`).toBeTruthy();
+    }
+  });
+
+  it("records the architecture decision replacing provider-set/profile layering", () => {
+    const decision = sectionAfter("## 6. Architecture Decision Note");
+    for (const requiredPhrase of [
+      "ProviderRegistry",
+      "AppDeploymentConfig",
+      "CapsuleTemplate",
+      "AssemblySpec",
+      "CapabilityCatalog",
+      "Admission Resolver",
+      "provider-layer-refactor-as-is-to-be.html",
+      "GLA-110.02",
+      "GLA-110.13",
+    ]) {
+      expect(decision).toContain(requiredPhrase);
+    }
+    expect(decision).toContain("Replace broad provider-set/profile layering");
+  });
+
+  it("keeps target architecture docs aligned on the five-entity model", () => {
+    for (const relativePath of [
+      "docs/architecture/provider-graph-defaults-and-extension-plan.md",
+      "docs/architecture/current-architecture-and-lifecycle-diagram.html",
+      "docs/02-provider-and-extension-model.md",
+    ]) {
+      const doc = repoFile(relativePath);
+      for (const requiredPhrase of [
+        "ProviderRegistry",
+        "AppDeploymentConfig",
+        "CapsuleTemplate",
+        "AssemblySpec",
+        "CapabilityCatalog",
+        "Admission Resolver",
+      ]) {
+        expect(doc, `${relativePath} missing ${requiredPhrase}`).toContain(requiredPhrase);
+      }
+    }
+    expect(repoFile("docs/architecture/provider-layer-refactor-contract.md")).toContain(
+      "ProviderHost as a public architecture noun is therefore retired",
     );
+    expect(repoFile("docs/architecture/provider-host-extension-architecture.md")).toContain(
+      "historical migration addendum",
+    );
+  });
+
+  it("is linked from the documentation map", () => {
+    const readme = repoFile("docs/README.md");
+    expect(readme).toContain("architecture/provider-layer-refactor-contract.md");
+    expect(readme).toContain("ProviderRegistry, AppDeploymentConfig");
   });
 });

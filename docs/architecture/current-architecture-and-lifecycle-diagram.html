@@ -332,8 +332,9 @@
         <h1>GLA Current Architecture And Lifecycle</h1>
         <p class="subtitle">
           Current implemented shape after the provider-host/provider-graph work: a narrow runtime core, a typed
-          provider graph, trusted provider sets, CLI/MCP agent surfaces, one public gateway, and temporary
-          two-actor capsules, with provider authoring feeding trusted install-time packages.
+          provider graph, sealed ProviderRegistry, AppDeploymentConfig, CapsuleTemplate/AssemblySpec composition,
+          CLI/MCP agent surfaces, one public gateway, and temporary two-actor capsules, with provider authoring
+          feeding trusted install-time packages.
         </p>
       </header>
 
@@ -345,7 +346,7 @@
           <p>
             Solid arrows are runtime control/data flow. Dashed arrows are install-time or read-only evidence flow.
             The agent can inspect and consume providers through the catalog; executable provider registration
-            happens only through trusted provider packages installed into provider sets at app boot.
+            happens only through trusted provider packages registered into ProviderRegistry at app boot.
           </p>
         </div>
 
@@ -388,7 +389,7 @@
             <text class="zone-title" x="245" y="72">Surfaces</text>
 
             <rect class="zone" x="465" y="40" width="250" height="800"></rect>
-            <text class="zone-title" x="485" y="72">Provider Graph</text>
+            <text class="zone-title" x="485" y="72">Provider Layer</text>
 
             <rect class="zone" x="740" y="40" width="270" height="800"></rect>
             <text class="zone-title" x="760" y="72">Control Plane</text>
@@ -446,24 +447,24 @@
             <text class="node-sub" x="270" y="704">receipts</text>
 
             <rect class="node provider" x="490" y="88" width="200" height="78"></rect>
-            <text class="node-title" x="510" y="116">Provider Set</text>
-            <text class="node-sub" x="510" y="135">reference distribution</text>
-            <text class="node-sub" x="510" y="151">trusted modules</text>
+            <text class="node-title" x="510" y="116">ProviderRegistry</text>
+            <text class="node-sub" x="510" y="135">sealed at boot</text>
+            <text class="node-sub" x="510" y="151">trusted packages</text>
 
             <rect class="node provider" x="490" y="192" width="200" height="84"></rect>
-            <text class="node-title" x="510" y="220">Provider Profile</text>
-            <text class="node-sub" x="510" y="239">selected defaults</text>
-            <text class="node-sub" x="510" y="255">config overlays</text>
+            <text class="node-title" x="510" y="220">AppDeploymentConfig</text>
+            <text class="node-sub" x="510" y="239">auth/channel/secret</text>
+            <text class="node-sub" x="510" y="255">boot config refs</text>
 
             <rect class="node provider" x="490" y="310" width="200" height="98"></rect>
-            <text class="node-title" x="510" y="338">Catalog Graph</text>
-            <text class="node-sub" x="510" y="357">providers, templates</text>
+            <text class="node-title" x="510" y="338">CapabilityCatalog</text>
+            <text class="node-sub" x="510" y="357">providers/templates</text>
             <text class="node-sub" x="510" y="374">compatibility</text>
             <text class="node-sub" x="510" y="391">availability</text>
 
             <rect class="node provider" x="490" y="438" width="200" height="98"></rect>
-            <text class="node-title" x="510" y="466">Provider Host</text>
-            <text class="node-sub" x="510" y="485">factory registry</text>
+            <text class="node-title" x="510" y="466">Internal ProviderHost</text>
+            <text class="node-sub" x="510" y="485">factory runner</text>
             <text class="node-sub" x="510" y="502">state namespaces</text>
             <text class="node-sub" x="510" y="519">probes/assets</text>
 
@@ -479,13 +480,13 @@
 
             <rect class="node control" x="765" y="88" width="220" height="78"></rect>
             <text class="node-title" x="785" y="116">App Composition</text>
-            <text class="node-sub" x="785" y="135">boot selected profile</text>
+            <text class="node-sub" x="785" y="135">boot deployment config</text>
             <text class="node-sub" x="785" y="151">wire provider ports</text>
 
             <rect class="node control" x="765" y="198" width="220" height="78"></rect>
-            <text class="node-title" x="785" y="226">Admission + Policy</text>
-            <text class="node-sub" x="785" y="245">mutate then validate</text>
-            <text class="node-sub" x="785" y="261">Cedar-style checks</text>
+            <text class="node-title" x="785" y="226">Admission Resolver</text>
+            <text class="node-sub" x="785" y="245">proposal to plan</text>
+            <text class="node-sub" x="785" y="261">policy checks</text>
 
             <rect class="node control" x="765" y="310" width="100" height="78"></rect>
             <text class="node-title" x="785" y="338">Task</text>
@@ -697,7 +698,7 @@
               <div class="lane-name">2. Build package</div>
               <div class="step edge span-2"><b>Scaffold</b>Create manifest, package metadata, tests, and examples.</div>
               <div class="step provider span-3"><b>Implement</b>Provider factory, probes, assets, templates, or bindings.</div>
-              <div class="step provider span-2"><b>Defaults</b>Declare profile defaults by provider id.</div>
+              <div class="step provider span-2"><b>Defaults</b>Declare app config or template defaults.</div>
               <div class="step provider span-2"><b>Relations</b>Declare required parts and compatibility.</div>
               <div class="step audit span-3"><b>Evidence</b>Keep WPM binding and dependency proof inputs with the package.</div>
             </div>
@@ -714,7 +715,7 @@
               <div class="lane-name">4. Install or publish</div>
               <div class="step agent span-2"><b>Trust decision</b>Operator reviews source, package, evidence, and blast radius.</div>
               <div class="step edge span-2"><b>Pin</b>WPM installs the package and records host evidence.</div>
-              <div class="step provider span-3"><b>Provider set</b>Trusted distribution exposes manifests and modules at app boot.</div>
+              <div class="step provider span-3"><b>ProviderRegistry</b>Trusted distribution registers packages at app boot.</div>
               <div class="step audit span-2"><b>Record</b>Install receipts and redacted diagnostics become audit evidence.</div>
               <div class="empty span-3"></div>
             </div>
@@ -722,9 +723,9 @@
             <div class="lane">
               <div class="lane-name">5. Consume at runtime</div>
               <div class="step provider span-3"><b>Catalog graph</b>Provider, template, defaults, compatibility, and availability appear together.</div>
-              <div class="step control span-3"><b>Admission</b>Profiles and proposals resolve against the updated graph.</div>
-              <div class="step worker span-3"><b>Provider Host</b>Factories create runtime ports only after graph and policy pass.</div>
-              <div class="step agent span-3"><b>User-facing UX</b>Agent can discover and select the new provider through catalog/profile flows.</div>
+              <div class="step control span-3"><b>Admission Resolver</b>Templates and proposals resolve against the updated graph.</div>
+              <div class="step worker span-3"><b>Factory runner</b>Factories create runtime ports only after graph and policy pass.</div>
+              <div class="step agent span-3"><b>User-facing UX</b>Agent can discover and select the new provider through catalog/template/session flows.</div>
             </div>
           </div>
         </div>
@@ -745,7 +746,7 @@
           <div class="lifecycle" aria-label="GLA lifecycle swimlane diagram">
             <div class="lane">
               <div class="lane-name">0. Precondition</div>
-              <div class="step provider span-2"><b>Provider profile</b>Select defaults and config overlays.</div>
+              <div class="step provider span-2"><b>Deployment config</b>Select app providers and boot config.</div>
               <div class="step edge span-2"><b>Install evidence</b>WPM receipts and probes prove dependencies.</div>
               <div class="step control span-3"><b>Enroll recipient</b>Identity/Auth binds credential to recipient.</div>
               <div class="empty span-2"></div>
@@ -765,7 +766,7 @@
               <div class="lane-name">2. Propose</div>
               <div class="step agent span-3"><b>Assemble</b>Agent submits a concrete session proposal or dry-run.</div>
               <div class="step provider span-2"><b>Resolve graph</b>Template defaults pick provider subgraph.</div>
-              <div class="step control span-3"><b>Admission</b>Mutate defaults, validate policy, compatibility, config.</div>
+              <div class="step control span-3"><b>Admission Resolver</b>Mutate defaults, validate policy, compatibility, config.</div>
               <div class="step danger span-2"><b>Fail closed</b>Unknown, unavailable, or incompatible nodes reject.</div>
               <div class="empty span-2"></div>
             </div>
@@ -773,7 +774,7 @@
             <div class="lane">
               <div class="lane-name">3. Provision</div>
               <div class="empty span-2"></div>
-              <div class="step provider span-2"><b>Provider Host</b>Create selected runtime ports from factories.</div>
+              <div class="step provider span-2"><b>Factory runner</b>Create selected runtime ports from factories.</div>
               <div class="step control span-2"><b>Session</b>Create session aggregate and capability lineage.</div>
               <div class="step worker span-3"><b>Worker</b>Launcher spawns capsule with workspace and connector.</div>
               <div class="step audit span-3"><b>Evidence</b>Audit records decisions, redacted diagnostics, state.</div>
@@ -843,22 +844,24 @@
           <article class="note">
             <h3>Provider defaults are ordinary packages</h3>
             <p>
-              Defaults live in a selected provider profile inside a trusted provider set. Generic app composition
-              receives provider ids and config; it does not hard-code the reference default choices.
+              App defaults live in AppDeploymentConfig, and capsule defaults live in CapsuleTemplate packages.
+              Generic app composition receives provider ids and config; it does not hard-code the reference default
+              choices.
             </p>
           </article>
           <article class="note">
             <h3>Provider graph is the read model</h3>
             <p>
               Catalog, admission, doctor, and CLI/schema output consume projections of the same graph:
-              manifests, profiles, compatibility, WPM evidence, probes, config schemas, and skills.
+              manifests, deployment config, capsule templates, compatibility, WPM evidence, probes, config schemas,
+              and skills.
             </p>
           </article>
           <article class="note">
-            <h3>Provider Host owns runtime factories</h3>
+            <h3>ProviderRegistry owns provider registration</h3>
             <p>
-              Trusted provider modules register factories at boot. Runtime agents can inspect and consume the
-              result, but cannot register executable provider code.
+              Trusted provider modules register at boot. ProviderHost is internal factory machinery; runtime agents
+              can inspect and consume the result, but cannot register executable provider code.
             </p>
           </article>
           <article class="note">

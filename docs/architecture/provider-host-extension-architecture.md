@@ -1,10 +1,15 @@
 # Provider Host and Layer Migration Architecture
 
-> **Status:** architecture addendum and implemented Provider Host target for the migrated runtime families.
-> **Scope:** make the provider-extension model in `docs/02-provider-and-extension-model.md` concrete in code:
-> generic app composition consumes a trusted provider set/profile at boot, Provider Host owns registered provider
-> metadata and runtime creation, and the reference build is only one explicit distribution entrypoint. This document
-> does not create a public plugin ABI, dynamic hot-loading, marketplace resolution, or a new auth gateway.
+> **Status:** historical migration addendum. `ProviderHost` remains an internal factory runner used by current
+> implementation mechanics, but GLA-110 replaces it as a public target architecture noun with `ProviderRegistry`,
+> `AppDeploymentConfig`, `CapsuleTemplate`/`AssemblySpec`, `CapabilityCatalog`, and `Admission Resolver`.
+> Provider set/profile wording below describes the pre-refactor migration path or compatibility boundary, not the
+> target model for new docs or APIs.
+> **Scope:** record how the provider-extension model in `docs/02-provider-and-extension-model.md` first became
+> concrete in code: generic app composition consumed a trusted provider set/profile at boot, Provider Host owned
+> registered provider metadata and runtime creation, and the reference build was one explicit distribution
+> entrypoint. This document does not create a public plugin ABI, dynamic hot-loading, marketplace resolution, or a new
+> auth gateway.
 > The graph/default-package direction for making this horizontally extensible is recorded in
 > `docs/architecture/provider-graph-defaults-and-extension-plan.md`.
 
@@ -66,10 +71,11 @@ The first migrations should be auth, then the capsule runtime families, then cha
 uses the same manifest/dependency evidence vocabulary, but it must not become a second access gateway or a second
 auth decision point.
 
-## 3. Provider Host contract
+## 3. Internal ProviderHost contract
 
-The Provider Host is an internal, trusted install-time mechanism. Providers are code the operator chose to
-install. The runtime agent can read and consume the resulting registry; it cannot register providers.
+The ProviderHost is an internal, trusted install-time mechanism behind the target `ProviderRegistry`. Providers are
+code the operator chose to install. The runtime agent can read and consume registry/catalog projections; it cannot
+register providers.
 
 ```ts
 export type ProviderId = string;
@@ -126,7 +132,11 @@ The TypeScript names may continue to refine, but the contract boundaries are not
 - Core, gateway, session, identity, route, completion, and worker packages continue to depend on kernel ports and
   provider-neutral descriptors only.
 
-## 4. Composition model
+## 4. Historical Composition Model
+
+This section records the compatibility model that GLA-110 is retiring. New target architecture should describe the
+same responsibilities through `ProviderRegistry`, `AppDeploymentConfig`, `CapsuleTemplate`/`AssemblySpec`,
+`CapabilityCatalog`, and `Admission Resolver`.
 
 Provider modules are loaded from a trusted **provider set** selected at build/install time. A provider set is the
 operator/distribution-owned bundle of provider modules plus a selected profile:

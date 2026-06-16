@@ -35,6 +35,7 @@ describe("provider runtime consumption UX documentation", () => {
       "defaultSource",
       "compatible providers",
       "schema",
+      "gla schema session create",
       "skill",
       "gla session create ... --dry-run",
       "gla session create ...",
@@ -83,7 +84,8 @@ describe("provider runtime consumption UX documentation", () => {
   it("documents write restrictions as runtime constraints without authority-mode framing", () => {
     for (const requiredPhrase of [
       "write provider code",
-      "write selected provider profiles",
+      "write app deployment config",
+      "legacy provider-profile/provider-set composition",
       "write WPM receipts",
       "daemon config",
       "AuthProvider",
@@ -94,6 +96,8 @@ describe("provider runtime consumption UX documentation", () => {
       expect(doc).toContain(requiredPhrase);
     }
     expect(doc).not.toMatch(/authority modes?/i);
+    expect(doc).not.toContain("select a provider profile");
+    expect(doc).not.toContain("gla schema [session create]");
   });
 
   it("is linked from the documentation map and neighboring provider UX specs", () => {
