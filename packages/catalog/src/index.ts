@@ -1428,6 +1428,8 @@ export interface CatalogTemplateDefaults {
   ttl?: string;
   /** Part-roles the agent MAY override (docs/04 §5); a role not listed is template-FIXED. */
   openParts?: string[];
+  /** Capsule roles that must resolve to provider defaults before provisioning. */
+  requiredParts?: string[];
   /** Per open part-role, the compatible provider `use` names (`relations.compatibleWith`). */
   compatibleProviders?: Record<string, string[]>;
   /** System-derived template availability at the catalog/admission seam. */
@@ -1450,6 +1452,7 @@ export interface CatalogProviderInfo {
   dependencies: IndexedDependencyBinding[];
   provenance?: ProviderGraphProvenance;
   defaultSource?: ProviderGraphDefaultSource;
+  resolvedConfig?: Record<string, unknown>;
   config_schema?: ConfigSchema;
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
@@ -1549,6 +1552,7 @@ export function toAdmissionCatalog(
       if (t.spec.openParts !== undefined) {
         out.openParts = [...t.spec.openParts];
       }
+      out.requiredParts = Object.keys(t.spec.requiredParts);
       const compatibleProviders = deriveCompatibleProviders(t, providersByName.values());
       if (compatibleProviders !== undefined) {
         out.compatibleProviders = compatibleProviders;
@@ -3172,6 +3176,7 @@ export function toAdmissionCatalogFromProviderGraphProjection(
       if (template.manifest.spec.openParts !== undefined) {
         out.openParts = [...template.manifest.spec.openParts];
       }
+      out.requiredParts = [...template.compatibilityConstraints.requiredParts];
       if (template.compatibleProviders !== undefined) {
         out.compatibleProviders = structuredClone(template.compatibleProviders);
       }
@@ -3179,13 +3184,22 @@ export function toAdmissionCatalogFromProviderGraphProjection(
       const graphDiagnostics = catalogDiagnosticsFromProviderGraph(input, {
         template: id,
       }).filter((diagnostic) => diagnostic.code !== "graph.dependency_unavailable");
-      const templateDiagnosticRows = templateDiagnostics(template.dependencies, partBindings);
+      const templateSelfDiagnosticRows = templateDiagnostics(template.dependencies, []);
+      const partDiagnosticRows = templateDiagnostics([], partBindings);
       const graphDefects =
-        graphDiagnostics.length > 0 || hasBlockingGraphDiagnostics(templateDiagnosticRows);
-      out.available = template.available && !graphDefects;
-      out.availability = graphDefects ? "unavailable" : template.availability;
+        graphDiagnostics.length > 0 ||
+        hasBlockingGraphDiagnostics(templateSelfDiagnosticRows) ||
+        hasBlockingGraphDiagnostics(partDiagnosticRows);
+      out.available = templateSelfDiagnosticRows.length === 0 && !graphDefects;
+      out.availability = graphDefects
+        ? "unavailable"
+        : templateSelfDiagnosticRows.length > 0
+          ? "unavailable"
+          : template.availability === "degraded"
+            ? "degraded"
+            : "available";
       out.dependencies = structuredClone(template.dependencies);
-      out.diagnostics = [...templateDiagnosticRows, ...graphDiagnostics];
+      out.diagnostics = [...templateSelfDiagnosticRows, ...partDiagnosticRows, ...graphDiagnostics];
       return out;
     },
     provider(use: string): CatalogProviderInfo | undefined {
@@ -3207,6 +3221,7 @@ export function toAdmissionCatalogFromProviderGraphProjection(
       const selected = projection.providers.find((candidate) => candidate.providerId === use);
       if (selected !== undefined) {
         info.defaultSource = structuredClone(selected.defaultSource);
+        info.resolvedConfig = structuredClone(selected.config);
       }
       info.config_schema = provider.manifest.spec.config_schema ?? EMPTY_CONFIG_SCHEMA;
       if (provider.authAssurance !== undefined) {

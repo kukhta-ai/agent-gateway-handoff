@@ -23,6 +23,7 @@ import {
   type RecipientRef,
   type Ref,
   type ResolvedAssemblySpec,
+  type ResolvedCapsulePlan,
   type RuntimeHandle,
   type SecretStorePort,
   type WorkspaceHandle,
@@ -40,11 +41,13 @@ import {
   type AppProviderSet,
   createApp,
   createBridge,
+  createEnrollmentStack,
   createProvisioningBridge,
 } from "../../src/composition.js";
 
 interface FakeRecords {
   configs: Record<string, Record<string, unknown>>;
+  workspaceConfigs: Array<Record<string, unknown>>;
   serviceBindings: Record<string, boolean>;
   assetProviderIds: string[];
   defaultConfigCalls: string[];
@@ -70,6 +73,7 @@ function objectSchema(
 function fakeRecords(): FakeRecords {
   return {
     configs: {},
+    workspaceConfigs: [],
     serviceBindings: {},
     assetProviderIds: [],
     defaultConfigCalls: [],
@@ -284,6 +288,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         ctx.registerWorkspace("fake-workspace", {
           create(createCtx) {
             records.configs.workspace = createCtx.config;
+            records.workspaceConfigs.push(createCtx.config);
             return new FakeWorkspace();
           },
         }),
@@ -448,6 +453,41 @@ function fakeProviderProfile(id: string): ProviderProfileManifest {
   };
 }
 
+function fakeCapsulePlan(opts: {
+  launcherConfig?: Record<string, unknown>;
+  workspaceConfig?: Record<string, unknown>;
+}): ResolvedCapsulePlan {
+  return {
+    template: "browser-handoff",
+    providers: [
+      {
+        role: "launcher",
+        providerId: "fake-launcher",
+        config: opts.launcherConfig ?? { mode: "headless" },
+        available: true,
+        evidenceRequirements: [],
+        diagnostics: [],
+      },
+      {
+        role: "workspace",
+        providerId: "fake-workspace",
+        config: opts.workspaceConfig ?? {},
+        available: true,
+        evidenceRequirements: [],
+        diagnostics: [],
+      },
+      {
+        role: "connector",
+        providerId: "fake-connector",
+        config: {},
+        available: true,
+        evidenceRequirements: [],
+        diagnostics: [],
+      },
+    ],
+  };
+}
+
 function captureThrown(run: () => unknown): unknown {
   try {
     run();
@@ -496,6 +536,154 @@ describe("provider-set agnostic app composition", () => {
         expect.objectContaining({ part: "detector", provider: "fake-detector" }),
       ]),
     );
+  });
+
+  it("awaits async capsule provider factories during provisioning", async () => {
+    const records = fakeRecords();
+    const base = fakeProviderSet(records);
+    const providerSet: AppProviderSet = {
+      ...base,
+      modules: [
+        ...base.modules,
+        moduleFor(
+          providerManifest({
+            id: "fake-async-launcher",
+            kind: "Launcher",
+            family: "launcher",
+            summary: "fake async launcher",
+            relations: {
+              compatibleWith: {
+                entrypoints: ["fake-entrypoint"],
+                connectors: ["fake-connector"],
+              },
+            },
+          }),
+          "@fake/async-launcher",
+          (ctx) =>
+            ctx.registerLauncher("fake-async-launcher", {
+              create: async () => new FakeLauncher(),
+            }),
+        ),
+      ],
+      profile: { ...base.profile, launcher: "fake-async-launcher" },
+    };
+
+    const stack = createProvisioningBridge({
+      providerSet,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+    try {
+      const created = await stack.bridge.sessionCreate({
+        proposal: {
+          intent: "reg",
+          template: "browser-handoff",
+          recipient: "tg:user:1",
+        },
+      });
+      expect(created).toMatchObject({
+        decision: "accept",
+        state: "active",
+        capsule_plan: {
+          providers: expect.arrayContaining([
+            expect.objectContaining({ role: "launcher", providerId: "fake-async-launcher" }),
+          ]),
+        },
+      });
+    } finally {
+      await stack.close();
+    }
+  });
+
+  it("creates separate workspace providers for same provider id with different plan config", async () => {
+    const records = fakeRecords();
+    const providerSet = fakeProviderSet(records);
+    const stack = createProvisioningBridge({
+      providerSet,
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+    const spec: ResolvedAssemblySpec = {
+      apiVersion: "gla.dev/v1",
+      kind: "Assembly",
+      metadata: { intent: "workspace config cache proof" },
+      spec: {
+        template: "browser-handoff",
+        recipient: "tg:user:1" as never,
+        launcher: { use: "fake-launcher" },
+        workspace: { use: "fake-workspace" },
+      },
+      __resolved: true,
+    };
+    try {
+      await stack.lifecycle.spawn(
+        "sess_workspace_a",
+        spec,
+        fakeCapsulePlan({ workspaceConfig: { root: "/tmp/fake-a" } }),
+      );
+      await stack.lifecycle.spawn(
+        "sess_workspace_b",
+        spec,
+        fakeCapsulePlan({ workspaceConfig: { root: "/tmp/fake-b" } }),
+      );
+
+      expect(records.workspaceConfigs).toEqual([{ root: "/tmp/fake-a" }, { root: "/tmp/fake-b" }]);
+    } finally {
+      await stack.lifecycle.teardown("sess_workspace_a");
+      await stack.lifecycle.teardown("sess_workspace_b");
+      await stack.close();
+    }
+  });
+
+  it("reports provider.async_unsupported for remaining synchronous boot provider paths", () => {
+    const records = fakeRecords();
+    const base = fakeProviderSet(records);
+    const providerSet: AppProviderSet = {
+      ...base,
+      modules: [
+        ...base.modules,
+        moduleFor(
+          providerManifest({
+            id: "fake-async-auth",
+            kind: "AuthProvider",
+            family: "auth",
+            summary: "fake async auth",
+            configSchema: objectSchema({
+              rpID: { type: "string", minLength: 1 },
+              expectedOrigin: {
+                type: "array",
+                minItems: 1,
+                items: { type: "string", minLength: 1 },
+              },
+            }),
+          }),
+          "@fake/async-auth",
+          (ctx) =>
+            ctx.registerAuthProvider("fake-async-auth", {
+              create: async () => new FakeAuthProvider(),
+            }),
+        ),
+      ],
+      profile: { ...base.profile, auth: "fake-async-auth" },
+    };
+
+    const error = captureThrown(() =>
+      createEnrollmentStack({
+        providerSet,
+        expectedOrigin: "http://127.0.0.1:3000",
+        publicBaseUrl: "http://127.0.0.1:3000",
+      }),
+    );
+    expect(error).toMatchObject({
+      code: "dependency.unavailable",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.async_unsupported",
+            providerId: "fake-async-auth",
+            family: "auth",
+          }),
+        ],
+      },
+    });
   });
 
   it("does not treat public-edge WPM evidence as reachable without a template probe", () => {
@@ -687,6 +875,25 @@ describe("provider-set agnostic app composition", () => {
         id: "use-fake-entrypoint",
         for: "fake-entrypoint",
       });
+      const created = await stack.bridge.sessionCreate({
+        proposal: {
+          intent: "exercise fake provider set",
+          template: "browser-handoff",
+          recipient: "tg:user:123",
+        },
+      });
+      expect(created).toMatchObject({
+        decision: "accept",
+        state: "active",
+      });
+      const detector = stack.detector;
+      expect(detector).toBeDefined();
+      if (detector === undefined) {
+        throw new Error("expected detector to be wired");
+      }
+      for await (const _signal of detector.watch("runtime:fake" as RuntimeHandle, {})) {
+        // The fake detector does not emit; iterating is enough to force lazy Provider Host creation.
+      }
       await expect(
         stack.bridge.sessionCreate({
           proposal: {
@@ -702,7 +909,6 @@ describe("provider-set agnostic app composition", () => {
       });
       expect(stack.authModule).toBe("@fake/auth");
       expect(stack.entrypoint).toBeDefined();
-      expect(stack.detector).toBeDefined();
       await expect(stack.connector.attach("runtime:fake" as RuntimeHandle)).resolves.toMatchObject({
         type: "fake",
         provider: "fake-connector",
@@ -714,7 +920,7 @@ describe("provider-set agnostic app composition", () => {
       });
       expect(records.configs.launcher).toMatchObject({ mode: "headless" });
       expect(records.configs.workspace).toMatchObject({ root: "/tmp/fake-gla-workspace" });
-      expect(records.configs.detector).toMatchObject({ pollMs: 7 });
+      await expect.poll(() => records.configs.detector).toMatchObject({ pollMs: 7 });
       expect(records.serviceBindings.detectorReadUrl).toBe(true);
       expect(records.serviceBindings.channelIdentity).toBe(true);
       expect(records.assetProviderIds).toEqual(["fake-entrypoint"]);

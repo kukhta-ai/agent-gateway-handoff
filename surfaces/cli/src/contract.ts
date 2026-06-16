@@ -427,7 +427,16 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     ],
     repeatableFlags: ["entrypoint", "detector", "mount"],
     output: "session-create-result",
-    fields: ["decision", "dry_run", "session_id", "state", "task_id", "capsule", "connector"],
+    fields: [
+      "decision",
+      "dry_run",
+      "session_id",
+      "state",
+      "task_id",
+      "capsule_plan",
+      "capsule",
+      "connector",
+    ],
     exitCodes: [
       ExitCode.OK,
       ExitCode.USAGE,

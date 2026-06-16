@@ -94,6 +94,9 @@ function stateRoot(): string {
   scratchDirs.push(dir);
   return dir;
 }
+function referenceBindingsExcept(dependency: string) {
+  return referenceWpmDependencyBindings().filter((binding) => binding.dependency !== dependency);
+}
 afterAll(() => {
   for (const d of scratchDirs) {
     rmSync(d, { recursive: true, force: true });
@@ -442,18 +445,61 @@ describe("provisioning composition root — real `session create` + `session con
     expect(bridge.stateSnapshot()).toEqual({ tasks: [], sessions: [] });
   });
 
-  it("refuses the default host-touching launcher without WPM browser-runtime evidence", () => {
-    expect(() => createProvisioningBridge({ launcherMode: "headless" })).toThrow(
-      /launcher-process.*unavailable dependencies|browser-runtime/i,
-    );
+  it("refuses a selected host-touching launcher without WPM browser-runtime evidence", async () => {
+    const stack = createProvisioningBridge({
+      dependencyBindings: referenceBindingsExcept("browser-runtime"),
+      launcherMode: "headless",
+    });
+    try {
+      await expect(
+        stack.bridge.sessionCreate({
+          proposal: {
+            intent: "reg",
+            template: "browser-handoff",
+            recipient: "tg:user:1",
+            detectors: [{ use: "user-done" }],
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: "catalog.unavailable",
+        detail: {
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({
+              code: "graph.dependency_unavailable",
+              provider: "launcher-process",
+              dependency: "browser-runtime",
+            }),
+          ]),
+        },
+      });
+      expect(stack.bridge.stateSnapshot()).toEqual({ tasks: [], sessions: [] });
+    } finally {
+      await stack.close();
+    }
   });
 
-  it("releases daemon state lock when provider dependency validation fails during startup", async () => {
+  it("releases daemon state lock after provider dependency validation rejects admission", async () => {
     const root = stateRoot();
 
-    expect(() => createProvisioningBridge({ stateRoot: root, launcherMode: "headless" })).toThrow(
-      /launcher-process.*unavailable dependencies|browser-runtime/i,
-    );
+    const rejectedStack = createProvisioningBridge({
+      stateRoot: root,
+      dependencyBindings: referenceBindingsExcept("browser-runtime"),
+      launcherMode: "headless",
+    });
+    try {
+      await expect(
+        rejectedStack.bridge.sessionCreate({
+          proposal: {
+            intent: "reg",
+            template: "browser-handoff",
+            recipient: "tg:user:1",
+            detectors: [{ use: "user-done" }],
+          },
+        }),
+      ).rejects.toMatchObject({ code: "catalog.unavailable" });
+    } finally {
+      await rejectedStack.close();
+    }
 
     const stack = createProvisioningBridge({
       stateRoot: root,
@@ -463,43 +509,94 @@ describe("provisioning composition root — real `session create` + `session con
     await stack.close();
   });
 
-  it("fails closed when the selected connector lacks required dependency evidence", () => {
+  it("fails closed when the selected connector lacks required dependency evidence", async () => {
     const records = fakeRuntimeRecords();
     const providerHost = createReferenceProviderHost();
     for (const module of fakeProviderModules(records)) {
       providerHost.registerModule(module);
     }
 
-    expect(() =>
-      createProvisioningBridge({
-        providerHost,
-        launcherProvider: "launcher-fake",
-        workspaceProvider: "workspace-fake",
-      }),
-    ).toThrow(/connector-cdp.*unavailable dependencies|browser-runtime/i);
+    const stack = createProvisioningBridge({
+      providerHost,
+      dependencyBindings: referenceBindingsExcept("browser-runtime"),
+      launcherProvider: "launcher-fake",
+      workspaceProvider: "workspace-fake",
+      entrypointProvider: "entrypoint-fake",
+    });
+    try {
+      await expect(
+        stack.bridge.sessionCreate({
+          proposal: {
+            intent: "reg",
+            template: "browser-handoff",
+            recipient: "tg:user:1",
+            detectors: [{ use: "user-done" }],
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: "catalog.unavailable",
+        detail: {
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({
+              code: "graph.dependency_unavailable",
+              provider: "connector-cdp",
+              dependency: "browser-runtime",
+            }),
+          ]),
+        },
+      });
+      expect(stack.bridge.stateSnapshot()).toEqual({ tasks: [], sessions: [] });
+    } finally {
+      await stack.close();
+    }
   });
 
-  it("fails closed when the selected entrypoint lacks required dependency evidence", () => {
+  it("fails closed when the selected entrypoint lacks required dependency evidence", async () => {
     const records = fakeRuntimeRecords();
     const providerHost = createReferenceProviderHost();
     for (const module of fakeProviderModules(records)) {
       providerHost.registerModule(module);
     }
 
-    expect(() =>
-      createProvisioningBridge({
-        providerHost,
-        launcherProvider: "launcher-fake",
-        workspaceProvider: "workspace-fake",
-        connectorProvider: "connector-fake",
-        handoff: {
-          expectedOrigin: "http://localhost:3000",
-          publicBaseUrl: "http://localhost:3000",
-          host: "127.0.0.1",
-          port: 0,
+    const stack = createProvisioningBridge({
+      providerHost,
+      dependencyBindings: referenceBindingsExcept("human-view"),
+      launcherProvider: "launcher-fake",
+      workspaceProvider: "workspace-fake",
+      connectorProvider: "connector-fake",
+      handoff: {
+        expectedOrigin: "http://localhost:3000",
+        publicBaseUrl: "http://localhost:3000",
+        host: "127.0.0.1",
+        port: 0,
+      },
+    });
+    try {
+      await expect(
+        stack.bridge.sessionCreate({
+          proposal: {
+            intent: "reg",
+            template: "browser-handoff",
+            recipient: "tg:user:1",
+            detectors: [{ use: "user-done" }],
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: "catalog.unavailable",
+        detail: {
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({
+              code: "graph.dependency_unavailable",
+              provider: "entrypoint-novnc",
+              dependency: "human-view",
+            }),
+          ]),
         },
-      }),
-    ).toThrow(/entrypoint-novnc.*unavailable dependencies|human-view/i);
+      });
+      expect(stack.bridge.stateSnapshot()).toEqual({ tasks: [], sessions: [] });
+    } finally {
+      await stack.close();
+    }
   });
 
   it("fails closed before opening a handoff when the admitted connector cannot enforce agent-blind channel control", async () => {
@@ -647,6 +744,16 @@ describe("provisioning composition root — real `session create` + `session con
       const sessionId = (created as { session_id: string }).session_id;
       expect(created).toMatchObject({
         state: "active",
+        capsule_plan: {
+          template: "browser-handoff",
+          providers: expect.arrayContaining([
+            expect.objectContaining({ role: "launcher", providerId: "launcher-fake" }),
+            expect.objectContaining({ role: "workspace", providerId: "workspace-fake" }),
+            expect.objectContaining({ role: "connector", providerId: "connector-fake" }),
+            expect.objectContaining({ role: "entrypoint", providerId: "entrypoint-fake" }),
+            expect.objectContaining({ role: "detector", providerId: "detector-fake" }),
+          ]),
+        },
         connector: {
           type: "fake-connector",
           resourceId: "connector:fake",
@@ -659,6 +766,9 @@ describe("provisioning composition root — real `session create` + `session con
       expect(session.spec.spec.connector?.use).toBe("connector-fake");
       expect(session.spec.spec.entrypoints?.[0]?.use).toBe("entrypoint-fake");
       expect(session.spec.spec.detectors?.[0]?.use).toBe("detector-fake");
+      expect(session.capsulePlan).toEqual(created.capsule_plan);
+      expect(records.spawned).toEqual(["launcher-fake"]);
+      expect(records.realized).toEqual(["workspace-fake"]);
 
       const handoff = await stack.session.openHandoff(sessionId as never);
       await expect

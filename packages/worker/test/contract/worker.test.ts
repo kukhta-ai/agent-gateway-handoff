@@ -11,6 +11,7 @@ import type {
   MountSpec,
   PartRef,
   ResolvedAssemblySpec,
+  ResolvedCapsulePlan,
   RuntimeHandle,
   WorkspaceHandle,
   WorkspacePort,
@@ -18,6 +19,7 @@ import type {
 import { describe, expect, it } from "vitest";
 import {
   CapsuleLifecycleManager,
+  type CapsuleRecord,
   CleanupReconciler,
   SpawnerRegistry,
   WorkspaceManager,
@@ -38,6 +40,35 @@ function resolved(launcher = "launcher-process"): ResolvedAssemblySpec {
       workspace: { use: "browser-profile-temp" },
     },
     __resolved: true,
+  };
+}
+
+function capsulePlan(opts: {
+  launcher?: string;
+  launcherConfig?: Record<string, unknown>;
+  workspace?: string;
+  workspaceConfig?: Record<string, unknown>;
+}): ResolvedCapsulePlan {
+  return {
+    template: "browser-handoff",
+    providers: [
+      {
+        role: "launcher",
+        providerId: opts.launcher ?? "launcher-process",
+        config: opts.launcherConfig ?? {},
+        available: true,
+        evidenceRequirements: [],
+        diagnostics: [],
+      },
+      {
+        role: "workspace",
+        providerId: opts.workspace ?? "browser-profile-temp",
+        config: opts.workspaceConfig ?? {},
+        available: true,
+        evidenceRequirements: [],
+        diagnostics: [],
+      },
+    ],
   };
 }
 
@@ -221,6 +252,90 @@ describe("CapsuleLifecycleManager — spawn/health/stop + no-orphan on failure (
     await life.teardown("sess_never"); // unknown session — also a no-op
     expect(l.stopped.length).toBe(1);
     expect(ws.reaped.length).toBe(1);
+  });
+
+  it("tears down a launcher that was created from the resolved capsule plan but not registered", async () => {
+    const reg = new SpawnerRegistry();
+    const ws = new StubWorkspace();
+    const created: StubLauncher[] = [];
+    const life = new CapsuleLifecycleManager({
+      registry: reg,
+      workspace: new WorkspaceManager(ws),
+      launcherFor(providerId, config) {
+        const launcher = new StubLauncher({ tag: `${providerId}:${String(config.mode)}` });
+        created.push(launcher);
+        return launcher;
+      },
+    });
+
+    await life.spawn(
+      "sess_plan",
+      resolved("launcher-plan"),
+      capsulePlan({
+        launcher: "launcher-plan",
+        launcherConfig: { mode: "plan-scoped" },
+      }),
+    );
+    expect(created).toHaveLength(1);
+    expect(reg.has("launcher-plan")).toBe(false);
+
+    await life.teardown("sess_plan");
+
+    expect(created[0]?.stopped).toHaveLength(1);
+    expect(ws.reaped).toHaveLength(1);
+    expect(life.hasLive("sess_plan")).toBe(false);
+  });
+
+  it("rehydrates plan-scoped launcher and workspace providers for teardown after restart", async () => {
+    let records: CapsuleRecord[] = [];
+    const store = {
+      load: () => records,
+      save(next: CapsuleRecord[]) {
+        records = structuredClone(next);
+      },
+    };
+    const firstWorkspace = new StubWorkspace();
+    const firstLifecycle = new CapsuleLifecycleManager({
+      registry: new SpawnerRegistry(),
+      workspaceFor: () => new WorkspaceManager(firstWorkspace),
+      launcherFor(providerId, config) {
+        return new StubLauncher({ tag: `${providerId}:${String(config.mode)}` });
+      },
+      store,
+    });
+    await firstLifecycle.spawn(
+      "sess_restart",
+      resolved("launcher-plan"),
+      capsulePlan({
+        launcher: "launcher-plan",
+        launcherConfig: { mode: "restart" },
+        workspace: "workspace-plan",
+        workspaceConfig: { root: "/tmp/restart-workspace" },
+      }),
+    );
+
+    const rehydratedLaunchers: StubLauncher[] = [];
+    const rehydratedWorkspace = new StubWorkspace();
+    const restartedLifecycle = new CapsuleLifecycleManager({
+      registry: new SpawnerRegistry(),
+      launcherFor(providerId, config) {
+        const launcher = new StubLauncher({ tag: `${providerId}:${String(config.mode)}` });
+        rehydratedLaunchers.push(launcher);
+        return launcher;
+      },
+      workspaceByProviderId(providerId, config) {
+        expect(providerId).toBe("workspace-plan");
+        expect(config).toEqual({ root: "/tmp/restart-workspace" });
+        return new WorkspaceManager(rehydratedWorkspace);
+      },
+      store,
+    });
+
+    await restartedLifecycle.teardown("sess_restart");
+
+    expect(rehydratedLaunchers[0]?.stopped).toHaveLength(1);
+    expect(rehydratedWorkspace.reaped).toHaveLength(1);
+    expect(restartedLifecycle.hasLive("sess_restart")).toBe(false);
   });
 });
 

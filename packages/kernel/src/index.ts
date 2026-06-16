@@ -86,6 +86,8 @@ export type {
   CompletionEnvelope,
   HandoffState,
   HandoffWindow,
+  ResolvedCapsulePlan,
+  ResolvedCapsuleProviderPlan,
   Route,
   RuntimeHandle,
   Session,

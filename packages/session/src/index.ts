@@ -33,6 +33,7 @@ import {
   type RecipientRef,
   type Ref,
   type ResolvedAssemblySpec,
+  type ResolvedCapsulePlan,
   type Route,
   type RuntimeHandle,
   SESSION_TERMINAL,
@@ -107,7 +108,11 @@ export interface SpawnedCapsuleHandles {
  * exists (for `connector`'s conflict check). Injected — the session imports no adapter.
  */
 export interface CapsuleWorkerPort {
-  spawn(sessionId: string, spec: ResolvedAssemblySpec): Promise<SpawnedCapsuleHandles>;
+  spawn(
+    sessionId: string,
+    spec: ResolvedAssemblySpec,
+    capsulePlan: ResolvedCapsulePlan,
+  ): Promise<SpawnedCapsuleHandles>;
   teardown(sessionId: string): Promise<void>;
   hasLive(sessionId: string): boolean;
   /** The live runtime handle for a session (so `connector` can re-attach), or undefined. */
@@ -151,7 +156,10 @@ export interface ProvisionDeps {
    * Select the connector port for this session's immutable assembly. The session stays provider-neutral: app
    * decides how a `PartRef.use` maps to a concrete Provider Host port. When omitted, {@link connector} is used.
    */
-  connectorFor?: (spec: ResolvedAssemblySpec) => SessionConnectorPort;
+  connectorFor?: (
+    capsulePlan: ResolvedCapsulePlan,
+    spec: ResolvedAssemblySpec,
+  ) => SessionConnectorPort;
   /**
    * Resolve the **task/session capability id** the connector descends from (for the lineage-revocation
    * cascade — revoking the task cap revokes the connector). Called with the session id AND its task id
@@ -245,7 +253,10 @@ export interface HandoffDeps {
    * Select the human-entrypoint port for this session's immutable assembly. The session does not inspect provider
    * ids; app maps the admitted part reference to a Provider Host port. When omitted, {@link entrypoint} is used.
    */
-  entrypointFor?: (spec: ResolvedAssemblySpec) => HandoffEntrypointPort;
+  entrypointFor?: (
+    capsulePlan: ResolvedCapsulePlan,
+    spec: ResolvedAssemblySpec,
+  ) => HandoffEntrypointPort;
   channel: HandoffChannelPort;
   /**
    * Build the public handoff link from the route path + the grant token (the gateway's `handoffLink`). Injected so
@@ -343,7 +354,10 @@ export interface CompletionDeps {
    * Select the watch-capable detector for this session's immutable assembly. Returning undefined leaves completion
    * to external delivery or TTL expiry. When omitted, {@link detector} is used.
    */
-  detectorFor?: (spec: ResolvedAssemblySpec) => SessionDetectorPort | undefined;
+  detectorFor?: (
+    capsulePlan: ResolvedCapsulePlan,
+    spec: ResolvedAssemblySpec,
+  ) => SessionDetectorPort | undefined;
   /** The params the detector watches with (the session's declared `complete_on`/`intermediate`). */
   detectorParamsFor?: (sessionId: SessionId) => Record<string, unknown>;
   /**
@@ -472,6 +486,36 @@ function defaultCapsuleId(): string {
   return `cap_${rand}${capsuleCounter.toString(36)}`;
 }
 
+function capsulePlanFromSpec(spec: ResolvedAssemblySpec): ResolvedCapsulePlan {
+  const providers: ResolvedCapsulePlan["providers"] = [];
+  const add = (
+    role: string,
+    ref: { use: string; params?: Record<string, unknown> } | undefined,
+  ): void => {
+    if (ref === undefined) {
+      return;
+    }
+    providers.push({
+      role,
+      providerId: ref.use,
+      config: structuredClone(ref.params ?? {}),
+      available: true,
+      evidenceRequirements: [],
+      diagnostics: [],
+    });
+  };
+  add("launcher", spec.spec.launcher);
+  add("workspace", spec.spec.workspace);
+  add("connector", spec.spec.connector);
+  for (const entrypoint of spec.spec.entrypoints ?? []) {
+    add("entrypoint", entrypoint);
+  }
+  for (const detector of spec.spec.detectors ?? []) {
+    add("detector", detector);
+  }
+  return { template: spec.spec.template, providers };
+}
+
 let handoffCounter = 0;
 function defaultHandoffId(): HandoffId {
   handoffCounter += 1;
@@ -550,16 +594,24 @@ export class SessionService {
    * (GLA-021). The session is created `proposed` then advanced to `issued` via the kernel reducer. The
    * `ResolvedAssemblySpec` is FROZEN (deep) so it is immutable after admission (invariant 9).
    */
-  createFromAdmitted(taskId: TaskId, resolvedSpec: ResolvedAssemblySpec): Session {
+  createFromAdmitted(
+    taskId: TaskId,
+    resolvedSpec: ResolvedAssemblySpec,
+    resolvedCapsulePlan?: ResolvedCapsulePlan,
+  ): Session {
     const id = this.newSessionId();
     const at = this.clock.now();
     const spec = deepFreeze(structuredClone(resolvedSpec)) as ResolvedAssemblySpec;
+    const capsulePlan = deepFreeze(
+      structuredClone(resolvedCapsulePlan ?? capsulePlanFromSpec(resolvedSpec)),
+    ) as ResolvedCapsulePlan;
 
     const state: SessionState = sessionTransition("proposed", "issued");
     const session: Session = {
       id,
       taskId,
       spec,
+      capsulePlan,
       state,
       createdAt: at,
       updatedAt: at,
@@ -620,7 +672,8 @@ export class SessionService {
       );
     }
     const session = this.get(id); // throws state.not_found (→ exit 5) if unknown
-    const connectorPort = deps.connectorFor?.(session.spec) ?? deps.connector;
+    const capsulePlan = session.capsulePlan ?? capsulePlanFromSpec(session.spec);
+    const connectorPort = deps.connectorFor?.(capsulePlan, session.spec) ?? deps.connector;
     if (session.state !== "issued") {
       // Provision is only legal from `issued`; a re-provision or a live session is a conflict (exit 7).
       throw glaError(
@@ -646,7 +699,7 @@ export class SessionService {
       // ── Step 2 — spawn the capsule via the worker (realize workspace + launcher + health probe).
       //    A spawn failure here is already no-orphan inside the lifecycle manager (it tears its own
       //    partial capsule down); we still compensate the connector cap below.
-      spawned = await deps.worker.spawn(id, session.spec);
+      spawned = await deps.worker.spawn(id, session.spec, capsulePlan);
 
       // ── Step 3 — attach the connector: resolve the provider resource, bind the agent-blind secret_ref, attach.
       const probe = await connectorPort.attach(spawned.runtime);
@@ -742,7 +795,8 @@ export class SessionService {
         },
       );
     }
-    const connectorPort = deps.connectorFor?.(session.spec) ?? deps.connector;
+    const capsulePlan = session.capsulePlan ?? capsulePlanFromSpec(session.spec);
+    const connectorPort = deps.connectorFor?.(capsulePlan, session.spec) ?? deps.connector;
     const connector = await connectorPort.attach(runtime);
     return {
       session_id: id,
@@ -854,7 +908,8 @@ export class SessionService {
       grant = await deps.capability.mintSessionGrant(mintReq);
 
       // ── Step 2 — resolve the capsule's human entrypoint + PROGRAM the grant-bound route (no partial route).
-      const entrypointPort = deps.entrypointFor?.(session.spec) ?? deps.entrypoint;
+      const capsulePlan = session.capsulePlan ?? capsulePlanFromSpec(session.spec);
+      const entrypointPort = deps.entrypointFor?.(capsulePlan, session.spec) ?? deps.entrypoint;
       const entry = await entrypointPort.open(session.runtime);
       const route = await deps.route.program(
         { id: handoffId, sessionId },
@@ -1078,7 +1133,12 @@ export class SessionService {
     const deps = this.completionDeps;
     const session = this.sessions.get(sessionId);
     const detector =
-      session !== undefined ? (deps?.detectorFor?.(session.spec) ?? deps?.detector) : undefined;
+      session !== undefined
+        ? (deps?.detectorFor?.(
+            session.capsulePlan ?? capsulePlanFromSpec(session.spec),
+            session.spec,
+          ) ?? deps?.detector)
+        : undefined;
     if (detector === undefined) {
       return; // no detector wired — completion is delivered externally (or the window TTL-expires).
     }
