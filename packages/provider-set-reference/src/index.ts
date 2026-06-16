@@ -62,7 +62,7 @@ import type {
 } from "@gla/kernel";
 import { EMPTY_CONFIG_SCHEMA } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
-import { ProviderHost } from "@gla/provider-host";
+import { ProviderHost, ProviderRegistry } from "@gla/provider-host";
 import type {
   CreateProviderOptions,
   GlaProviderModule,
@@ -71,6 +71,7 @@ import type {
   ProviderId,
   ProviderKvStore,
   ProviderRegistrationContext,
+  ProviderRegistryOptions,
   ProviderStateRoot,
 } from "@gla/provider-host";
 import { WORKSPACE_PROFILE_MODULE, WorkspaceProfileAdapter } from "@gla/workspace-profile";
@@ -868,6 +869,13 @@ export function referenceProviderModuleForProviderId(providerId: ProviderId): st
 /** Build the trusted reference Provider Host from today's in-tree provider modules. */
 export function createReferenceProviderHost(opts: ProviderHostOptions = {}): ProviderHost {
   return new ProviderHost(opts).registerModules(referenceProviderModules);
+}
+
+/** Build and seal the trusted reference Provider Registry from today's in-tree provider modules. */
+export function createReferenceProviderRegistry(
+  opts: ProviderRegistryOptions = {},
+): ProviderRegistry {
+  return ProviderRegistry.fromProviderModules(referenceProviderModules, opts);
 }
 
 /** Create a reference AuthProviderPort through Provider Host. */

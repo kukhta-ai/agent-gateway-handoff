@@ -9,6 +9,8 @@ import type {
   Probe,
   ProbeResult,
   ProviderManifest,
+  TemplateManifest,
+  TemplatePackageManifest,
 } from "@gla/catalog";
 import {
   type AgentConnectorPort,
@@ -62,9 +64,12 @@ export interface ProviderPortByFamily {
 /** Machine-readable provider-host diagnostic codes. */
 export type ProviderHostDiagnosticCode =
   | "provider.duplicate"
+  | "provider.duplicate_id_version_pair"
+  | "provider.duplicate_template"
   | "provider.unknown"
   | "provider.unsupported_family"
   | "provider.family_mismatch"
+  | "provider.compatibility_invalid"
   | "provider.config_invalid"
   | "provider.schema_invalid"
   | "provider.dependency_unavailable"
@@ -74,7 +79,8 @@ export type ProviderHostDiagnosticCode =
   | "provider.service_missing"
   | "provider.state_unavailable"
   | "provider.state_namespace"
-  | "provider.async_unsupported";
+  | "provider.async_unsupported"
+  | "provider.registry_sealed";
 
 /** A redacted, stable diagnostic suitable for operator and agent-facing surfaces. */
 export interface ProviderHostDiagnostic {
@@ -331,6 +337,44 @@ export interface ProviderDescriptor {
   readonly stateSchema?: ResolvedProviderStateSchema;
 }
 
+/** Provider-package evidence retained by the boot registry read model. */
+export interface ProviderRegistryPackageEvidence {
+  /** Stable package or distribution identity that supplied this registry entry. */
+  readonly moduleId: string;
+  /** Entry kind within the package. */
+  readonly kind: "provider-module" | "template-package" | "template";
+}
+
+/** Probe metadata exposed without executing provider code. */
+export interface ProviderRegistryProbeMetadata {
+  /** Manifest probe name, when declared. */
+  readonly name: string;
+  /** Whether a trusted provider module registered an executable probe for this name. */
+  readonly registered: boolean;
+  /** Catalog sync projections treat async probes as unavailable; provider creation can still await them. */
+  readonly syncProjection: "available-or-degraded" | "unavailable-if-async";
+}
+
+/** Boot-time registry read model for executable provider packages. */
+export interface ProviderRegistryEntry {
+  readonly providerId: ProviderId;
+  readonly family: RuntimeProviderFamily;
+  readonly version: string;
+  readonly manifest: ProviderManifest;
+  readonly factoryAvailable: boolean;
+  readonly probe?: ProviderRegistryProbeMetadata;
+  readonly packageEvidence: ProviderRegistryPackageEvidence;
+  readonly stateSchema?: ResolvedProviderStateSchema;
+}
+
+/** Boot-time registry read model for capsule template packages. */
+export interface ProviderRegistryTemplateEntry {
+  readonly templateId: string;
+  readonly version: string;
+  readonly manifest: TemplateManifest;
+  readonly packageEvidence: ProviderRegistryPackageEvidence;
+}
+
 /** Registration surface exposed only to trusted provider modules. */
 export interface ProviderRegistrationContext {
   registerAuthProvider(id: ProviderId, factory: ProviderFactory<AuthProviderPort>): void;
@@ -353,6 +397,9 @@ export interface ProviderHostOptions {
   /** State backend used to allocate opaque provider-owned namespaces. */
   stateRoot?: ProviderStateRoot;
 }
+
+/** Construction options for a Provider Registry instance. */
+export interface ProviderRegistryOptions extends ProviderHostOptions {}
 
 /** Per-provider creation inputs supplied by the app composition root after provider selection. */
 export interface CreateProviderOptions {
@@ -379,6 +426,27 @@ const SUPPORTED_FAMILIES: ReadonlySet<string> = new Set<RuntimeProviderFamily>([
   "detector",
   "channel",
   "secret-store",
+]);
+
+const COMPATIBILITY_RELATION_KEYS: ReadonlySet<string> = new Set([
+  "auth",
+  "auths",
+  "launcher",
+  "launchers",
+  "entrypoint",
+  "entrypoints",
+  "connector",
+  "connectors",
+  "workspace",
+  "workspaces",
+  "detector",
+  "detectors",
+  "channel",
+  "channels",
+  "secret-store",
+  "secret-stores",
+  "secretStores",
+  "templates",
 ]);
 
 function factoryMap(): Map<RuntimeProviderFamily, Map<ProviderId, ProviderFactory<unknown>>> {
@@ -533,12 +601,17 @@ function normalizeProviderStateSchema(
 
 function toGlaError(diagnostic: ProviderHostDiagnostic): GlaError {
   const code =
-    diagnostic.code === "provider.duplicate" || diagnostic.code === "provider.family_mismatch"
+    diagnostic.code === "provider.duplicate" ||
+    diagnostic.code === "provider.duplicate_id_version_pair" ||
+    diagnostic.code === "provider.duplicate_template" ||
+    diagnostic.code === "provider.family_mismatch" ||
+    diagnostic.code === "provider.registry_sealed"
       ? "state.conflict"
       : diagnostic.code === "provider.unknown" || diagnostic.code === "provider.unsupported_family"
         ? "catalog.unknown"
         : diagnostic.code === "provider.config_invalid" ||
-            diagnostic.code === "provider.schema_invalid"
+            diagnostic.code === "provider.schema_invalid" ||
+            diagnostic.code === "provider.compatibility_invalid"
           ? "policy.denied"
           : "dependency.unavailable";
   return {
@@ -562,6 +635,10 @@ function throwDiagnostic(diagnostic: ProviderHostDiagnostic): never {
   throw glaError(err.code, err.message, {
     ...opts,
   });
+}
+
+function manifestVersion(manifest: ProviderManifest | TemplateManifest): string {
+  return manifest.metadata.version ?? "";
 }
 
 function dependencyBindingLookup(
@@ -1151,6 +1228,260 @@ export class ProviderHost {
   }
 
   private fail(diagnostic: ProviderHostDiagnostic): never {
+    this.emit(diagnostic);
+    throwDiagnostic(diagnostic);
+  }
+}
+
+/**
+ * Boot-time executable provider registry.
+ *
+ * ProviderRegistry is the caller-facing boundary for trusted provider packages: registration happens
+ * during boot/install preparation, the registry is sealed before runtime admission, and app/catalog
+ * composition read provider metadata, probes, factories, and package evidence from this object instead
+ * of reading provider-set modules directly.
+ */
+export class ProviderRegistry extends ProviderHost {
+  private sealed = false;
+  private readonly templates = new Map<string, TemplateManifest>();
+  private readonly templatePackageEvidence = new Map<string, ProviderRegistryPackageEvidence>();
+
+  constructor(opts: ProviderRegistryOptions = {}) {
+    super(opts);
+  }
+
+  /** Build and seal a registry from trusted provider modules. */
+  static fromProviderModules(
+    modules: readonly GlaProviderModule[],
+    opts: ProviderRegistryOptions = {},
+  ): ProviderRegistry {
+    return new ProviderRegistry(opts).registerModules(modules).seal();
+  }
+
+  /** Whether this registry rejects further provider or template registrations. */
+  isSealed(): boolean {
+    return this.sealed;
+  }
+
+  /** Seal the registry so runtime admission/provisioning cannot mutate executable provider code. */
+  seal(): this {
+    this.sealed = true;
+    return this;
+  }
+
+  /** Register one trusted provider module before sealing. */
+  override registerModule(module: GlaProviderModule): this {
+    this.assertOpen("provider module");
+    this.preflightProviderModules([module]);
+    super.registerModule(module);
+    return this;
+  }
+
+  /** Register a batch of trusted provider modules before sealing. */
+  override registerModules(modules: readonly GlaProviderModule[]): this {
+    this.assertOpen("provider modules");
+    this.preflightProviderModules(modules);
+    for (const module of modules) {
+      super.registerModule(module);
+    }
+    return this;
+  }
+
+  /** Register one capsule template manifest before sealing. */
+  registerTemplate(
+    template: TemplateManifest,
+    packageEvidence: ProviderRegistryPackageEvidence = {
+      kind: "template",
+      moduleId: template.metadata.name,
+    },
+  ): this {
+    return this.registerTemplates([template], packageEvidence);
+  }
+
+  /** Register capsule template manifests before sealing, failing closed on duplicate template ids. */
+  registerTemplates(
+    templates: readonly TemplateManifest[],
+    packageEvidence: ProviderRegistryPackageEvidence,
+  ): this {
+    this.assertOpen("template manifests");
+    this.preflightTemplates(templates, packageEvidence);
+    for (const template of templates) {
+      this.templates.set(template.metadata.name, structuredClone(template));
+      this.templatePackageEvidence.set(template.metadata.name, { ...packageEvidence });
+    }
+    return this;
+  }
+
+  /** Register the template manifests from one TemplatePackage before sealing. */
+  registerTemplatePackage(templatePackage: TemplatePackageManifest): this {
+    return this.registerTemplates(templatePackage.spec.templates, {
+      kind: "template-package",
+      moduleId: templatePackage.metadata.name,
+    });
+  }
+
+  /** Registered executable provider entries with package evidence and factory/probe metadata. */
+  providerEntries(): ProviderRegistryEntry[] {
+    const probeRegistry = this.providerProbeRegistry();
+    return this.providerDescriptors().map((descriptor) => {
+      const probeName = descriptor.manifest.spec.probe;
+      const entry: Omit<ProviderRegistryEntry, "probe"> = {
+        providerId: descriptor.providerId,
+        family: descriptor.manifest.spec.family as RuntimeProviderFamily,
+        version: descriptor.manifest.metadata.version,
+        manifest: descriptor.manifest,
+        factoryAvailable: this.providerIds(
+          descriptor.manifest.spec.family as RuntimeProviderFamily,
+        ).includes(descriptor.providerId),
+        packageEvidence: {
+          kind: "provider-module" as const,
+          moduleId: descriptor.moduleId,
+        },
+        ...(descriptor.stateSchema !== undefined ? { stateSchema: descriptor.stateSchema } : {}),
+      };
+      return probeName === undefined
+        ? entry
+        : {
+            ...entry,
+            probe: {
+              name: probeName,
+              registered: probeRegistry[probeName] !== undefined,
+              syncProjection: "unavailable-if-async",
+            },
+          };
+    });
+  }
+
+  /** Registered capsule template entries with package evidence. */
+  templateEntries(): ProviderRegistryTemplateEntry[] {
+    return [...this.templates.values()].map((template) => ({
+      templateId: template.metadata.name,
+      version: template.metadata.version,
+      manifest: structuredClone(template),
+      packageEvidence: this.templatePackageEvidence.get(template.metadata.name) ?? {
+        kind: "template",
+        moduleId: template.metadata.name,
+      },
+    }));
+  }
+
+  /** Registered capsule template manifests in registration order. */
+  templateManifests(): TemplateManifest[] {
+    return this.templateEntries().map((entry) => entry.manifest);
+  }
+
+  private assertOpen(subject: string): void {
+    if (!this.sealed) {
+      return;
+    }
+    this.registryFail({
+      code: "provider.registry_sealed",
+      message: `provider registry is sealed; cannot register ${subject}`,
+      detail: { subject },
+    });
+  }
+
+  private preflightProviderModules(modules: readonly GlaProviderModule[]): void {
+    const seenIds = new Map<string, { version: string; moduleId: string }>();
+    for (const descriptor of this.providerDescriptors()) {
+      seenIds.set(descriptor.providerId, {
+        version: descriptor.manifest.metadata.version,
+        moduleId: descriptor.moduleId,
+      });
+    }
+    for (const module of modules) {
+      const providerId = module.manifest.metadata.name;
+      const version = manifestVersion(module.manifest);
+      const moduleId = module.moduleId ?? providerId;
+      this.validateProviderRelations(module.manifest, moduleId);
+      const existing = seenIds.get(providerId);
+      if (existing !== undefined) {
+        this.registryFail({
+          code:
+            existing.version === version
+              ? "provider.duplicate_id_version_pair"
+              : "provider.duplicate",
+          providerId,
+          family: module.manifest.spec.family,
+          message:
+            existing.version === version
+              ? `provider "${providerId}" version "${version}" is already registered`
+              : `provider "${providerId}" is already registered with version "${existing.version}"`,
+          detail: {
+            duplicateKind: existing.version === version ? "provider-id-version" : "provider-id",
+            version,
+            existingVersion: existing.version,
+            moduleId,
+            existingModuleId: existing.moduleId,
+          },
+        });
+      }
+      seenIds.set(providerId, { version, moduleId });
+    }
+  }
+
+  private validateProviderRelations(manifest: ProviderManifest, moduleId: string): void {
+    const compatibleWith = manifest.spec.relations?.compatibleWith ?? {};
+    for (const [relationKey, ids] of Object.entries(compatibleWith)) {
+      if (!COMPATIBILITY_RELATION_KEYS.has(relationKey)) {
+        this.registryFail({
+          code: "provider.compatibility_invalid",
+          providerId: manifest.metadata.name,
+          family: manifest.spec.family,
+          message: `provider "${manifest.metadata.name}" relation "${relationKey}" is not a known compatibility relation`,
+          detail: { relationKey, moduleId },
+        });
+      }
+      if (!Array.isArray(ids) || !ids.every((id) => typeof id === "string" && id.length > 0)) {
+        this.registryFail({
+          code: "provider.compatibility_invalid",
+          providerId: manifest.metadata.name,
+          family: manifest.spec.family,
+          message: `provider "${manifest.metadata.name}" relation "${relationKey}" must be a provider/template id list`,
+          detail: { relationKey, moduleId },
+        });
+      }
+    }
+  }
+
+  private preflightTemplates(
+    templates: readonly TemplateManifest[],
+    packageEvidence: ProviderRegistryPackageEvidence,
+  ): void {
+    const seen = new Map<string, { version: string; moduleId: string }>();
+    for (const entry of this.templateEntries()) {
+      seen.set(entry.templateId, {
+        version: entry.version,
+        moduleId: entry.packageEvidence.moduleId,
+      });
+    }
+    for (const template of templates) {
+      const templateId = template.metadata.name;
+      const version = manifestVersion(template);
+      const existing = seen.get(templateId);
+      if (existing !== undefined) {
+        this.registryFail({
+          code: "provider.duplicate_template",
+          providerId: templateId,
+          family: "template",
+          message:
+            existing.version === version
+              ? `template "${templateId}" version "${version}" is already registered`
+              : `template "${templateId}" is already registered with version "${existing.version}"`,
+          detail: {
+            duplicateKind: existing.version === version ? "template-id-version" : "template-id",
+            version,
+            existingVersion: existing.version,
+            moduleId: packageEvidence.moduleId,
+            existingModuleId: existing.moduleId,
+          },
+        });
+      }
+      seen.set(templateId, { version, moduleId: packageEvidence.moduleId });
+    }
+  }
+
+  private registryFail(diagnostic: ProviderHostDiagnostic): never {
     this.emit(diagnostic);
     throwDiagnostic(diagnostic);
   }
