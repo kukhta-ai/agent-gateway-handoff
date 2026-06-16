@@ -49,13 +49,17 @@ import {
   type ChannelPort,
   type CompletionDetectorPort,
   type ConfigSchema,
+  EMPTY_CONFIG_SCHEMA,
   HmacCapabilitySigner,
   type HumanEntrypointPort,
   KERNEL_MODULE,
+  type LauncherPort,
+  type MountCapability,
   type OpaqueToken,
   type RecipientRef,
   type Ref,
   type ResolvedAssemblySpec,
+  type ResolvedCapsulePlan,
   type RuntimeHandle,
   type SessionId,
   authAssurancePolicyFromProfile,
@@ -78,6 +82,7 @@ import {
 } from "@gla/provider-host";
 import { RouteController } from "@gla/route";
 import {
+  type CapsuleWorkerPort,
   type CompletionDeps,
   type HandoffDeps,
   SessionService,
@@ -760,6 +765,7 @@ function graphProviderCreateInputs(
   family: RuntimeProviderFamily,
   providerId: ProviderId,
   fallbackConfig: Record<string, unknown> = {},
+  opts: { preferProvidedConfig?: boolean } = {},
 ): { config: Record<string, unknown>; dependencyBindings?: IndexedDependencyBinding[] } {
   const selected = selectedGraphProvider(context.graph, providerId, family);
   const fact = selected ?? graphProviderFact(context.graph, providerId, family);
@@ -815,7 +821,7 @@ function graphProviderCreateInputs(
       },
     );
   }
-  const config = selected?.config ?? fallbackConfig;
+  const config = opts.preferProvidedConfig ? fallbackConfig : (selected?.config ?? fallbackConfig);
   const dependencyBindings = fact.dependencies.length > 0 ? fact.dependencies : undefined;
   return {
     config,
@@ -1120,21 +1126,239 @@ function managedAgentConnectorPort(port: AgentConnectorPort): ManagedAgentConnec
   };
 }
 
-function connectorProviderIdForSpec(spec: ResolvedAssemblySpec, fallback: ProviderId): ProviderId {
-  return spec.spec.connector?.use ?? fallback;
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableJson(entry)).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
-function entrypointProviderIdForSpec(spec: ResolvedAssemblySpec, fallback: ProviderId): ProviderId {
-  return spec.spec.entrypoints?.[0]?.use ?? fallback;
+function providerPortCacheKey(providerId: ProviderId, config: Record<string, unknown>): string {
+  return `${providerId}\0${stableJson(config)}`;
+}
+
+function lazyManagedAgentConnectorPort(
+  load: () => Promise<AgentConnectorPort>,
+): ManagedAgentConnectorPort {
+  let managed: ManagedAgentConnectorPort | undefined;
+  let loading: Promise<ManagedAgentConnectorPort> | undefined;
+  const get = async (): Promise<ManagedAgentConnectorPort> => {
+    if (managed !== undefined) {
+      return managed;
+    }
+    loading ??= load().then((port) => {
+      managed = managedAgentConnectorPort(port);
+      return managed;
+    });
+    return loading;
+  };
+  return {
+    get controlsAgentChannel() {
+      return managed?.controlsAgentChannel ?? false;
+    },
+    async attach(runtime) {
+      return (await get()).attach(runtime);
+    },
+    bindSecretRef(resourceId, secretRef) {
+      managed?.bindSecretRef(resourceId, secretRef);
+    },
+    unbindSecretRef(resourceId) {
+      managed?.unbindSecretRef(resourceId);
+    },
+    suspendByResourceId(resourceId) {
+      managed?.suspendByResourceId(resourceId);
+    },
+    resumeByResourceId(resourceId) {
+      managed?.resumeByResourceId(resourceId);
+    },
+    isSuspended(resourceIdOrProviderHandle) {
+      return managed?.isSuspended(resourceIdOrProviderHandle) ?? false;
+    },
+    liveSocketCount(resourceIdOrProviderHandle) {
+      return managed?.liveSocketCount(resourceIdOrProviderHandle) ?? 0;
+    },
+    hasBinding(resourceId) {
+      return managed?.hasBinding(resourceId) ?? false;
+    },
+    async close() {
+      await managed?.close?.();
+    },
+  };
+}
+
+function launcherTierFromManifest(
+  providerHost: ProviderHost,
+  providerId: ProviderId,
+): LauncherPort["tier"] {
+  const tier = providerHost.providerManifest(providerId)?.spec.capability.isolation_tier;
+  switch (tier) {
+    case "none":
+    case "local-process":
+    case "systemd-user":
+    case "rootless":
+    case "docker":
+    case "remote-worker":
+      return tier;
+    default:
+      return "none";
+  }
+}
+
+function launcherMountCapabilityFromManifest(
+  providerHost: ProviderHost,
+  providerId: ProviderId,
+): MountCapability {
+  const mounts = providerHost.providerManifest(providerId)?.spec.capability.mounts as
+    | { host_paths?: string[]; modes?: Array<"ro" | "rw"> }
+    | undefined;
+  if (mounts === undefined) {
+    return { file: false, directory: false, modes: [] };
+  }
+  const hostPaths = mounts.host_paths ?? [];
+  return {
+    file: hostPaths.includes("file"),
+    directory: hostPaths.includes("directory"),
+    modes: mounts.modes ?? [],
+  };
+}
+
+function lazyLauncherPort(
+  load: () => Promise<LauncherPort>,
+  metadata: { tier: LauncherPort["tier"]; mountCapability: MountCapability },
+): LauncherPort {
+  let loaded: Promise<LauncherPort> | undefined;
+  const get = () => {
+    loaded ??= load();
+    return loaded;
+  };
+  return {
+    tier: metadata.tier,
+    mountCapability: metadata.mountCapability,
+    async spawn(spec, asUid) {
+      return (await get()).spawn(spec, asUid);
+    },
+    async health(handle) {
+      return (await get()).health(handle);
+    },
+    async stop(handle) {
+      return (await get()).stop(handle);
+    },
+  };
+}
+
+function providerPlanEntry(
+  plan: ResolvedCapsulePlan,
+  role: string,
+  preferredProviderId?: ProviderId,
+): ResolvedCapsulePlan["providers"][number] | undefined {
+  if (preferredProviderId !== undefined) {
+    const preferred = plan.providers.find(
+      (provider) => provider.role === role && provider.providerId === preferredProviderId,
+    );
+    if (preferred !== undefined) {
+      return preferred;
+    }
+  }
+  return plan.providers.find((provider) => provider.role === role);
+}
+
+function capsulePlanFromSpec(spec: ResolvedAssemblySpec): ResolvedCapsulePlan {
+  const providers: ResolvedCapsulePlan["providers"] = [];
+  const add = (
+    role: string,
+    ref: { use: string; params?: Record<string, unknown> } | undefined,
+  ) => {
+    if (ref === undefined) {
+      return;
+    }
+    providers.push({
+      role,
+      providerId: ref.use,
+      config: structuredClone(ref.params ?? {}),
+      available: true,
+      evidenceRequirements: [],
+      diagnostics: [],
+    });
+  };
+  add("launcher", spec.spec.launcher);
+  add("workspace", spec.spec.workspace);
+  add("connector", spec.spec.connector);
+  for (const entrypoint of spec.spec.entrypoints ?? []) {
+    add("entrypoint", entrypoint);
+  }
+  for (const detector of spec.spec.detectors ?? []) {
+    add("detector", detector);
+  }
+  return { template: spec.spec.template, providers };
+}
+
+function providerConfigForPlan(
+  plan: ResolvedCapsulePlan,
+  role: string,
+  preferredProviderId: ProviderId,
+  fallback: Record<string, unknown>,
+): Record<string, unknown> {
+  return providerPlanEntry(plan, role, preferredProviderId)?.config ?? fallback;
+}
+
+function workspaceProviderIdForPlan(
+  plan: ResolvedCapsulePlan,
+  spec: ResolvedAssemblySpec,
+  fallback: ProviderId,
+): ProviderId {
+  return (providerPlanEntry(plan, "workspace", spec.spec.workspace?.use)?.providerId ??
+    spec.spec.workspace?.use ??
+    fallback) as ProviderId;
+}
+
+function connectorProviderIdForPlan(
+  plan: ResolvedCapsulePlan,
+  spec: ResolvedAssemblySpec,
+  fallback: ProviderId,
+): ProviderId {
+  return (providerPlanEntry(plan, "connector", spec.spec.connector?.use)?.providerId ??
+    spec.spec.connector?.use ??
+    fallback) as ProviderId;
+}
+
+function entrypointProviderIdForPlan(
+  plan: ResolvedCapsulePlan,
+  spec: ResolvedAssemblySpec,
+  fallback: ProviderId,
+): ProviderId {
+  const explicitProvider = spec.spec.entrypoints?.[0]?.use;
+  return (providerPlanEntry(plan, "entrypoint", explicitProvider)?.providerId ??
+    explicitProvider ??
+    fallback) as ProviderId;
 }
 
 function detectorProviderIdForSpec(spec: ResolvedAssemblySpec, fallback: ProviderId): ProviderId {
   const detectors = spec.spec.detectors ?? [];
+  const withParams = detectors.find((detector) => hasEntries(detector.params));
+  if (withParams !== undefined) {
+    return withParams.use;
+  }
   const explicitDefault = detectors.find((detector) => detector.use === fallback);
   if (explicitDefault !== undefined) {
     return explicitDefault.use;
   }
   return detectors[0]?.use ?? fallback;
+}
+
+function detectorProviderIdForPlan(
+  plan: ResolvedCapsulePlan,
+  spec: ResolvedAssemblySpec,
+  fallback: ProviderId,
+): ProviderId {
+  const specProvider = detectorProviderIdForSpec(spec, fallback);
+  return (providerPlanEntry(plan, "detector", specProvider)?.providerId ??
+    specProvider) as ProviderId;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1571,25 +1795,15 @@ export function createProvisioningBridge(
       "entrypoint",
       entrypointProviderId,
     );
-    const detectorBootConfig =
+    const detectorFactoryConfig = (providerId: ProviderId): Record<string, unknown> =>
       opts.handoff?.completion !== undefined
-        ? providerConfig(
-            opts.detectorProviderConfig,
-            opts.providerSet,
-            "detector",
-            detectorProviderId,
-            {
-              ...(opts.handoff.completion.pollMs !== undefined
-                ? { pollMs: opts.handoff.completion.pollMs }
-                : {}),
-            },
-          )
-        : providerConfig(
-            opts.detectorProviderConfig,
-            opts.providerSet,
-            "detector",
-            detectorProviderId,
-          );
+        ? providerConfig(opts.detectorProviderConfig, opts.providerSet, "detector", providerId, {
+            ...(opts.handoff.completion.pollMs !== undefined
+              ? { pollMs: opts.handoff.completion.pollMs }
+              : {}),
+          })
+        : providerConfig(opts.detectorProviderConfig, opts.providerSet, "detector", providerId);
+    const detectorBootConfig = detectorFactoryConfig(detectorProviderId);
     const channelBootConfig = providerConfig(
       opts.channelProviderConfig,
       opts.providerSet,
@@ -1657,38 +1871,76 @@ export function createProvisioningBridge(
     });
 
     // ── Worker plane: Provider Host creates launcher/workspace ports, then worker core receives only ports.
-    const launcherCreateInputs = graphProviderCreateInputs(
-      graphContext,
-      "launcher",
-      launcherProviderId,
-      launcherBootConfig,
-    );
-    const launcher = providerHost.createProviderSync("launcher", launcherProviderId, {
-      config: launcherCreateInputs.config,
-      ...(launcherCreateInputs.dependencyBindings !== undefined
-        ? { dependencyBindings: launcherCreateInputs.dependencyBindings }
-        : {}),
-    });
     const registry = new SpawnerRegistry();
-    registry.register(launcherProviderId, launcher, { default: true });
+    const loadLauncherProvider = async (
+      providerId: ProviderId,
+      config: Record<string, unknown>,
+    ) => {
+      const launcherCreateInputs = graphProviderCreateInputs(
+        graphContext,
+        "launcher",
+        providerId,
+        config,
+        { preferProvidedConfig: true },
+      );
+      return providerHost.createProvider("launcher", providerId, {
+        config: launcherCreateInputs.config,
+        ...(launcherCreateInputs.dependencyBindings !== undefined
+          ? { dependencyBindings: launcherCreateInputs.dependencyBindings }
+          : {}),
+      });
+    };
+    if (!registry.has(launcherProviderId)) {
+      registry.register(
+        launcherProviderId,
+        lazyLauncherPort(() => loadLauncherProvider(launcherProviderId, launcherBootConfig), {
+          tier: launcherTierFromManifest(providerHost, launcherProviderId),
+          mountCapability: launcherMountCapabilityFromManifest(providerHost, launcherProviderId),
+        }),
+        { default: true },
+      );
+    }
 
-    const workspaceCreateInputs = graphProviderCreateInputs(
-      graphContext,
-      "workspace",
-      workspaceProviderId,
-      workspaceBootConfig,
-    );
-    const workspacePort = providerHost.createProviderSync("workspace", workspaceProviderId, {
-      config: workspaceCreateInputs.config,
-      ...(workspaceCreateInputs.dependencyBindings !== undefined
-        ? { dependencyBindings: workspaceCreateInputs.dependencyBindings }
-        : {}),
-    });
-    const workspace = new WorkspaceManager(workspacePort);
+    const workspaceManagers = new Map<string, WorkspaceManager>();
+    const workspaceManagerForProvider = async (
+      providerId: ProviderId,
+      config: Record<string, unknown>,
+    ): Promise<WorkspaceManager> => {
+      const key = providerPortCacheKey(providerId, config);
+      const existing = workspaceManagers.get(key);
+      if (existing !== undefined) {
+        return existing;
+      }
+      const workspaceCreateInputs = graphProviderCreateInputs(
+        graphContext,
+        "workspace",
+        providerId,
+        config,
+        { preferProvidedConfig: true },
+      );
+      const port = await providerHost.createProvider("workspace", providerId, {
+        config: workspaceCreateInputs.config,
+        ...(workspaceCreateInputs.dependencyBindings !== undefined
+          ? { dependencyBindings: workspaceCreateInputs.dependencyBindings }
+          : {}),
+      });
+      const manager = new WorkspaceManager(port);
+      workspaceManagers.set(key, manager);
+      return manager;
+    };
     const lifecycleStore = stateSlot<CapsuleRecord[]>(state, "worker.lifecycle", []);
     const lifecycle = new CapsuleLifecycleManager({
       registry,
-      workspace,
+      launcherFor: (providerId, config) => loadLauncherProvider(providerId as ProviderId, config),
+      workspaceFor: (plan, spec) => {
+        const providerId = workspaceProviderIdForPlan(plan, spec, workspaceProviderId);
+        return workspaceManagerForProvider(
+          providerId,
+          providerConfigForPlan(plan, "workspace", providerId, workspaceBootConfig),
+        );
+      },
+      workspaceByProviderId: (providerId, config = {}) =>
+        workspaceManagerForProvider(providerId as ProviderId, config),
       ...(lifecycleStore !== undefined ? { store: lifecycleStore } : {}),
     });
 
@@ -1706,42 +1958,68 @@ export function createProvisioningBridge(
         ? { spentNonces: state.stringSet("capability.spent-enrollment-nonces") }
         : {},
     );
-    const connectorPorts = new Map<ProviderId, ManagedAgentConnectorPort>();
-    const connectorForProvider = (providerId: ProviderId): ManagedAgentConnectorPort => {
-      let port = connectorPorts.get(providerId);
+    const connectorPorts = new Map<string, ManagedAgentConnectorPort>();
+    const connectorForProvider = (
+      providerId: ProviderId,
+      config: Record<string, unknown> = {},
+    ): ManagedAgentConnectorPort => {
+      const key = providerPortCacheKey(providerId, config);
+      let port = connectorPorts.get(key);
       if (port !== undefined) {
         return port;
       }
-      const connectorCreateInputs = graphProviderCreateInputs(
-        graphContext,
-        "connector",
-        providerId,
-        providerId === connectorProviderId ? connectorBootConfig : {},
-      );
-      port = managedAgentConnectorPort(
-        providerHost.createProviderSync("connector", providerId, {
+      port = lazyManagedAgentConnectorPort(async () => {
+        const connectorCreateInputs = graphProviderCreateInputs(
+          graphContext,
+          "connector",
+          providerId,
+          config,
+          { preferProvidedConfig: true },
+        );
+        return providerHost.createProvider("connector", providerId, {
           config: connectorCreateInputs.config,
           ...(connectorCreateInputs.dependencyBindings !== undefined
             ? { dependencyBindings: connectorCreateInputs.dependencyBindings }
             : {}),
-        }),
-      );
-      connectorPorts.set(providerId, port);
+        });
+      });
+      connectorPorts.set(key, port);
       return port;
     };
-    const connector = connectorForProvider(connectorProviderId);
+    const connector = connectorForProvider(connectorProviderId, connectorBootConfig);
     // A holder so the Task service's TEARDOWN dep (Slice 7) can call the SessionService's terminal
     // `teardownSession` — the SessionService is constructed later (it needs the handoff/completion deps),
     // so the closure reads it from `.svc` (assigned once built). Avoids a forward `let` / construction cycle.
     const sessionRef: { svc?: SessionService } = {};
     const connectorProviderIdForSession = (sessionId: SessionId): ProviderId => {
-      const spec = sessionRef.svc?.get(sessionId).spec;
-      return spec !== undefined
-        ? connectorProviderIdForSpec(spec, connectorProviderId)
+      const session = sessionRef.svc?.get(sessionId);
+      return session !== undefined
+        ? connectorProviderIdForPlan(
+            session.capsulePlan ?? capsulePlanFromSpec(session.spec),
+            session.spec,
+            connectorProviderId,
+          )
         : connectorProviderId;
     };
+    const connectorProviderConfigForSession = (
+      sessionId: SessionId,
+      providerId: ProviderId,
+    ): Record<string, unknown> => {
+      const session = sessionRef.svc?.get(sessionId);
+      return session !== undefined
+        ? providerConfigForPlan(
+            session.capsulePlan ?? capsulePlanFromSpec(session.spec),
+            "connector",
+            providerId,
+            connectorBootConfig,
+          )
+        : connectorBootConfig;
+    };
     const connectorForSession = (sessionId: SessionId): ManagedAgentConnectorPort =>
-      connectorForProvider(connectorProviderIdForSession(sessionId));
+      connectorForProvider(
+        connectorProviderIdForSession(sessionId),
+        connectorProviderConfigForSession(sessionId, connectorProviderIdForSession(sessionId)),
+      );
     // ── Slice 7 — the Task service is built with its TERMINAL-teardown wiring: `task complete`/`task revoke`
     //    tear down every session under the task (via the SessionService's `teardownSession`) and revoke the
     //    task capability (which, by lineage, stops every descendant cap — the session grants + the connector —
@@ -1840,31 +2118,45 @@ export function createProvisioningBridge(
           : h.requiredAuthStrength !== undefined
             ? authAssurancePolicyFromRequiredAuthStrength(h.requiredAuthStrength)
             : undefined;
-      const entrypointPorts = new Map<ProviderId, HumanEntrypointPort>();
-      const entrypointForProvider = (providerId: ProviderId): HumanEntrypointPort => {
+      const entrypointPorts = new Map<string, HumanEntrypointPort>();
+      const entrypointForProvider = (
+        providerId: ProviderId,
+        config: Record<string, unknown> = {},
+      ): HumanEntrypointPort => {
         if (h.entrypoint !== undefined && providerId === entrypointProviderId) {
           return h.entrypoint;
         }
-        let port = entrypointPorts.get(providerId);
+        const key = providerPortCacheKey(providerId, config);
+        let port = entrypointPorts.get(key);
         if (port !== undefined) {
           return port;
         }
-        const entrypointCreateInputs = graphProviderCreateInputs(
-          graphContext,
-          "entrypoint",
-          providerId,
-          providerId === entrypointProviderId ? entrypointBootConfig : {},
-        );
-        port = providerHost.createProviderSync("entrypoint", providerId, {
-          config: entrypointCreateInputs.config,
-          ...(entrypointCreateInputs.dependencyBindings !== undefined
-            ? { dependencyBindings: entrypointCreateInputs.dependencyBindings }
-            : {}),
-        });
-        entrypointPorts.set(providerId, port);
+        let loaded: Promise<HumanEntrypointPort> | undefined;
+        const get = async (): Promise<HumanEntrypointPort> => {
+          loaded ??= (async () => {
+            const entrypointCreateInputs = graphProviderCreateInputs(
+              graphContext,
+              "entrypoint",
+              providerId,
+              config,
+              { preferProvidedConfig: true },
+            );
+            return providerHost.createProvider("entrypoint", providerId, {
+              config: entrypointCreateInputs.config,
+              ...(entrypointCreateInputs.dependencyBindings !== undefined
+                ? { dependencyBindings: entrypointCreateInputs.dependencyBindings }
+                : {}),
+            });
+          })();
+          return loaded;
+        };
+        port = {
+          open: async (runtime) => (await get()).open(runtime),
+        };
+        entrypointPorts.set(key, port);
         return port;
       };
-      entrypoint = entrypointForProvider(entrypointProviderId);
+      entrypoint = entrypointForProvider(entrypointProviderId, entrypointBootConfig);
       // The gateway is the Route controller's abstract edge AND the public step-up/WS-proxy entry. It verifies the
       // recipient-bound grant statelessly + requires the bound identity (step-up) before forwarding to the capsule.
       gateway = new AccessGateway({
@@ -1914,8 +2206,16 @@ export function createProvisioningBridge(
           unmount: (windowId) => (route ? route.unmount(windowId) : Promise.resolve()),
         },
         entrypoint,
-        entrypointFor: (spec) =>
-          entrypointForProvider(entrypointProviderIdForSpec(spec, entrypointProviderId)),
+        entrypointFor: (plan, spec) =>
+          entrypointForProvider(
+            entrypointProviderIdForPlan(plan, spec, entrypointProviderId),
+            providerConfigForPlan(
+              plan,
+              "entrypoint",
+              entrypointProviderIdForPlan(plan, spec, entrypointProviderId),
+              entrypointBootConfig,
+            ),
+          ),
         channel,
         // Build the recipient-bound handoff link from the route path + the grant token (the gateway's helper).
         buildLink: (path, token) => AccessGateway.handoffLink(h.publicBaseUrl, path, token),
@@ -1944,47 +2244,69 @@ export function createProvisioningBridge(
       if (h.completion !== undefined) {
         const c = h.completion;
         const completionSvc = new CompletionService();
-        const detectorPorts = new Map<ProviderId, CompletionDetectorPort>();
-        const detectorForProvider = (providerId: ProviderId): CompletionDetectorPort => {
-          let port = detectorPorts.get(providerId);
+        const detectorPorts = new Map<string, CompletionDetectorPort>();
+        const detectorForProvider = (
+          providerId: ProviderId,
+          config: Record<string, unknown> = {},
+        ): CompletionDetectorPort => {
+          const key = providerPortCacheKey(providerId, config);
+          let port = detectorPorts.get(key);
           if (port !== undefined) {
             return port;
           }
-          const detectorCreateInputs = graphProviderCreateInputs(
-            graphContext,
-            "detector",
-            providerId,
-            providerId === detectorProviderId ? detectorBootConfig : {},
-          );
-          const detectorServiceBindings = providerServiceBindings(
-            opts.providerSet,
-            "detector",
-            providerId,
-            {
-              ...(c.readUrl !== undefined ? { readUrl: c.readUrl } : {}),
+          let loaded: Promise<CompletionDetectorPort> | undefined;
+          const get = async (): Promise<CompletionDetectorPort> => {
+            loaded ??= (async () => {
+              const detectorCreateInputs = graphProviderCreateInputs(
+                graphContext,
+                "detector",
+                providerId,
+                config,
+                { preferProvidedConfig: true },
+              );
+              const detectorServiceBindings = providerServiceBindings(
+                opts.providerSet,
+                "detector",
+                providerId,
+                {
+                  ...(c.readUrl !== undefined ? { readUrl: c.readUrl } : {}),
+                },
+              );
+              const detectorServices =
+                Object.keys(detectorServiceBindings).length > 0
+                  ? providerServices(detectorServiceBindings)
+                  : undefined;
+              return providerHost.createProvider("detector", providerId, {
+                config: detectorCreateInputs.config,
+                ...(detectorCreateInputs.dependencyBindings !== undefined
+                  ? { dependencyBindings: detectorCreateInputs.dependencyBindings }
+                  : {}),
+                ...(detectorServices !== undefined ? { services: detectorServices } : {}),
+              });
+            })();
+            return loaded;
+          };
+          port = {
+            contract:
+              providerHost.providerManifest(providerId)?.spec.config_schema ?? EMPTY_CONFIG_SCHEMA,
+            async *watch(runtime, params) {
+              yield* (await get()).watch(runtime, params);
             },
-          );
-          const detectorServices =
-            Object.keys(detectorServiceBindings).length > 0
-              ? providerServices(detectorServiceBindings)
-              : undefined;
-          port = providerHost.createProviderSync("detector", providerId, {
-            config: detectorCreateInputs.config,
-            ...(detectorCreateInputs.dependencyBindings !== undefined
-              ? { dependencyBindings: detectorCreateInputs.dependencyBindings }
-              : {}),
-            ...(detectorServices !== undefined ? { services: detectorServices } : {}),
-          });
-          detectorPorts.set(providerId, port);
+          };
+          detectorPorts.set(key, port);
           return port;
         };
         const detectorProviderIdForSession = (sessionId: SessionId): ProviderId => {
-          const spec = sessionRef.svc?.get(sessionId).spec;
-          return spec !== undefined
-            ? detectorProviderIdForSpec(spec, detectorProviderId)
+          const session = sessionRef.svc?.get(sessionId);
+          return session !== undefined
+            ? detectorProviderIdForPlan(
+                session.capsulePlan ?? capsulePlanFromSpec(session.spec),
+                session.spec,
+                detectorProviderId,
+              )
             : detectorProviderId;
         };
-        detector = detectorForProvider(detectorProviderId);
+        detector = detectorForProvider(detectorProviderId, detectorBootConfig);
         // The detector manifest is the default raw-status contract. An explicit statusMap is a deployment/template
         // override for the selected detector, not a generic URL-watcher assumption.
         const statusMap = c.statusMap;
@@ -2001,8 +2323,17 @@ export function createProvisioningBridge(
               statusMap,
             ),
           detector,
-          detectorFor: (spec) =>
-            detectorForProvider(detectorProviderIdForSpec(spec, detectorProviderId)),
+          detectorFor: (plan, spec) => {
+            const selectedDetectorProviderId = detectorProviderIdForPlan(
+              plan,
+              spec,
+              detectorProviderId,
+            );
+            return detectorForProvider(
+              selectedDetectorProviderId,
+              detectorFactoryConfig(selectedDetectorProviderId),
+            );
+          },
           // The params the selected detector watches with — the session's declared detector part.
           detectorParamsFor: (sessionId) =>
             detectorParams(sessionRef.svc, sessionId, detectorProviderIdForSession(sessionId)),
@@ -2011,7 +2342,7 @@ export function createProvisioningBridge(
           connectorControl: {
             assertControllable: (sessionId) => {
               const providerId = connectorProviderIdForSession(sessionId);
-              if (!connectorForProvider(providerId).controlsAgentChannel) {
+              if (!connectorForSession(sessionId).controlsAgentChannel) {
                 throw glaError(
                   "dependency.unavailable",
                   `connector provider "${providerId}" cannot enforce agent-blind channel control`,
@@ -2059,9 +2390,15 @@ export function createProvisioningBridge(
       handoffs: [],
       completions: [],
     });
+    const capsuleWorker: CapsuleWorkerPort = {
+      spawn: (sessionId, spec, plan) => lifecycle.spawn(sessionId, spec, plan),
+      teardown: (sessionId) => lifecycle.teardown(sessionId),
+      hasLive: (sessionId) => lifecycle.hasLive(sessionId),
+      runtimeOf: (sessionId) => lifecycle.runtimeOf(sessionId),
+    };
     const sessionOpts: SessionServiceOptions = {
       provision: {
-        worker: lifecycle,
+        worker: capsuleWorker,
         capability: {
           async mintConnector(sessionId, parentRef) {
             const minted = await capability.mintConnector(sessionId, parentRef);
@@ -2074,8 +2411,16 @@ export function createProvisioningBridge(
           revoke: (capId) => capability.revoke(capId),
         },
         connector,
-        connectorFor: (spec) =>
-          connectorForProvider(connectorProviderIdForSpec(spec, connectorProviderId)),
+        connectorFor: (plan, spec) =>
+          connectorForProvider(
+            connectorProviderIdForPlan(plan, spec, connectorProviderId),
+            providerConfigForPlan(
+              plan,
+              "connector",
+              connectorProviderIdForPlan(plan, spec, connectorProviderId),
+              connectorBootConfig,
+            ),
+          ),
         parentCapabilityRefFor: (_sessionId, taskId) => {
           // Resolve the session's task → its minted task-capability id (the connector's lineage parent).
           const t = task.tryGet(taskId);

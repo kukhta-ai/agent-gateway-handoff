@@ -31,6 +31,7 @@ import {
   type MountCapability,
   type MountSpec,
   type ResolvedAssemblySpec,
+  type ResolvedCapsulePlan,
   type RuntimeHandle,
   type WorkspaceHandle,
   type WorkspacePort,
@@ -188,10 +189,18 @@ export interface CapsuleRecord {
   sessionId: string;
   /** The launcher (by name) that spawned it — so teardown routes to the right launcher. */
   launcherName: string;
+  /** Provider-owned launcher config from the resolved capsule plan. */
+  launcherConfig?: Record<string, unknown>;
+  /** The resolved capsule plan used to create plan-scoped providers. */
+  capsulePlan?: ResolvedCapsulePlan;
   /** The live runtime handle from the launcher. */
   runtime: RuntimeHandle;
   /** The realized workspace handle (reaped at teardown). */
   workspace: WorkspaceHandle;
+  /** The workspace provider that realized the handle, so teardown reaps through the same provider. */
+  workspaceProviderId?: string;
+  /** Provider-owned workspace config from the resolved capsule plan. */
+  workspaceConfig?: Record<string, unknown>;
 }
 
 /** Restart-safe live-capsule record store. Concrete storage is wired by `app`. */
@@ -210,7 +219,23 @@ export interface SpawnedCapsule {
 /** Construction dependencies for the lifecycle manager (all injected — no concrete adapter named). */
 export interface CapsuleLifecycleOptions {
   registry: SpawnerRegistry;
-  workspace: WorkspaceManager;
+  workspace?: WorkspaceManager;
+  /** Optional per-plan launcher resolver for horizontally added launcher providers. */
+  launcherFor?: (
+    providerId: string,
+    config: Record<string, unknown>,
+    plan: ResolvedCapsulePlan,
+  ) => LauncherPort | Promise<LauncherPort>;
+  /** Optional per-plan workspace resolver for horizontally added workspace providers. */
+  workspaceFor?: (
+    plan: ResolvedCapsulePlan,
+    spec: ResolvedAssemblySpec,
+  ) => WorkspaceManager | Promise<WorkspaceManager>;
+  /** Resolve a workspace manager by provider id for restart-safe teardown of non-default workspaces. */
+  workspaceByProviderId?: (
+    providerId: string,
+    config?: Record<string, unknown>,
+  ) => WorkspaceManager | Promise<WorkspaceManager | undefined> | undefined;
   /** The uid the capsule runs as (the agent's own uid; default = the current process uid). */
   agentUid?: number;
   /** Restart-safe live-capsule record store. Defaults to process-local memory. */
@@ -226,15 +251,23 @@ export interface CapsuleLifecycleOptions {
  */
 export class CapsuleLifecycleManager {
   private readonly registry: SpawnerRegistry;
-  private readonly workspace: WorkspaceManager;
+  private readonly workspace: WorkspaceManager | undefined;
+  private readonly launcherFor: CapsuleLifecycleOptions["launcherFor"];
+  private readonly workspaceFor: CapsuleLifecycleOptions["workspaceFor"];
+  private readonly workspaceByProviderId: CapsuleLifecycleOptions["workspaceByProviderId"];
   private readonly agentUid: number;
   /** Live capsules, by session id (orphan detection compares this to session truth). */
   private readonly live = new Map<string, CapsuleRecord>();
+  /** Non-registry launchers created for a specific resolved plan, by session id. */
+  private readonly launchersBySession = new Map<string, LauncherPort>();
   private readonly store: CapsuleLifecycleStore | undefined;
 
   constructor(opts: CapsuleLifecycleOptions) {
     this.registry = opts.registry;
     this.workspace = opts.workspace;
+    this.launcherFor = opts.launcherFor;
+    this.workspaceFor = opts.workspaceFor;
+    this.workspaceByProviderId = opts.workspaceByProviderId;
     this.agentUid = opts.agentUid ?? defaultAgentUid();
     this.store = opts.store;
     const records = opts.store?.load();
@@ -260,20 +293,51 @@ export class CapsuleLifecycleManager {
    * @param sessionId  the session this capsule belongs to (tracked for orphan detection)
    * @param spec       the immutable resolved spec (read-only; never mutated — invariant 9)
    */
-  async spawn(sessionId: string, spec: ResolvedAssemblySpec): Promise<SpawnedCapsule> {
-    const launcherName = spec.spec.launcher?.use ?? this.registry.defaultLauncherName;
+  async spawn(
+    sessionId: string,
+    spec: ResolvedAssemblySpec,
+    capsulePlan?: ResolvedCapsulePlan,
+  ): Promise<SpawnedCapsule> {
+    const planForResolution = capsulePlan ?? capsulePlanFromSpec(spec);
+    const launcherName =
+      providerIdForRole(planForResolution, "launcher") ??
+      spec.spec.launcher?.use ??
+      this.registry.defaultLauncherName;
     if (launcherName === undefined) {
       throw glaError("dependency.unavailable", "no launcher available to spawn the capsule", {
         detail: { sessionId },
       });
     }
-    const launcher = this.registry.resolve(launcherName);
+    const launcherConfig = providerConfigForRole(planForResolution, "launcher", launcherName);
+    let launcher: LauncherPort | undefined;
+    if (capsulePlan !== undefined && this.launcherFor !== undefined) {
+      launcher = await this.launcherFor(launcherName, launcherConfig, planForResolution);
+      this.launchersBySession.set(sessionId, launcher);
+    } else if (!this.registry.has(launcherName) && this.launcherFor !== undefined) {
+      launcher = await this.launcherFor(launcherName, launcherConfig, planForResolution);
+      this.registry.register(launcherName, launcher);
+    }
+    launcher ??= this.registry.resolve(launcherName);
+    const workspaceProviderId =
+      providerIdForRole(planForResolution, "workspace") ?? spec.spec.workspace?.use;
+    const workspaceConfig = providerConfigForRole(
+      planForResolution,
+      "workspace",
+      workspaceProviderId,
+    );
+    const workspaceManager = (await this.workspaceFor?.(planForResolution, spec)) ?? this.workspace;
+    if (workspaceManager === undefined) {
+      throw glaError("dependency.unavailable", "no workspace available to spawn the capsule", {
+        detail: { sessionId },
+      });
+    }
 
     // Step A — realize the workspace (agent uid). If THIS fails there is nothing to reap.
     let workspace: WorkspaceHandle;
     try {
-      workspace = await this.workspace.realize(spec, this.agentUid);
+      workspace = await workspaceManager.realize(spec, this.agentUid);
     } catch (e) {
+      this.launchersBySession.delete(sessionId);
       throw asDependencyError(e, "workspace realization failed");
     }
 
@@ -287,7 +351,8 @@ export class CapsuleLifecycleManager {
     try {
       runtime = await launcher.spawn(spec, this.agentUid);
     } catch (e) {
-      await safeReap(this.workspace, workspace);
+      await safeReap(workspaceManager, workspace);
+      this.launchersBySession.delete(sessionId);
       throw asDependencyError(e, "capsule spawn failed");
     }
 
@@ -301,11 +366,23 @@ export class CapsuleLifecycleManager {
       }
     } catch (e) {
       await safeStop(launcher, runtime);
-      await safeReap(this.workspace, workspace);
+      await safeReap(workspaceManager, workspace);
+      this.launchersBySession.delete(sessionId);
       throw asDependencyError(e, "capsule health probe failed");
     }
 
-    const record: CapsuleRecord = { sessionId, launcherName, runtime, workspace };
+    const record: CapsuleRecord = {
+      sessionId,
+      launcherName,
+      launcherConfig,
+      capsulePlan: structuredClone(planForResolution),
+      runtime,
+      workspace,
+    };
+    if (workspaceProviderId !== undefined) {
+      record.workspaceProviderId = workspaceProviderId;
+      record.workspaceConfig = workspaceConfig;
+    }
     this.live.set(sessionId, record);
     this.persist();
     return { runtime, workspace, launcherName };
@@ -332,7 +409,11 @@ export class CapsuleLifecycleManager {
     if (rec === undefined) {
       return "down";
     }
-    return this.registry.resolve(rec.launcherName).health(rec.runtime);
+    const launcher = await this.launcherForRecord(rec);
+    if (launcher === undefined) {
+      return "down";
+    }
+    return launcher.health(rec.runtime);
   }
 
   /**
@@ -347,13 +428,20 @@ export class CapsuleLifecycleManager {
     if (rec === undefined) {
       return; // already torn down / never spawned — idempotent no-op.
     }
-    const launcher = this.registry.has(rec.launcherName)
-      ? this.registry.resolve(rec.launcherName)
-      : undefined;
+    const launcher = await this.launcherForRecord(rec);
     const stopped = launcher !== undefined ? await safeStop(launcher, rec.runtime) : false;
-    const reaped = await safeReap(this.workspace, rec.workspace);
+    const workspaceManager =
+      rec.workspaceProviderId !== undefined
+        ? ((await this.workspaceByProviderId?.(rec.workspaceProviderId, rec.workspaceConfig)) ??
+          this.workspace)
+        : this.workspace;
+    if (workspaceManager === undefined) {
+      return;
+    }
+    const reaped = await safeReap(workspaceManager, rec.workspace);
     if (stopped && reaped) {
       this.live.delete(sessionId);
+      this.launchersBySession.delete(sessionId);
       this.persist();
     }
   }
@@ -365,6 +453,26 @@ export class CapsuleLifecycleManager {
 
   private persist(): void {
     this.store?.save([...this.live.values()].map((record) => structuredClone(record)));
+  }
+
+  private async launcherForRecord(rec: CapsuleRecord): Promise<LauncherPort | undefined> {
+    const sessionLauncher = this.launchersBySession.get(rec.sessionId);
+    if (sessionLauncher !== undefined) {
+      return sessionLauncher;
+    }
+    if (this.registry.has(rec.launcherName)) {
+      return this.registry.resolve(rec.launcherName);
+    }
+    if (this.launcherFor !== undefined && rec.capsulePlan !== undefined) {
+      const launcher = await this.launcherFor(
+        rec.launcherName,
+        rec.launcherConfig ?? {},
+        rec.capsulePlan,
+      );
+      this.launchersBySession.set(rec.sessionId, launcher);
+      return launcher;
+    }
+    return undefined;
   }
 }
 
@@ -476,6 +584,57 @@ function defaultAgentUid(): number {
   // On non-POSIX platforms `process.getuid` is undefined; fall back to 0 (the test never relies on the
   // numeric value — it asserts the uid is THREADED through to the workspace/launcher, docs/04 §6).
   return typeof process.getuid === "function" ? process.getuid() : 0;
+}
+
+function providerIdForRole(
+  plan: ResolvedCapsulePlan | undefined,
+  role: string,
+): string | undefined {
+  return plan?.providers.find((provider) => provider.role === role)?.providerId;
+}
+
+function providerConfigForRole(
+  plan: ResolvedCapsulePlan,
+  role: string,
+  providerId: string | undefined,
+): Record<string, unknown> {
+  const entry =
+    providerId !== undefined
+      ? (plan.providers.find(
+          (provider) => provider.role === role && provider.providerId === providerId,
+        ) ?? plan.providers.find((provider) => provider.role === role))
+      : plan.providers.find((provider) => provider.role === role);
+  return structuredClone(entry?.config ?? {});
+}
+
+function capsulePlanFromSpec(spec: ResolvedAssemblySpec): ResolvedCapsulePlan {
+  const providers: ResolvedCapsulePlan["providers"] = [];
+  const add = (
+    role: string,
+    ref: { use: string; params?: Record<string, unknown> } | undefined,
+  ): void => {
+    if (ref === undefined) {
+      return;
+    }
+    providers.push({
+      role,
+      providerId: ref.use,
+      config: structuredClone(ref.params ?? {}),
+      available: true,
+      evidenceRequirements: [],
+      diagnostics: [],
+    });
+  };
+  add("launcher", spec.spec.launcher);
+  add("workspace", spec.spec.workspace);
+  add("connector", spec.spec.connector);
+  for (const entrypoint of spec.spec.entrypoints ?? []) {
+    add("entrypoint", entrypoint);
+  }
+  for (const detector of spec.spec.detectors ?? []) {
+    add("detector", detector);
+  }
+  return { template: spec.spec.template, providers };
 }
 
 /** Coerce an unknown error into a typed dependency error (so a launcher throw maps to exit 8), preserving a GlaError. */

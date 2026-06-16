@@ -9,6 +9,7 @@ import type {
   CapabilityId,
   Ref,
   ResolvedAssemblySpec,
+  ResolvedCapsulePlan,
   RuntimeHandle,
   TaskId,
 } from "@gla/kernel";
@@ -137,8 +138,14 @@ class StubWorker implements CapsuleWorkerPort {
   toreDown: string[] = [];
   live = new Map<string, RuntimeHandle>();
   failSpawn = false;
-  async spawn(sessionId: string): Promise<SpawnedCapsuleHandles> {
+  lastCapsulePlan: ResolvedCapsulePlan | undefined;
+  async spawn(
+    sessionId: string,
+    _spec: ResolvedAssemblySpec,
+    capsulePlan: ResolvedCapsulePlan,
+  ): Promise<SpawnedCapsuleHandles> {
     this.spawned += 1;
+    this.lastCapsulePlan = capsulePlan;
     if (this.failSpawn) {
       throw Object.assign(new Error("spawn boom"), {
         name: "GlaErrorException",
@@ -250,6 +257,36 @@ describe("SessionService.provision — the reversible create-saga (GLA-022/023/0
     expect(capability.minted).toBe(1);
     expect(worker.spawned).toBe(1);
     expect(worker.toreDown.length).toBe(0);
+  });
+
+  it("passes the pinned resolved capsule plan to provisioning", async () => {
+    const { svc, worker } = provisioningService();
+    const capsulePlan: ResolvedCapsulePlan = {
+      template: "browser-handoff",
+      providers: [
+        {
+          role: "launcher",
+          providerId: "launcher-plan",
+          config: { mode: "headless" },
+          available: true,
+          evidenceRequirements: [],
+          diagnostics: [],
+        },
+        {
+          role: "workspace",
+          providerId: "workspace-plan",
+          config: { root: "/tmp/gla" },
+          available: true,
+          evidenceRequirements: [],
+          diagnostics: [],
+        },
+      ],
+    };
+    const s = svc.createFromAdmitted(TASK, resolved(), capsulePlan);
+    await svc.provision(s.id);
+
+    expect(svc.get(s.id).capsulePlan).toEqual(capsulePlan);
+    expect(worker.lastCapsulePlan).toEqual(capsulePlan);
   });
 
   it("AGENT-BLIND: the returned connector carries a secret_ref and NO raw secret/signing key (scan)", async () => {

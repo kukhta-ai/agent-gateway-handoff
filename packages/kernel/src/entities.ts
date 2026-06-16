@@ -59,6 +59,23 @@ export type SessionState =
 /** An opaque handle to the live capsule from the worker plane. */
 export type RuntimeHandle = Ref<"runtime">;
 
+/** One provider selected for a capsule part after admission resolves defaults and overrides. */
+export interface ResolvedCapsuleProviderPlan {
+  role: string;
+  providerId: string;
+  config: Record<string, unknown>;
+  available: boolean;
+  availability?: string;
+  evidenceRequirements: unknown[];
+  diagnostics: unknown[];
+}
+
+/** The admission-resolved capsule provider plan pinned on a Session. */
+export interface ResolvedCapsulePlan {
+  template: string;
+  providers: ResolvedCapsuleProviderPlan[];
+}
+
 /** The Session aggregate (§1.2, session-service.md). `spec` is IMMUTABLE after admission. */
 export interface Session {
   id: SessionId;
@@ -66,6 +83,8 @@ export interface Session {
   stepName?: string;
   /** IMMUTABLE after admission (§3, invariant 9). */
   spec: ResolvedAssemblySpec;
+  /** IMMUTABLE after admission: resolved capsule provider ids, config, evidence, and diagnostics. */
+  capsulePlan?: ResolvedCapsulePlan;
   state: SessionState;
   /** The current window's recipient-bound grant, if a window is open. */
   grantTokenRef?: Ref<"session">;
