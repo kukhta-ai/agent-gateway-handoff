@@ -294,6 +294,7 @@ function selectionProviderId(selection: unknown): string | undefined {
 function selectedServeAuthProvider(opts: ServeOptions): AuthProviderKind | undefined {
   return (
     opts.authProvider ??
+    opts.appDeploymentConfig?.auth ??
     opts.providerProfile?.auth ??
     selectionProviderId(selectedProviderProfileManifest(opts)?.spec.select?.AuthProvider) ??
     opts.providerSet?.profile.auth
@@ -437,6 +438,10 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     ...(opts.providerHost !== undefined ? { providerHost: opts.providerHost } : {}),
     ...(opts.providerProfileId !== undefined ? { providerProfileId: opts.providerProfileId } : {}),
     ...(opts.providerProfile !== undefined ? { providerProfile: opts.providerProfile } : {}),
+    ...(opts.appDeploymentConfig !== undefined
+      ? { appDeploymentConfig: opts.appDeploymentConfig }
+      : {}),
+    ...(opts.capsuleProviders !== undefined ? { capsuleProviders: opts.capsuleProviders } : {}),
     ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
@@ -857,11 +862,16 @@ function resolveAuthProviderConfig(
   opts: ServeOptions,
   publicBase: ReturnType<typeof parsePublicBaseUrl>,
 ): AuthProviderConfig | undefined {
+  const selectedAuthProvider = selectedServeAuthProvider(opts);
+  const deploymentConfig =
+    selectedAuthProvider !== undefined
+      ? opts.appDeploymentConfig?.providerConfig?.[selectedAuthProvider]
+      : undefined;
   const config =
     opts.authProviderConfig ??
     (opts.authProviderConfigJson !== undefined
       ? parseJsonRecord(opts.authProviderConfigJson, "auth provider config JSON")
-      : undefined);
+      : deploymentConfig);
   if (config === undefined) {
     return undefined;
   }

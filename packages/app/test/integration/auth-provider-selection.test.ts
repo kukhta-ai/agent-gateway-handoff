@@ -414,6 +414,30 @@ describe("AC#6 · daemon parseServeArgs threads opaque provider ids and provider
     }
   });
 
+  it("parses enrollment policy JSON against a provider selected by app deployment config", () => {
+    const parsed = parseServeArgs(
+      [],
+      {
+        GLA_AUTH_ENROLLMENT_POLICY_JSON: JSON.stringify({
+          declared: true,
+          credentialSetupStages: [],
+          externalSources: [],
+          mfaRecoveryMethods: [],
+          requiredMethods: [],
+          optionalRecipientChoices: [],
+        }),
+      } as NodeJS.ProcessEnv,
+      {
+        providerSet: referenceProviderSet,
+        appDeploymentConfig: { auth: "authentik" },
+      },
+    );
+    expect(parsed.help).toBe(false);
+    if (!parsed.help) {
+      expect(parsed.options.authEnrollmentPolicy?.provider).toBe("authentik");
+    }
+  });
+
   it("parses provider-extensible deployment roles from env and flags without closing the role vocabulary", () => {
     const envParsed = parseServeArgs([], {
       GLA_AUTH_DEPLOYMENT_ROLES_JSON: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
