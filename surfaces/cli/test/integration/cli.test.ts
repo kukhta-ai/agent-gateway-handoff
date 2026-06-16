@@ -5,8 +5,19 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentBridge } from "@gla/bridge";
-import { CatalogService, defaultStoreContent, referenceWpmDependencyBindings } from "@gla/catalog";
-import { glaError } from "@gla/kernel";
+import {
+  CHANNEL_CLI_MANIFEST,
+  CatalogService,
+  PROVIDER_MANIFESTS,
+  type ProviderFamily,
+  type ProviderInstallInventoryInput,
+  type ProviderInstallPackageInput,
+  type ProviderManifest,
+  createTemplatePackageSkeleton,
+  defaultStoreContent,
+  referenceWpmDependencyBindings,
+} from "@gla/catalog";
+import { EMPTY_CONFIG_SCHEMA, glaError } from "@gla/kernel";
 import { describe, expect, it, vi } from "vitest";
 import { CLI_VERSION, type CliServices, run } from "../../src/cli.js";
 import { CLI_COMMANDS, DEFERRED_CLI_SURFACES } from "../../src/contract.js";
@@ -45,6 +56,111 @@ function readyBridge(): AgentBridge {
 /** Default services for tests (the reference-slice Bridge with explicit WPM receipt fixtures). */
 function services(bridge: AgentBridge = readyBridge()): CliServices {
   return { bridge, connection: { mode: "in-process" } };
+}
+
+function provider(
+  id: string,
+  family: Exclude<ProviderFamily, "template">,
+  kind: string,
+): ProviderManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind,
+    metadata: { name: id, version: "0.1.0" },
+    spec: {
+      family,
+      capability: { summary: `${id} provider` },
+      config_schema: structuredClone(EMPTY_CONFIG_SCHEMA),
+      probe: id,
+      skills: [{ id: `use-${id}`, for: id, body: `# ${id}` }],
+    },
+  };
+}
+
+const AUTH_WEBAUTHN = provider("auth-webauthn", "auth", "AuthProvider");
+const SECRET_STORE = provider("secret-store-reference", "secret-store", "SecretStore");
+
+function trustedProviderPackage(
+  manifest: ProviderManifest,
+  opts: { signed?: boolean; verified?: boolean } = {},
+): ProviderInstallPackageInput {
+  return {
+    kind: "provider",
+    signed: opts.signed ?? true,
+    verified: opts.verified ?? true,
+    content: {
+      manifest,
+      module: {
+        providerId: manifest.metadata.name,
+        family: manifest.spec.family,
+        registersFactory: true,
+        registersProbe: true,
+      },
+      docs: [`adapters/${manifest.metadata.name}/README.md`],
+      contractTests: [
+        `adapters/${manifest.metadata.name}/test/contract/${manifest.metadata.name}.test.ts`,
+      ],
+    },
+  };
+}
+
+function trustedTemplatePackage(): ProviderInstallPackageInput {
+  return {
+    kind: "template-package",
+    signed: true,
+    verified: true,
+    content: createTemplatePackageSkeleton({
+      packageId: "cli-browser-handoff-package",
+      templateId: "browser-handoff",
+      requiredParts: {
+        launcher: "launcher-process",
+        entrypoint: "entrypoint-novnc",
+        connector: "connector-cdp",
+        workspace: "workspace-profile",
+        detector: "url-watcher",
+      },
+      openParts: ["entrypoint", "connector", "workspace", "detector"],
+      compatibleProviders: {
+        entrypoint: ["entrypoint-novnc"],
+        connector: ["connector-cdp"],
+        workspace: ["workspace-profile"],
+        detector: ["url-watcher"],
+      },
+      providerDefaults: {
+        "url-watcher": { complete_on: "/dashboard" },
+      },
+    }),
+  };
+}
+
+function providerInstallInventory(
+  overrides: Partial<ProviderInstallInventoryInput> = {},
+): ProviderInstallInventoryInput {
+  return {
+    inventoryId: "cli-reference",
+    profileId: "single-operator",
+    packages: [
+      ...Object.values(PROVIDER_MANIFESTS).map((manifest) => trustedProviderPackage(manifest)),
+      trustedProviderPackage(CHANNEL_CLI_MANIFEST),
+      trustedProviderPackage(AUTH_WEBAUTHN),
+      trustedProviderPackage(SECRET_STORE),
+      trustedTemplatePackage(),
+    ],
+    appDeployment: {
+      AuthProvider: "auth-webauthn",
+      ChannelAdapter: "channel-cli",
+      SecretStore: "secret-store-reference",
+    },
+    capsuleDefaults: {
+      Launcher: "launcher-process",
+      HumanEntrypoint: "entrypoint-novnc",
+      AgentConnector: "connector-cdp",
+      Workspace: "workspace-profile",
+      CompletionDetector: "url-watcher",
+    },
+    dependencyBindings: referenceWpmDependencyBindings(),
+    ...overrides,
+  };
 }
 
 describe("gla exit codes", () => {
@@ -386,6 +502,10 @@ describe("gla current contract/schema/help (GLA-094)", () => {
         "template show",
         "skill list",
         "skill show",
+        "provider-install plan",
+        "provider-install apply",
+        "provider-install rollback",
+        "doctor provider-graph",
         "task create",
         "task get",
         "task list",
@@ -480,7 +600,6 @@ describe("gla current contract/schema/help (GLA-094)", () => {
       ["auth", "login"],
       ["profile", "list"],
       ["provider-set", "plan", "--profile", "scenario-01"],
-      ["doctor", "provider-graph"],
       ["-o", "ndjson", "version"],
       ["--context", "prod", "version"],
       ["--trace-id", "trace-1", "version"],
@@ -503,12 +622,11 @@ describe("gla current contract/schema/help (GLA-094)", () => {
     expect(unknown.stdout()).toBe("");
     expect(JSON.parse(unknown.stderr()).error.code).toBe("usage.unknown_command");
 
-    const deferred = capture(false);
-    expect(await run(["doctor", "provider-graph", "--help"], deferred.out, services())).toBe(
-      ExitCode.USAGE,
+    const doctor = capture(false);
+    expect(await run(["doctor", "provider-graph", "--help"], doctor.out, services())).toBe(
+      ExitCode.OK,
     );
-    expect(deferred.stdout()).toBe("");
-    expect(JSON.parse(deferred.stderr()).error.code).toBe("usage.unsupported");
+    expect(JSON.parse(doctor.stdout()).command).toBe("gla doctor provider-graph");
   });
 
   it("executes provider authoring scaffold, validate, test, and inspect as a JSON-first flow", async () => {
@@ -799,6 +917,180 @@ describe("gla current contract/schema/help (GLA-094)", () => {
           "template_author.duplicate_template_id",
         ]),
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("executes provider install/update plan, apply, doctor, rejection, and rollback as an operator flow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-provider-install-"));
+    try {
+      const activeInventory = providerInstallInventory({
+        inventoryId: "active-empty",
+        profileId: "empty",
+        packages: [],
+        appDeployment: {},
+        capsuleDefaults: {},
+      });
+      const candidateInventory = providerInstallInventory({
+        inventoryId: "candidate-reference",
+        profileId: "single-operator",
+      });
+      const statePath = join(dir, "active.json");
+      const candidatePath = join(dir, "candidate.json");
+      writeFileSync(statePath, JSON.stringify(activeInventory), "utf8");
+      writeFileSync(candidatePath, JSON.stringify(candidateInventory), "utf8");
+
+      const plan = capture(false);
+      expect(
+        await run(
+          ["provider-install", "plan", candidatePath, "--state", statePath],
+          plan.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(plan.stdout())).toMatchObject({
+        ok: true,
+        status: "ready-to-apply",
+        changes: {
+          registryEntries: {
+            added: expect.arrayContaining([
+              expect.objectContaining({ id: "auth-webauthn", layer: "registry" }),
+              expect.objectContaining({
+                id: "cli-browser-handoff-package",
+                layer: "template-package",
+              }),
+            ]),
+          },
+          deploymentDefaults: {
+            AuthProvider: { to: "auth-webauthn" },
+            ChannelAdapter: { to: "channel-cli" },
+          },
+          capsuleDefaults: {
+            Launcher: { to: "launcher-process" },
+          },
+        },
+        doctor: {
+          status: "PASS",
+          selectedProviders: {
+            AuthProvider: "auth-webauthn",
+            Launcher: "launcher-process",
+          },
+        },
+        activation: {
+          rejectedAttemptsLeaveActiveUnchanged: true,
+          nextUx: "runtime-consumption",
+        },
+      });
+
+      const apply = capture(false);
+      expect(
+        await run(
+          ["provider-install", "apply", candidatePath, "--state", statePath],
+          apply.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      const applyResult = JSON.parse(apply.stdout());
+      expect(applyResult).toMatchObject({
+        ok: true,
+        activated: true,
+        activeSummary: {
+          profileId: "single-operator",
+          deploymentDefaults: { AuthProvider: "auth-webauthn" },
+          capsuleDefaults: { Launcher: "launcher-process" },
+        },
+        rollbackSnapshot: {
+          summary: { profileId: "empty" },
+        },
+      });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+        inventoryId: "candidate-reference",
+        profileId: "single-operator",
+      });
+
+      const doctor = capture(false);
+      expect(await run(["doctor", "provider-graph", statePath], doctor.out, services())).toBe(
+        ExitCode.OK,
+      );
+      expect(JSON.parse(doctor.stdout())).toMatchObject({
+        mode: "provider-graph-doctor",
+        inventory: {
+          deploymentDefaults: { AuthProvider: "auth-webauthn" },
+          capsuleDefaults: { Launcher: "launcher-process" },
+        },
+        doctor: { status: "PASS" },
+      });
+
+      const badCandidate = providerInstallInventory({
+        inventoryId: "bad-candidate",
+        packages: [
+          trustedProviderPackage(provider("auth-bad", "auth", "AuthProvider"), {
+            signed: false,
+            verified: false,
+          }),
+        ],
+        appDeployment: { AuthProvider: "auth-bad" },
+      });
+      const beforeBadApply = readFileSync(statePath, "utf8");
+      const badCandidatePath = join(dir, "bad-candidate.json");
+      writeFileSync(badCandidatePath, JSON.stringify(badCandidate), "utf8");
+      const badApply = capture(false);
+      expect(
+        await run(
+          ["provider-install", "apply", badCandidatePath, "--state", statePath],
+          badApply.out,
+          services(),
+        ),
+      ).toBe(ExitCode.USAGE);
+      expect(readFileSync(statePath, "utf8")).toBe(beforeBadApply);
+      const badResult = JSON.parse(badApply.stdout());
+      expect(badResult).toMatchObject({
+        ok: false,
+        activated: false,
+        activeSummary: { profileId: "single-operator" },
+      });
+      expect(
+        badResult.plan.diagnostics.map((diagnostic: { code: string }) => diagnostic.code),
+      ).toEqual(
+        expect.arrayContaining(["install.package_unsigned", "install.package_unverifiable"]),
+      );
+
+      const invalidSnapshotPath = join(dir, "invalid-rollback.json");
+      writeFileSync(invalidSnapshotPath, JSON.stringify({}), "utf8");
+      const beforeInvalidRollback = readFileSync(statePath, "utf8");
+      const invalidRollback = capture(false);
+      expect(
+        await run(
+          ["provider-install", "rollback", invalidSnapshotPath, "--state", statePath],
+          invalidRollback.out,
+          services(),
+        ),
+      ).toBe(ExitCode.USAGE);
+      expect(readFileSync(statePath, "utf8")).toBe(beforeInvalidRollback);
+      expect(JSON.parse(invalidRollback.stderr()).error).toMatchObject({
+        code: "usage.bad_argument",
+        message: "provider install rollback snapshot is invalid",
+      });
+
+      const snapshotPath = join(dir, "rollback.json");
+      writeFileSync(snapshotPath, JSON.stringify(applyResult.rollbackSnapshot), "utf8");
+      const rollback = capture(false);
+      expect(
+        await run(
+          ["provider-install", "rollback", snapshotPath, "--state", statePath],
+          rollback.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(rollback.stdout())).toMatchObject({
+        ok: true,
+        restoredSummary: { profileId: "empty" },
+      });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+        inventoryId: "active-empty",
+        profileId: "empty",
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

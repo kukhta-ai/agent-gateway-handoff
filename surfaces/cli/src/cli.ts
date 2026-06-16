@@ -12,19 +12,25 @@
 // Design: `run()` returns a Promise<exit code> and writes through an injected `Output` + an injected
 // (or default) Agent Bridge, so it is unit-testable without spawning a process or hitting a network.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { AgentBridge } from "@gla/bridge";
 import {
   PROVIDER_MANIFESTS,
   type ProviderAuthoringRuntimeFamily,
   type ProviderAuthoringWorkspaceInput,
+  type ProviderInstallInventoryInput,
+  type ProviderInstallRollbackSnapshot,
   type ProviderManifest,
   type ProviderPackageAuthoringInput,
   type ProviderPackageAuthoringReport,
   type TemplatePackageAuthoringInput,
   type TemplatePackageAuthoringReport,
+  applyProviderInstallUpdate,
   createProviderPackageSkeleton,
   createTemplatePackageSkeleton,
+  doctorProviderInstallInventory,
+  planProviderInstallUpdate,
+  rollbackProviderInstallUpdate,
   validateProviderAuthoringWorkspace,
   validateProviderPackageAuthoring,
   validateTemplatePackageAuthoring,
@@ -837,6 +843,29 @@ export async function run(
           out,
           "usage: gla template-package (scaffold | validate <path> | test <path> | inspect <path>)",
         );
+      }
+
+      case "provider-install": {
+        if (verb === "plan") {
+          return providerInstallPlan(parsed, out);
+        }
+        if (verb === "apply") {
+          return providerInstallApply(parsed, out);
+        }
+        if (verb === "rollback") {
+          return providerInstallRollback(parsed, out);
+        }
+        return usageError(
+          out,
+          "usage: gla provider-install (plan <path> [--state <path>] | apply <path> --state <path> | rollback <snapshot> --state <path>)",
+        );
+      }
+
+      case "doctor": {
+        if (verb === "provider-graph") {
+          return providerGraphDoctor(parsed, out);
+        }
+        return usageError(out, "usage: gla doctor provider-graph <path>");
       }
 
       case "task": {
@@ -1657,6 +1686,62 @@ function readAuthoringJson(path: string): unknown {
   }
 }
 
+function readOperatorJson(path: string, purpose: string): unknown {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    throw glaError("usage.bad_argument", `cannot read ${purpose} file "${path}": ${String(e)}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw glaError("usage.bad_argument", `${purpose} file "${path}" is not valid JSON`);
+  }
+}
+
+function readOptionalInstallState(
+  path: string | undefined,
+): ProviderInstallInventoryInput | undefined {
+  if (path === undefined) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as ProviderInstallInventoryInput;
+  } catch (e) {
+    if (isRecord(e) && e.code === "ENOENT") {
+      return {};
+    }
+    throw glaError(
+      "usage.bad_argument",
+      `cannot read provider install state "${path}": ${String(e)}`,
+    );
+  }
+}
+
+function writeInstallState(path: string, state: ProviderInstallInventoryInput): void {
+  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function installPlanInputFromDoc(
+  doc: unknown,
+  activeOverride?: ProviderInstallInventoryInput,
+): { active?: ProviderInstallInventoryInput; candidate?: ProviderInstallInventoryInput } {
+  if (isRecord(doc) && isRecord(doc.candidate)) {
+    const active =
+      activeOverride ??
+      (isRecord(doc.active) ? (doc.active as ProviderInstallInventoryInput) : undefined);
+    return {
+      ...(active !== undefined ? { active } : {}),
+      candidate: doc.candidate as ProviderInstallInventoryInput,
+    };
+  }
+  return {
+    ...(activeOverride !== undefined ? { active: activeOverride } : {}),
+    candidate: doc as ProviderInstallInventoryInput,
+  };
+}
+
 function isAuthoringWorkspace(doc: unknown): doc is ProviderAuthoringWorkspaceInput {
   return isRecord(doc) && (Array.isArray(doc.providers) || Array.isArray(doc.templatePackages));
 }
@@ -2014,6 +2099,97 @@ function templatePackageInspect(parsed: ParsedArgs, out: Output): number {
     tests: templateContractTests(doc),
     wpmSkeletons: isRecord(doc) && Array.isArray(doc.wpmSkeletons) ? doc.wpmSkeletons : undefined,
   });
+}
+
+function providerInstallPlan(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla provider-install plan <path> [--state <path>]");
+  }
+  const state = optionalStringFlag(parsed, "state");
+  const plan = planProviderInstallUpdate(
+    installPlanInputFromDoc(
+      readOperatorJson(path, "provider install candidate"),
+      readOptionalInstallState(state),
+    ),
+  );
+  const code = emitCommandResult(parsed, out, "provider-install", "plan", plan);
+  return code === ExitCode.OK && !plan.ok ? ExitCode.USAGE : code;
+}
+
+function providerInstallApply(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla provider-install apply <path> --state <path>");
+  }
+  const statePath = requiredStringFlag(
+    parsed,
+    "state",
+    "provider-install apply requires --state <path>",
+  );
+  const planInput = installPlanInputFromDoc(
+    readOperatorJson(path, "provider install candidate"),
+    readOptionalInstallState(statePath),
+  );
+  const result = applyProviderInstallUpdate(planInput);
+  if (result.ok) {
+    writeInstallState(statePath, planInput.candidate ?? {});
+  }
+  const code = emitCommandResult(parsed, out, "provider-install", "apply", result);
+  return code === ExitCode.OK && !result.ok ? ExitCode.USAGE : code;
+}
+
+function snapshotFromDoc(doc: unknown): ProviderInstallRollbackSnapshot {
+  if (isRecord(doc) && isRecord(doc.rollbackSnapshot)) {
+    return doc.rollbackSnapshot as unknown as ProviderInstallRollbackSnapshot;
+  }
+  if (
+    isRecord(doc) &&
+    Object.hasOwn(doc, "snapshotId") &&
+    Object.hasOwn(doc, "inventory") &&
+    Object.hasOwn(doc, "summary")
+  ) {
+    return doc as unknown as ProviderInstallRollbackSnapshot;
+  }
+  throw glaError("usage.bad_argument", "provider install rollback snapshot is invalid", {
+    detail: {
+      required: ["snapshotId", "inventory", "summary"],
+    },
+    retryable: false,
+  });
+}
+
+function providerInstallRollback(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla provider-install rollback <snapshot> --state <path>");
+  }
+  const statePath = requiredStringFlag(
+    parsed,
+    "state",
+    "provider-install rollback requires --state <path>",
+  );
+  const result = rollbackProviderInstallUpdate(
+    snapshotFromDoc(readOperatorJson(path, "provider install rollback snapshot")),
+  );
+  writeInstallState(statePath, result.restoredInventory);
+  return emitCommandResult(parsed, out, "provider-install", "rollback", result);
+}
+
+function providerGraphDoctor(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla doctor provider-graph <path>");
+  }
+  return emitCommandResult(
+    parsed,
+    out,
+    "doctor",
+    "provider-graph",
+    doctorProviderInstallInventory(
+      readOperatorJson(path, "provider install state") as ProviderInstallInventoryInput,
+    ),
+  );
 }
 
 /**

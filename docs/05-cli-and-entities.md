@@ -103,6 +103,10 @@ gla
 ├── template-package validate <path>
 ├── template-package test <path>
 ├── template-package inspect <path>
+├── provider-install plan <path> [--state <path>]
+├── provider-install apply <path> --state <path>
+├── provider-install rollback <snapshot> --state <path>
+├── doctor provider-graph <path>
 ├── task create [--intent <label>] [--recipient <ref>]
 ├── task get <id>
 ├── task list [--state <s>]
@@ -136,7 +140,6 @@ Current deferred surfaces and diagnostics:
 | `policy mounts` | `usage.unsupported` | policy inspection for host-mount planning |
 | profile install/update commands | `usage.unsupported` | `profile list/show/validate` and overlay validation |
 | provider-set install/update commands | `usage.unsupported` | `provider-set inspect/plan/apply/rollback` |
-| `doctor provider-graph` | `usage.unsupported` | CLI exposure for the provider graph doctor report |
 | `events [--follow]` | `usage.unsupported` | NDJSON state-change and handoff lifecycle stream |
 | `audit list` | `usage.unsupported` | redacted audit browsing and trace correlation |
 | `auth login/logout` | `usage.unsupported`; local profile remains credential-free | authenticated-agent profiles |

@@ -12,47 +12,44 @@ describe("provider install/update UX documentation", () => {
   it("defines the required UX spine for the operator install/update flow", () => {
     for (const heading of [
       "## 1. Protagonist And Job",
-      "## 2. Entry Points",
+      "## 2. Executable Entry Points",
       "## 3. Inputs",
-      "## 4. Named Profiles And Defaults",
-      "## 5. Install/Update Journey",
-      "## 6. States",
-      "## 7. Diagnostics And Recovery",
-      "## 8. Guarded Operations And Rollback Limits",
-      "## 9. Success State And Handoff",
+      "## 4. Activation Preview",
+      "## 5. Rejection And Diagnostics",
+      "## 6. Doctor Output",
+      "## 7. Rollback",
+      "## 8. UX Boundaries",
     ]) {
       expect(doc).toContain(heading);
     }
   });
 
-  it("covers named profiles, overlays, WPM touchpoints, doctor evidence, and rollback", () => {
+  it("covers executable commands, WPM touchpoints, doctor evidence, and rollback", () => {
     for (const requiredPhrase of [
-      "named provider profile",
-      "ProviderProfileOverlay",
-      "WPM bundle metadata",
-      "DependencyBinding",
-      "gla doctor provider-graph",
-      "not the current executable `gla` CLI contract",
-      "deferred",
-      "public-edge transport evidence",
+      "gla provider-install plan <candidate.json> [--state <active.json>]",
+      "gla provider-install apply <candidate.json> --state <active.json>",
+      "gla doctor provider-graph <active.json>",
+      "gla provider-install rollback <snapshot.json> --state <active.json>",
+      "dependencyBindings",
+      "signed: true",
+      "verified: true",
       "rollback snapshot",
-      "ready-to-apply",
-      "rolled-back",
+      "leaves the previously active inventory observable and unchanged",
     ]) {
       expect(doc).toContain(requiredPhrase);
     }
+    expect(doc).not.toContain("not the current executable `gla` CLI contract");
+    expect(doc).not.toContain("deferred");
   });
 
-  it("covers diagnostics and recovery without global default ambiguity", () => {
+  it("covers diagnostics and recovery without authority-mode framing", () => {
     for (const requiredPhrase of [
-      "Unavailable dependency",
-      "Invalid overlay",
-      "Unresolved secret ref",
-      "Failed WPM probe",
-      "Degraded runtime probe",
-      "Unsafe public-edge evidence",
-      "Profile ambiguity",
-      "A default is always default **inside a named profile**",
+      "a package is unsigned or unverifiable",
+      "provider ids, provider versions, or template ids collide",
+      "compatibility relations are ambiguous or unresolved",
+      "host-touching dependency evidence is missing",
+      "Diagnostics name the affected provider id, family, package, template, dependency, and layer",
+      "Runtime agents inspect catalog, template, schema, skill, dry-run, and",
     ]) {
       expect(doc).toContain(requiredPhrase);
     }

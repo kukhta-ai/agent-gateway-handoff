@@ -53,6 +53,12 @@ import {
   type WpmBundleEvidence,
 } from "./manifests.js";
 import {
+  type ProviderPackageAuthoringInput,
+  type TemplatePackageAuthoringInput,
+  validateProviderAuthoringWorkspace,
+} from "./provider-authoring.js";
+import {
+  PROVIDER_PROFILE_FAMILIES,
   PROVIDER_PROFILE_FAMILY_TO_RUNTIME_FAMILY,
   type ProviderProfileFamilyId,
   type ProviderProfileManifest,
@@ -3362,4 +3368,841 @@ export function providerGraphDoctorReport(
     templates,
     diagnostics: graphDiagnostics,
   };
+}
+
+/** Package categories the operator install/update flow can activate. */
+export type ProviderInstallPackageKind = "provider" | "template-package";
+
+/** Trust/evidence wrapper for one operator-installed provider or template package. */
+export interface ProviderInstallPackageInput {
+  kind: ProviderInstallPackageKind;
+  /** The package content produced by authoring inspect/scaffold or a trusted distribution. */
+  content: ProviderPackageAuthoringInput | TemplatePackageAuthoringInput | unknown;
+  /** Stable package id shown in operator diagnostics. */
+  packageId?: string;
+  /** Package signature or trusted distribution verification was present. */
+  signed?: boolean;
+  /** The package evidence was verified before activation. */
+  verified?: boolean;
+}
+
+/** Provider package input accepted by the operator install/update inventory. */
+export type ProviderInstallProviderInput =
+  | ProviderPackageAuthoringInput
+  | ProviderInstallPackageInput;
+
+/** Template package input accepted by the operator install/update inventory. */
+export type ProviderInstallTemplatePackageInput =
+  | TemplatePackageAuthoringInput
+  | ProviderInstallPackageInput;
+
+/** Operator-owned deployment inventory used by install/update plan, apply, rollback, and doctor. */
+export interface ProviderInstallInventoryInput {
+  inventoryId?: string;
+  profileId?: string;
+  providers?: readonly ProviderInstallProviderInput[];
+  providerPackages?: readonly ProviderInstallProviderInput[];
+  templatePackages?: readonly ProviderInstallTemplatePackageInput[];
+  packages?: readonly ProviderInstallPackageInput[];
+  appDeployment?: Partial<Record<"AuthProvider" | "ChannelAdapter" | "SecretStore", string>>;
+  capsuleDefaults?: Partial<
+    Record<
+      "Launcher" | "Workspace" | "HumanEntrypoint" | "AgentConnector" | "CompletionDetector",
+      string
+    >
+  >;
+  dependencyBindings?: DependencyBinding[];
+}
+
+/** Stable diagnostic codes produced before provider graph activation. */
+export type ProviderInstallDiagnosticCode =
+  | "install.package_unsigned"
+  | "install.package_unverifiable"
+  | "install.package_unknown_kind"
+  | "install.no_candidate";
+
+/** Operator-safe install/update diagnostic that names the affected package, provider, family, and layer. */
+export interface ProviderInstallDiagnostic {
+  code: ProviderInstallDiagnosticCode;
+  message: string;
+  path?: string;
+  packageId?: string;
+  providerId?: string;
+  family?: string;
+  layer?: "registry" | "template-package" | "deployment" | "capsule";
+}
+
+/** One provider or template-package registry entry visible in an install/update preview. */
+export interface ProviderInstallRegistryEntry {
+  id: string;
+  version?: string;
+  kind: string;
+  family?: string;
+  layer: "registry" | "template-package";
+  packageId?: string;
+}
+
+/** Host-touching dependency or evidence requirement surfaced before activation. */
+export interface ProviderInstallEvidenceRequirement {
+  ownerId: string;
+  layer: "registry" | "template-package";
+  family?: string;
+  dependency: string;
+  hostTouching?: boolean;
+  status: "bound" | "missing";
+}
+
+/** Compatibility facts for one capsule template in an install/update inventory. */
+export interface ProviderInstallCompatibilityRelation {
+  templateId: string;
+  openParts: string[];
+  requiredParts: string[];
+  compatibleProviders?: Record<string, string[]>;
+}
+
+/** Condensed operator-facing summary of one active or candidate provider inventory. */
+export interface ProviderInstallInventorySummary {
+  inventoryId?: string;
+  profileId: string;
+  registryEntries: ProviderInstallRegistryEntry[];
+  deploymentDefaults: Partial<Record<ProviderProfileFamilyId, string>>;
+  capsuleDefaults: Partial<Record<ProviderProfileFamilyId, string>>;
+  templateDefaults: Record<string, unknown>;
+  compatibilityRelations: ProviderInstallCompatibilityRelation[];
+  evidenceRequirements: ProviderInstallEvidenceRequirement[];
+}
+
+/** Diff between the currently active inventory and the candidate inventory. */
+export interface ProviderInstallChangeSet {
+  registryEntries: {
+    added: ProviderInstallRegistryEntry[];
+    removed: ProviderInstallRegistryEntry[];
+    updated: ProviderInstallRegistryEntry[];
+  };
+  deploymentDefaults: Record<string, { from?: unknown; to?: unknown }>;
+  capsuleDefaults: Record<string, { from?: unknown; to?: unknown }>;
+  capsuleTemplateDefaults: Record<string, { from?: unknown; to?: unknown }>;
+  compatibilityRelations: {
+    added: ProviderInstallCompatibilityRelation[];
+    removed: ProviderInstallCompatibilityRelation[];
+    updated: ProviderInstallCompatibilityRelation[];
+  };
+  evidenceRequirements: {
+    added: ProviderInstallEvidenceRequirement[];
+    removed: ProviderInstallEvidenceRequirement[];
+    updated: ProviderInstallEvidenceRequirement[];
+  };
+}
+
+/** Activation readiness state for an install/update preview. */
+export type ProviderInstallPlanStatus = "ready-to-apply" | "blocked" | "degraded";
+
+/** Inputs for building an install/update preview from active and candidate inventories. */
+export interface ProviderInstallPlanInput {
+  active?: ProviderInstallInventoryInput;
+  candidate?: ProviderInstallInventoryInput;
+}
+
+/** Complete install/update preview returned before any deployment state is mutated. */
+export interface ProviderInstallPlan {
+  ok: boolean;
+  mode: "operator-install-update";
+  status: ProviderInstallPlanStatus;
+  candidate: ProviderInstallInventorySummary;
+  active: ProviderInstallInventorySummary;
+  changes: ProviderInstallChangeSet;
+  diagnostics: unknown[];
+  doctor: ProviderGraphDoctorReport;
+  activation: {
+    mutatesDeploymentState: false;
+    rollbackSnapshotRequired: boolean;
+    rejectedAttemptsLeaveActiveUnchanged: true;
+    nextUx: "runtime-consumption" | "operator-repair";
+  };
+}
+
+/** Snapshot of the previously active inventory that can be restored by rollback. */
+export interface ProviderInstallRollbackSnapshot {
+  snapshotId: string;
+  inventory: ProviderInstallInventoryInput;
+  summary: ProviderInstallInventorySummary;
+}
+
+/** Result of validating and modeling provider inventory activation. */
+export interface ProviderInstallApplyResult {
+  ok: boolean;
+  activated: boolean;
+  plan: ProviderInstallPlan;
+  activeInventory: ProviderInstallInventoryInput;
+  activeSummary: ProviderInstallInventorySummary;
+  rollbackSnapshot?: ProviderInstallRollbackSnapshot;
+}
+
+/** Result of restoring a previously captured provider install rollback snapshot. */
+export interface ProviderInstallRollbackResult {
+  ok: true;
+  restoredInventory: ProviderInstallInventoryInput;
+  restoredSummary: ProviderInstallInventorySummary;
+}
+
+interface NormalizedProviderInstallInventory {
+  input: ProviderInstallInventoryInput;
+  providers: ProviderPackageAuthoringInput[];
+  templatePackages: TemplatePackageAuthoringInput[];
+  providerManifests: ProviderManifest[];
+  templatePackageManifests: TemplatePackageManifest[];
+  diagnostics: ProviderInstallDiagnostic[];
+  summary: ProviderInstallInventorySummary;
+}
+
+const EMPTY_INSTALL_INVENTORY: ProviderInstallInventoryInput = {};
+
+function packageContent(
+  input: ProviderInstallProviderInput | ProviderInstallTemplatePackageInput,
+): unknown {
+  return isRecord(input) && "content" in input ? input.content : input;
+}
+
+function packageKind(
+  input: ProviderInstallProviderInput | ProviderInstallTemplatePackageInput,
+  fallback: ProviderInstallPackageKind,
+): ProviderInstallPackageKind | undefined {
+  if (isRecord(input) && (input.kind === "provider" || input.kind === "template-package")) {
+    return input.kind;
+  }
+  const content = packageContent(input);
+  const manifestKind =
+    isRecord(content) && isRecord(content.manifest) && typeof content.manifest.kind === "string"
+      ? content.manifest.kind
+      : undefined;
+  if (manifestKind === "TemplatePackage") {
+    return "template-package";
+  }
+  if (manifestKind !== undefined) {
+    return "provider";
+  }
+  return fallback;
+}
+
+function packageEvidence(
+  input: ProviderInstallProviderInput | ProviderInstallTemplatePackageInput,
+): {
+  signed: boolean;
+  verified: boolean;
+} {
+  if (!isRecord(input)) {
+    return { signed: false, verified: false };
+  }
+  const evidence = isRecord(input.packageEvidence) ? input.packageEvidence : input;
+  return { signed: evidence.signed === true, verified: evidence.verified === true };
+}
+
+function manifestIdentity(content: unknown): {
+  id?: string;
+  version?: string;
+  kind?: string;
+  family?: string;
+} {
+  if (!isRecord(content) || !isRecord(content.manifest)) {
+    return {};
+  }
+  const manifest = content.manifest;
+  return {
+    ...(isRecord(manifest.metadata) && typeof manifest.metadata.name === "string"
+      ? { id: manifest.metadata.name }
+      : {}),
+    ...(isRecord(manifest.metadata) && typeof manifest.metadata.version === "string"
+      ? { version: manifest.metadata.version }
+      : {}),
+    ...(typeof manifest.kind === "string" ? { kind: manifest.kind } : {}),
+    ...(isRecord(manifest.spec) && typeof manifest.spec.family === "string"
+      ? { family: manifest.spec.family }
+      : {}),
+  };
+}
+
+function packageIdFor(
+  input: ProviderInstallProviderInput | ProviderInstallTemplatePackageInput,
+  content: unknown,
+): string | undefined {
+  if (isRecord(input) && typeof input.packageId === "string") {
+    return input.packageId;
+  }
+  return manifestIdentity(content).id;
+}
+
+function pushPackageTrustDiagnostics(
+  diagnostics: ProviderInstallDiagnostic[],
+  input: ProviderInstallProviderInput | ProviderInstallTemplatePackageInput,
+  content: unknown,
+  path: string,
+  layer: "registry" | "template-package",
+): void {
+  const evidence = packageEvidence(input);
+  const identity = manifestIdentity(content);
+  const packageId = packageIdFor(input, content);
+  if (!evidence.signed) {
+    diagnostics.push({
+      code: "install.package_unsigned",
+      message: "provider install package is missing trusted signature evidence",
+      path,
+      ...(packageId !== undefined ? { packageId } : {}),
+      ...(identity.id !== undefined ? { providerId: identity.id } : {}),
+      ...(identity.family !== undefined ? { family: identity.family } : {}),
+      layer,
+    });
+  }
+  if (!evidence.verified) {
+    diagnostics.push({
+      code: "install.package_unverifiable",
+      message: "provider install package evidence has not been verified",
+      path,
+      ...(packageId !== undefined ? { packageId } : {}),
+      ...(identity.id !== undefined ? { providerId: identity.id } : {}),
+      ...(identity.family !== undefined ? { family: identity.family } : {}),
+      layer,
+    });
+  }
+}
+
+function normalizeProviderInstallInventory(
+  input: ProviderInstallInventoryInput | undefined,
+): NormalizedProviderInstallInventory {
+  const inventory = input ?? EMPTY_INSTALL_INVENTORY;
+  const diagnostics: ProviderInstallDiagnostic[] = [];
+  const providers: ProviderPackageAuthoringInput[] = [];
+  const templatePackages: TemplatePackageAuthoringInput[] = [];
+
+  for (const [index, providerInput] of [
+    ...(inventory.providers ?? []),
+    ...(inventory.providerPackages ?? []),
+  ].entries()) {
+    const content = packageContent(providerInput);
+    pushPackageTrustDiagnostics(
+      diagnostics,
+      providerInput,
+      content,
+      `providers.${index}`,
+      "registry",
+    );
+    providers.push(content as ProviderPackageAuthoringInput);
+  }
+  for (const [index, templateInput] of (inventory.templatePackages ?? []).entries()) {
+    const content = packageContent(templateInput);
+    pushPackageTrustDiagnostics(
+      diagnostics,
+      templateInput,
+      content,
+      `templatePackages.${index}`,
+      "template-package",
+    );
+    templatePackages.push(content as TemplatePackageAuthoringInput);
+  }
+  for (const [index, pkg] of (inventory.packages ?? []).entries()) {
+    const content = packageContent(pkg);
+    const kind = packageKind(pkg, "provider");
+    if (kind === "provider") {
+      pushPackageTrustDiagnostics(diagnostics, pkg, content, `packages.${index}`, "registry");
+      providers.push(content as ProviderPackageAuthoringInput);
+    } else if (kind === "template-package") {
+      pushPackageTrustDiagnostics(
+        diagnostics,
+        pkg,
+        content,
+        `packages.${index}`,
+        "template-package",
+      );
+      templatePackages.push(content as TemplatePackageAuthoringInput);
+    } else {
+      diagnostics.push({
+        code: "install.package_unknown_kind",
+        message: "provider install package kind is not recognized",
+        path: `packages.${index}.kind`,
+      });
+    }
+  }
+
+  const providerManifests = providers.flatMap((providerPackage) =>
+    isRecord(providerPackage.manifest) && providerPackage.manifest.kind !== "TemplatePackage"
+      ? [providerPackage.manifest as unknown as ProviderManifest]
+      : [],
+  );
+  const templatePackageManifests = templatePackages.flatMap((templatePackage) =>
+    isRecord(templatePackage.manifest) && templatePackage.manifest.kind === "TemplatePackage"
+      ? [templatePackage.manifest as unknown as TemplatePackageManifest]
+      : [],
+  );
+  const summary = providerInstallInventorySummary(
+    inventory,
+    providerManifests,
+    templatePackageManifests,
+  );
+  return {
+    input: inventory,
+    providers,
+    templatePackages,
+    providerManifests,
+    templatePackageManifests,
+    diagnostics,
+    summary,
+  };
+}
+
+function installSelect(
+  inventory: ProviderInstallInventoryInput,
+): Partial<Record<ProviderProfileFamilyId, ProviderProfileSelection>> {
+  const select: Partial<Record<ProviderProfileFamilyId, ProviderProfileSelection>> = {};
+  for (const family of PROVIDER_PROFILE_FAMILIES) {
+    const deployment =
+      inventory.appDeployment?.[family as "AuthProvider" | "ChannelAdapter" | "SecretStore"];
+    const capsule =
+      inventory.capsuleDefaults?.[
+        family as
+          | "Launcher"
+          | "Workspace"
+          | "HumanEntrypoint"
+          | "AgentConnector"
+          | "CompletionDetector"
+      ];
+    const providerId = deployment ?? capsule;
+    if (providerId !== undefined) {
+      select[family] = providerId;
+    }
+  }
+  return select;
+}
+
+function installBaseProfile(inventory: ProviderInstallInventoryInput): ProviderProfileManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "ProviderProfile",
+    metadata: { name: inventory.profileId ?? inventory.inventoryId ?? "operator-install" },
+    spec: { select: installSelect(inventory) },
+  };
+}
+
+function providerInstallInventorySummary(
+  inventory: ProviderInstallInventoryInput,
+  providers: readonly ProviderManifest[],
+  templatePackages: readonly TemplatePackageManifest[],
+): ProviderInstallInventorySummary {
+  const registryEntries: ProviderInstallRegistryEntry[] = [
+    ...providers.map((provider) => ({
+      id: provider.metadata.name,
+      version: provider.metadata.version,
+      kind: provider.kind,
+      family: provider.spec.family,
+      layer: "registry" as const,
+    })),
+    ...templatePackages.map((pkg) => ({
+      id: pkg.metadata.name,
+      version: pkg.metadata.version,
+      kind: pkg.kind,
+      layer: "template-package" as const,
+      packageId: pkg.metadata.name,
+    })),
+  ].sort((a, b) => `${a.layer}:${a.id}`.localeCompare(`${b.layer}:${b.id}`));
+
+  const templateDefaults: Record<string, unknown> = {};
+  const compatibilityRelations: ProviderInstallCompatibilityRelation[] = [];
+  const evidenceRequirements: ProviderInstallEvidenceRequirement[] = [];
+  for (const pkg of templatePackages) {
+    Object.assign(templateDefaults, structuredClone(pkg.spec.defaults ?? {}));
+    for (const template of pkg.spec.templates) {
+      compatibilityRelations.push({
+        templateId: template.metadata.name,
+        openParts: structuredClone(template.spec.openParts ?? []),
+        requiredParts: compatibilityRequiredParts(pkg.spec.compatibility),
+        ...(template.spec.compatibleProviders !== undefined
+          ? { compatibleProviders: structuredClone(template.spec.compatibleProviders) }
+          : {}),
+      });
+      for (const requirement of template.spec.requires ?? []) {
+        evidenceRequirements.push({
+          ownerId: template.metadata.name,
+          layer: "template-package",
+          dependency: requirement.dependency,
+          ...(requirement.hostTouching !== undefined
+            ? { hostTouching: requirement.hostTouching }
+            : {}),
+          status:
+            bindingFor(inventory.dependencyBindings, requirement.dependency) === undefined
+              ? "missing"
+              : "bound",
+        });
+      }
+    }
+  }
+  for (const provider of providers) {
+    for (const requirement of provider.spec.requires ?? []) {
+      evidenceRequirements.push({
+        ownerId: provider.metadata.name,
+        layer: "registry",
+        family: provider.spec.family,
+        dependency: requirement.dependency,
+        ...(requirement.hostTouching !== undefined
+          ? { hostTouching: requirement.hostTouching }
+          : {}),
+        status:
+          bindingFor(inventory.dependencyBindings, requirement.dependency) === undefined
+            ? "missing"
+            : "bound",
+      });
+    }
+  }
+
+  const deploymentDefaults: Partial<Record<ProviderProfileFamilyId, string>> = {};
+  for (const family of ["AuthProvider", "ChannelAdapter", "SecretStore"] as const) {
+    const providerId = inventory.appDeployment?.[family];
+    if (providerId !== undefined) {
+      deploymentDefaults[family] = providerId;
+    }
+  }
+  const capsuleDefaults: Partial<Record<ProviderProfileFamilyId, string>> = {};
+  for (const family of [
+    "Launcher",
+    "Workspace",
+    "HumanEntrypoint",
+    "AgentConnector",
+    "CompletionDetector",
+  ] as const) {
+    const providerId = inventory.capsuleDefaults?.[family];
+    if (providerId !== undefined) {
+      capsuleDefaults[family] = providerId;
+    }
+  }
+
+  return {
+    ...(inventory.inventoryId !== undefined ? { inventoryId: inventory.inventoryId } : {}),
+    profileId: inventory.profileId ?? inventory.inventoryId ?? "operator-install",
+    registryEntries,
+    deploymentDefaults,
+    capsuleDefaults,
+    templateDefaults,
+    compatibilityRelations: compatibilityRelations.sort((a, b) =>
+      a.templateId.localeCompare(b.templateId),
+    ),
+    evidenceRequirements: evidenceRequirements.sort((a, b) =>
+      `${a.layer}:${a.ownerId}:${a.dependency}`.localeCompare(
+        `${b.layer}:${b.ownerId}:${b.dependency}`,
+      ),
+    ),
+  };
+}
+
+function compatibilityRequiredParts(compatibility: Record<string, unknown> | undefined): string[] {
+  const value = compatibility?.requiredParts;
+  return Array.isArray(value)
+    ? value.filter((part): part is string => typeof part === "string")
+    : [];
+}
+
+function stableJson(value: unknown): string {
+  if (value === undefined) {
+    return "__undefined__";
+  }
+  return JSON.stringify(value);
+}
+
+function recordByKey<T>(items: readonly T[], key: (item: T) => string): Map<string, T> {
+  return new Map(items.map((item) => [key(item), item]));
+}
+
+function listDiff<T>(
+  active: readonly T[],
+  candidate: readonly T[],
+  key: (item: T) => string,
+): { added: T[]; removed: T[]; updated: T[] } {
+  const activeByKey = recordByKey(active, key);
+  const candidateByKey = recordByKey(candidate, key);
+  return {
+    added: candidate.filter((item) => !activeByKey.has(key(item))),
+    removed: active.filter((item) => !candidateByKey.has(key(item))),
+    updated: candidate.filter((item) => {
+      const prior = activeByKey.get(key(item));
+      return prior !== undefined && stableJson(prior) !== stableJson(item);
+    }),
+  };
+}
+
+function mapDiff(
+  active: Record<string, unknown>,
+  candidate: Record<string, unknown>,
+): Record<string, { from?: unknown; to?: unknown }> {
+  const out: Record<string, { from?: unknown; to?: unknown }> = {};
+  for (const key of new Set([...Object.keys(active), ...Object.keys(candidate)])) {
+    if (stableJson(active[key]) === stableJson(candidate[key])) {
+      continue;
+    }
+    out[key] = {
+      ...(active[key] !== undefined ? { from: active[key] } : {}),
+      ...(candidate[key] !== undefined ? { to: candidate[key] } : {}),
+    };
+  }
+  return out;
+}
+
+function providerInstallChanges(
+  active: ProviderInstallInventorySummary,
+  candidate: ProviderInstallInventorySummary,
+): ProviderInstallChangeSet {
+  return {
+    registryEntries: listDiff(
+      active.registryEntries,
+      candidate.registryEntries,
+      (entry) => `${entry.layer}:${entry.id}`,
+    ),
+    deploymentDefaults: mapDiff(active.deploymentDefaults, candidate.deploymentDefaults),
+    capsuleDefaults: mapDiff(active.capsuleDefaults, candidate.capsuleDefaults),
+    capsuleTemplateDefaults: mapDiff(active.templateDefaults, candidate.templateDefaults),
+    compatibilityRelations: listDiff(
+      active.compatibilityRelations,
+      candidate.compatibilityRelations,
+      (relation) => relation.templateId,
+    ),
+    evidenceRequirements: listDiff(
+      active.evidenceRequirements,
+      candidate.evidenceRequirements,
+      (requirement) => `${requirement.layer}:${requirement.ownerId}:${requirement.dependency}`,
+    ),
+  };
+}
+
+function doctorForInstallInventory(
+  inventory: ProviderInstallInventoryInput,
+  normalized: NormalizedProviderInstallInventory,
+): ProviderGraphDoctorReport {
+  const graph = resolveProviderGraphProjection({
+    providerSet: {
+      ...(inventory.inventoryId !== undefined ? { id: inventory.inventoryId } : {}),
+      providers: normalized.providerManifests,
+    },
+    templatePackages: normalized.templatePackageManifests,
+    baseProfile: installBaseProfile(inventory),
+    ...(inventory.dependencyBindings !== undefined
+      ? { dependencyBindings: inventory.dependencyBindings }
+      : {}),
+    configValidationMode: "runtime",
+  });
+  return providerGraphDoctorReport(graph);
+}
+
+function diagnosticProviderId(diagnostic: Record<string, unknown>): string | undefined {
+  if (typeof diagnostic.providerId === "string") {
+    return diagnostic.providerId;
+  }
+  if (typeof diagnostic.provider === "string") {
+    return diagnostic.provider;
+  }
+  if (typeof diagnostic.packageId === "string") {
+    return diagnostic.packageId;
+  }
+  return undefined;
+}
+
+function diagnosticLayer(
+  diagnostic: Record<string, unknown>,
+): ProviderInstallDiagnostic["layer"] | undefined {
+  if (
+    diagnostic.layer === "registry" ||
+    diagnostic.layer === "template-package" ||
+    diagnostic.layer === "deployment" ||
+    diagnostic.layer === "capsule"
+  ) {
+    return diagnostic.layer;
+  }
+  const code = typeof diagnostic.code === "string" ? diagnostic.code : "";
+  if (diagnostic.dependencyScope === "provider" || code.startsWith("provider_author.")) {
+    return "registry";
+  }
+  if (
+    diagnostic.dependencyScope === "template" ||
+    typeof diagnostic.template === "string" ||
+    code.startsWith("template_author.") ||
+    code === "graph.compatibility_ambiguous"
+  ) {
+    return "template-package";
+  }
+  if (diagnosticProviderId(diagnostic) !== undefined) {
+    return "registry";
+  }
+  return undefined;
+}
+
+function diagnosticFamily(
+  diagnostic: Record<string, unknown>,
+  providerFamilies: ReadonlyMap<string, string>,
+): string | undefined {
+  if (diagnostic.code === "graph.compatibility_ambiguous") {
+    const part = isRecord(diagnostic.detail) ? diagnostic.detail.part : undefined;
+    if (typeof part === "string") {
+      return providerFamilyForPart(part);
+    }
+  }
+  if (typeof diagnostic.family === "string") {
+    return diagnostic.family;
+  }
+  const providerId = diagnosticProviderId(diagnostic);
+  if (providerId !== undefined) {
+    return providerFamilies.get(providerId);
+  }
+  const part = isRecord(diagnostic.detail) ? diagnostic.detail.part : undefined;
+  return typeof part === "string" ? providerFamilyForPart(part) : undefined;
+}
+
+function normalizeProviderInstallDiagnostics(
+  diagnostics: readonly unknown[],
+  candidate: NormalizedProviderInstallInventory,
+): unknown[] {
+  const providerFamilies = new Map(
+    candidate.providerManifests.map((provider) => [provider.metadata.name, provider.spec.family]),
+  );
+  return diagnostics.map((diagnostic) => {
+    if (!isRecord(diagnostic)) {
+      return diagnostic;
+    }
+    const family = diagnosticFamily(diagnostic, providerFamilies);
+    const layer = diagnosticLayer(diagnostic);
+    return {
+      ...diagnostic,
+      ...(family !== undefined ? { family } : {}),
+      ...(layer !== undefined ? { layer } : {}),
+    };
+  });
+}
+
+/** Build the operator install/update activation preview without mutating deployment state. */
+export function planProviderInstallUpdate(input: ProviderInstallPlanInput): ProviderInstallPlan {
+  const active = normalizeProviderInstallInventory(input.active);
+  const candidate = normalizeProviderInstallInventory(input.candidate);
+  if (input.candidate === undefined) {
+    candidate.diagnostics.push({
+      code: "install.no_candidate",
+      message: "provider install/update planning requires a candidate inventory",
+      layer: "deployment",
+    });
+  }
+  const authoring = validateProviderAuthoringWorkspace({
+    providers: candidate.providers,
+    templatePackages: candidate.templatePackages.map((templatePackage) => ({
+      ...templatePackage,
+      providers: templatePackage.providers ?? candidate.providerManifests,
+    })),
+  });
+  const graph = resolveProviderGraphProjection({
+    providerSet: {
+      ...(candidate.input.inventoryId !== undefined ? { id: candidate.input.inventoryId } : {}),
+      providers: candidate.providerManifests,
+    },
+    templatePackages: candidate.templatePackageManifests,
+    baseProfile: installBaseProfile(candidate.input),
+    ...(candidate.input.dependencyBindings !== undefined
+      ? { dependencyBindings: candidate.input.dependencyBindings }
+      : {}),
+    configValidationMode: "runtime",
+  });
+  const doctor = providerGraphDoctorReport(graph);
+  const diagnostics = normalizeProviderInstallDiagnostics(
+    [
+      ...candidate.diagnostics,
+      ...authoring.diagnostics,
+      ...graph.diagnostics,
+      ...doctor.diagnostics,
+    ],
+    candidate,
+  );
+  const status: ProviderInstallPlanStatus =
+    diagnostics.length > 0 || doctor.status === "FAIL"
+      ? "blocked"
+      : doctor.status === "DEGRADED"
+        ? "degraded"
+        : "ready-to-apply";
+  return structuredClone({
+    ok: status === "ready-to-apply",
+    mode: "operator-install-update",
+    status,
+    candidate: candidate.summary,
+    active: active.summary,
+    changes: providerInstallChanges(active.summary, candidate.summary),
+    diagnostics,
+    doctor,
+    activation: {
+      mutatesDeploymentState: false,
+      rollbackSnapshotRequired: true,
+      rejectedAttemptsLeaveActiveUnchanged: true,
+      nextUx: status === "ready-to-apply" ? "runtime-consumption" : "operator-repair",
+    },
+  });
+}
+
+/** Validate and model activation. Callers that own state decide whether to persist the returned candidate inventory. */
+export function applyProviderInstallUpdate(
+  input: ProviderInstallPlanInput,
+): ProviderInstallApplyResult {
+  const activeInventory = input.active ?? EMPTY_INSTALL_INVENTORY;
+  const candidateInventory = input.candidate ?? EMPTY_INSTALL_INVENTORY;
+  const plan = planProviderInstallUpdate(input);
+  if (!plan.ok) {
+    const active = normalizeProviderInstallInventory(activeInventory);
+    return structuredClone({
+      ok: false,
+      activated: false,
+      plan,
+      activeInventory,
+      activeSummary: active.summary,
+    });
+  }
+  return structuredClone({
+    ok: true,
+    activated: true,
+    plan,
+    activeInventory: candidateInventory,
+    activeSummary: plan.candidate,
+    rollbackSnapshot: {
+      snapshotId: `rollback:${plan.active.profileId}->${plan.candidate.profileId}`,
+      inventory: activeInventory,
+      summary: plan.active,
+    },
+  });
+}
+
+/** Build the doctor report that install/update and runtime consumption read after activation. */
+export function doctorProviderInstallInventory(input: ProviderInstallInventoryInput): {
+  mode: "provider-graph-doctor";
+  inventory: ProviderInstallInventorySummary;
+  doctor: ProviderGraphDoctorReport;
+} {
+  const normalized = normalizeProviderInstallInventory(input);
+  return structuredClone({
+    mode: "provider-graph-doctor",
+    inventory: normalized.summary,
+    doctor: doctorForInstallInventory(input, normalized),
+  });
+}
+
+/** Restore a previously captured provider-install rollback snapshot. */
+export function rollbackProviderInstallUpdate(
+  snapshot: ProviderInstallRollbackSnapshot,
+): ProviderInstallRollbackResult {
+  if (
+    !isRecord(snapshot) ||
+    !Object.hasOwn(snapshot, "snapshotId") ||
+    !Object.hasOwn(snapshot, "inventory") ||
+    !Object.hasOwn(snapshot, "summary") ||
+    typeof snapshot.snapshotId !== "string" ||
+    !isRecord(snapshot.inventory) ||
+    !isRecord(snapshot.summary)
+  ) {
+    throw glaError("usage.bad_argument", "provider install rollback snapshot is invalid", {
+      detail: {
+        required: ["snapshotId", "inventory", "summary"],
+      },
+      retryable: false,
+    });
+  }
+  return structuredClone({
+    ok: true,
+    restoredInventory: snapshot.inventory,
+    restoredSummary: snapshot.summary,
+  });
 }

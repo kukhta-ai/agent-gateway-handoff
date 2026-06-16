@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.08 complete pending merge"
-branch: feature/provider-refactor-task-GLA-110.08
+phase_name: "Autonomous build — provider-layer refactor GLA-110.09 complete; pending story-branch merge"
+branch: feature/provider-refactor-task-GLA-110.09
 epic: provider-refactor-110
 active_story: null
-review_cycle: 3
+review_cycle: 2
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-refactor-task-GLA-110.08"
-  next_ready_sequence: "GLA-110.08 is Done in Backlog.md and ready to merge into feature/provider-graph; next ready task after merge is GLA-110.09."
-  note: "2026-06-16: GLA-110.08 completed. Provider and template-package authoring now have executable JSON-first scaffold/validate/test-preflight/inspect CLI flows, workspace duplicate diagnostics, consumed template default validation, docs aligned to implemented commands, and dev ProviderRegistry/catalog boot proof. Goodall requested changes twice and final re-review approved. pnpm run gate passed with typecheck, Biome CI, required browser preflight, and 81 test files / 913 passed / 15 skipped."
+  current_branch: "feature/provider-refactor-task-GLA-110.09"
+  next_ready_sequence: "GLA-110.09 is Done with Goodall APPROVE and full pnpm run gate passing; merge story branch to feature/provider-graph, then start GLA-110.10."
+  note: "2026-06-16: GLA-110.09 completed. Scope delivered: executable operator/deployment-agent provider-install plan/apply/rollback UX, provider graph doctor diagnostics, activation preview, fail-closed package rejection with family/layer diagnostics, rollback/unchanged active-state evidence, and wording that separates operator work from provider authoring and runtime consumption UX."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -117,8 +117,8 @@ provider_refactor_110_specialists:
   architect: {spawned: true, id: "019ecfe8-3773-7b22-beed-6d099213ed0b", nickname: "Archimedes", open: true, resumable: true, role: "provider-layer target contract, migration map, and architecture boundary review", last_skill: "bmad-agent-architect and bmad-create-architecture loaded/resolved; unattended run blocked by interactive PRD/input confirmation and architecture artifact writes; docs-driven fallback recorded"}
   ux: {spawned: true, id: "019ecfe8-6bac-7893-a621-054bfe1c9615", nickname: "Confucius", open: true, resumable: true, role: "provider authoring, install/update, and runtime consumption UX separation", last_skill: "GLA-110.08 provider authoring UX sidecar review completed; CLI-promoted JSON-first authoring flow, duplicate diagnostics, dev boot proof, and stale ProviderSet wording checked"}
   sm: {spawned: true, id: "019ecfe8-92ac-78b2-a02e-3b940ba8763a", nickname: "Leibniz", open: true, resumable: true, role: "story sequencing, create-story evidence, and backlog readiness", last_skill: "bmad-create-story loaded/resolved; unattended run blocked by missing sprint-status/story artifacts and artifact writes; Backlog.md/docs fallback recorded"}
-  worker: {spawned: true, id: "019ecfe8-d9be-7100-b1df-1e5d50999552", nickname: "Banach", open: true, resumable: true, role: "provider-layer implementation and E2E/contract test generation", last_skill: "GLA-110.08 bmad-dev-story/docs-backlog fallback implemented executable provider/template-package authoring CLI, validation, docs, and dev registry/catalog proof; full pnpm gate passed"}
-  reviewer: {spawned: true, id: "019ecfe8-fe09-7790-9d13-d17110e8848f", nickname: "Goodall", open: true, resumable: true, role: "TEA/test/security and independent story review", last_skill: "GLA-110.08 story-automator-review fallback: registry boot proof and contract-test semantics blockers fixed; declared/external contract test help fields fixed; final re-review APPROVE"}
+  worker: {spawned: true, id: "019ecfe8-d9be-7100-b1df-1e5d50999552", nickname: "Banach", open: true, resumable: true, role: "provider-layer implementation and E2E/contract test generation", last_skill: "GLA-110.09 bmad-dev-story/qa fallback implemented executable provider-install plan/apply/rollback, doctor provider-graph, docs, and regression tests; focused suite and full pnpm run gate passed"}
+  reviewer: {spawned: true, id: "019ecfe8-fe09-7790-9d13-d17110e8848f", nickname: "Goodall", open: true, resumable: true, role: "TEA/test/security and independent story review", last_skill: "GLA-110.09 story-automator-review fallback: rollback validation and diagnostic family/layer blockers fixed; focused suite and full gate checked; final re-review APPROVE"}
   investigator: {spawned: true, id: "019ecfe9-29ce-75a1-a436-5f44a075fd54", nickname: "Hume", open: true, resumable: true, role: "root-cause analysis for provider-layer regressions", last_skill: "bmad-investigate loaded/resolved; unattended run blocked by investigation case-file write and outcome pause under no-edit init; read-only fault-map fallback recorded"}
 
 gates_pending: ["human approval to open PR against dev"]
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T21:03:43Z"
+last_updated: "2026-06-16T21:38:00Z"
