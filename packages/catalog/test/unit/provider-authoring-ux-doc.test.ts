@@ -39,12 +39,14 @@ describe("provider authoring UX documentation", () => {
       "Missing skills or docs",
       "Missing probes",
       "Dependency requirements",
+      "Duplicate ids or versions",
+      "Inert or unsupported fields",
       "Redaction failures",
       "Contract-test failures",
       "operator install/update",
       "not as the journey structure",
-      "not the current executable `gla` CLI contract",
-      "deferred",
+      "current executable `gla` CLI",
+      "JSON-first authoring flow",
     ]) {
       expect(doc).toContain(requiredPhrase);
     }

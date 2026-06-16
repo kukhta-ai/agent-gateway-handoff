@@ -93,6 +93,16 @@ gla
 ├── template show <id>
 ├── skill list [--for <template>]
 ├── skill show <id>
+├── provider scaffold --family <family> --id <provider-id> [--version <version>] [--summary <text>]
+├── provider validate <path>
+├── provider test <path>
+├── provider inspect <path>
+├── template-package scaffold --id <package-id> [--template <template-id>] [--launcher <id>]
+│       [--entrypoint <id>] [--connector <id>] [--workspace <id>] [--detector <id>]
+│       [--open-parts <parts>] [--version <version>] [--summary <text>]
+├── template-package validate <path>
+├── template-package test <path>
+├── template-package inspect <path>
 ├── task create [--intent <label>] [--recipient <ref>]
 ├── task get <id>
 ├── task list [--state <s>]
@@ -124,8 +134,6 @@ Current deferred surfaces and diagnostics:
 | Surface | Current behavior | Future direction |
 |---|---|---|
 | `policy mounts` | `usage.unsupported` | policy inspection for host-mount planning |
-| provider authoring commands | `usage.unsupported` | `provider scaffold/validate/test/inspect` |
-| template-package authoring commands | `usage.unsupported` | `template-package scaffold/validate` |
 | profile install/update commands | `usage.unsupported` | `profile list/show/validate` and overlay validation |
 | provider-set install/update commands | `usage.unsupported` | `provider-set inspect/plan/apply/rollback` |
 | `doctor provider-graph` | `usage.unsupported` | CLI exposure for the provider graph doctor report |

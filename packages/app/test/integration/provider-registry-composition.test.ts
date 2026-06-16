@@ -1,7 +1,9 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProviderRegistry } from "@gla/provider-host";
+import { BROWSER_HANDOFF_TEMPLATE, createProviderPackageSkeleton } from "@gla/catalog";
+import type { LauncherPort, RuntimeHandle } from "@gla/kernel";
+import { type GlaProviderModule, ProviderRegistry } from "@gla/provider-host";
 import {
   AUTH_WEBAUTHN_PROVIDER_ID,
   CHANNEL_CLI_PROVIDER_ID,
@@ -218,6 +220,92 @@ describe("ProviderRegistry app composition", () => {
       detector: DETECTOR_USER_DONE_PROVIDER_ID,
       providerConfig: {
         [LAUNCHER_PROCESS_PROVIDER_ID]: { mode: "headless" },
+      },
+    });
+  });
+
+  it("registers a locally authored provider into a development boot context and projects it to catalog", () => {
+    const authoredProviderId = "launcher-authoring-boot";
+    const skeleton = createProviderPackageSkeleton({
+      providerId: authoredProviderId,
+      family: "launcher",
+      configSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          mode: { type: "string", enum: ["dev"], default: "dev" },
+        },
+      },
+    });
+    const launcher: LauncherPort = {
+      tier: "none",
+      mountCapability: { file: false, directory: false, modes: [] },
+      async spawn() {
+        return "runtime:authoring-boot" as unknown as RuntimeHandle;
+      },
+      async health() {
+        return "up";
+      },
+      async stop() {},
+    };
+    const localModule: GlaProviderModule = {
+      moduleId: "@gla/provider-authoring-boot",
+      manifest: skeleton.manifest,
+      register(ctx) {
+        ctx.registerLauncher(authoredProviderId, { create: () => launcher });
+        ctx.registerProbe(authoredProviderId, () => "available");
+      },
+    };
+    const providerRegistry = ProviderRegistry.fromProviderModules([
+      ...referenceProviderModules,
+      localModule,
+    ]);
+    const { providerConfig: capsuleProviderConfig, ...capsuleProviders } =
+      referenceCapsuleProviderSelectionForProfile(REFERENCE_PROFILE_SCENARIO_01_ID);
+    const bridge = createBridge({
+      providerRegistry,
+      appDeploymentConfig: referenceAppDeploymentConfigForProfile(REFERENCE_PROFILE_SCENARIO_01_ID),
+      capsuleProviders: { ...capsuleProviders, launcher: authoredProviderId },
+      capsuleProviderConfig: {
+        ...(capsuleProviderConfig ?? {}),
+        [authoredProviderId]: { mode: "dev" },
+      },
+    });
+
+    expect(providerRegistry.isSealed()).toBe(true);
+    expect(
+      providerRegistry.providerEntries().find((entry) => entry.providerId === authoredProviderId),
+    ).toMatchObject({
+      providerId: authoredProviderId,
+      family: "launcher",
+      version: "0.1.0",
+      factoryAvailable: true,
+      probe: expect.objectContaining({ name: authoredProviderId, registered: true }),
+      packageEvidence: {
+        kind: "provider-module",
+        moduleId: "@gla/provider-authoring-boot",
+      },
+    });
+    expect(bridge.catalogShow(authoredProviderId)).toMatchObject({
+      name: authoredProviderId,
+      family: "launcher",
+      availability: "available",
+      resolvedConfig: { mode: "dev" },
+      provenance: {
+        source: "provider-manifest",
+        id: authoredProviderId,
+        version: "0.1.0",
+      },
+    });
+    expect(bridge.templateShow(BROWSER_HANDOFF_TEMPLATE.metadata.name)).toMatchObject({
+      defaultSources: {
+        launcher: expect.objectContaining({
+          providerId: authoredProviderId,
+          source: "template-package-default",
+        }),
+      },
+      compatibilityConstraints: {
+        requiredParts: expect.arrayContaining(["entrypoint", "connector", "detector"]),
       },
     });
   });

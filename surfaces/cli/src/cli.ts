@@ -15,6 +15,21 @@
 import { readFileSync } from "node:fs";
 import { AgentBridge } from "@gla/bridge";
 import {
+  PROVIDER_MANIFESTS,
+  type ProviderAuthoringRuntimeFamily,
+  type ProviderAuthoringWorkspaceInput,
+  type ProviderManifest,
+  type ProviderPackageAuthoringInput,
+  type ProviderPackageAuthoringReport,
+  type TemplatePackageAuthoringInput,
+  type TemplatePackageAuthoringReport,
+  createProviderPackageSkeleton,
+  createTemplatePackageSkeleton,
+  validateProviderAuthoringWorkspace,
+  validateProviderPackageAuthoring,
+  validateTemplatePackageAuthoring,
+} from "@gla/catalog";
+import {
   type OpaqueToken,
   assemblyDefectsToError,
   exitCodeFor,
@@ -82,6 +97,11 @@ interface CliParseError {
   message: string;
   detail: Record<string, unknown>;
 }
+
+type AuthoringReport =
+  | ProviderPackageAuthoringReport
+  | TemplatePackageAuthoringReport
+  | ReturnType<typeof validateProviderAuthoringWorkspace>;
 
 interface FlagDefinition {
   source: string;
@@ -779,6 +799,44 @@ export async function run(
           );
         }
         return usageError(out, "usage: gla skill (list | show <id>)");
+      }
+
+      case "provider": {
+        if (verb === "scaffold") {
+          return providerScaffold(parsed, out);
+        }
+        if (verb === "validate") {
+          return providerValidate(parsed, out);
+        }
+        if (verb === "test") {
+          return providerTest(parsed, out);
+        }
+        if (verb === "inspect") {
+          return providerInspect(parsed, out);
+        }
+        return usageError(
+          out,
+          "usage: gla provider (scaffold | validate <path> | test <path> | inspect <path>)",
+        );
+      }
+
+      case "template-package": {
+        if (verb === "scaffold") {
+          return templatePackageScaffold(parsed, out);
+        }
+        if (verb === "validate") {
+          return templatePackageValidate(parsed, out);
+        }
+        if (verb === "test") {
+          return templatePackageTest(parsed, out);
+        }
+        if (verb === "inspect") {
+          return templatePackageInspect(parsed, out);
+        }
+        return usageError(
+          out,
+          "usage: gla template-package (scaffold | validate <path> | test <path> | inspect <path>)",
+        );
       }
 
       case "task": {
@@ -1546,6 +1604,416 @@ function operatorRequest(
     return maybe.request.bind(maybe);
   }
   return undefined;
+}
+
+const AUTHORING_RUNTIME_FAMILIES = new Set<ProviderAuthoringRuntimeFamily>([
+  "auth",
+  "launcher",
+  "entrypoint",
+  "connector",
+  "workspace",
+  "detector",
+  "channel",
+  "secret-store",
+]);
+
+function requiredStringFlag(parsed: ParsedArgs, flag: string, usage: string): string {
+  const value = parsed.flags.get(flag);
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  throw glaError("usage.bad_argument", usage, { detail: { flag: `--${flag}` } });
+}
+
+function optionalStringFlag(parsed: ParsedArgs, flag: string): string | undefined {
+  const value = parsed.flags.get(flag);
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function parseAuthoringFamily(value: string): ProviderAuthoringRuntimeFamily {
+  if (AUTHORING_RUNTIME_FAMILIES.has(value as ProviderAuthoringRuntimeFamily)) {
+    return value as ProviderAuthoringRuntimeFamily;
+  }
+  throw glaError("usage.bad_argument", `unsupported provider family: ${value}`, {
+    detail: { family: value, supported: [...AUTHORING_RUNTIME_FAMILIES] },
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readAuthoringJson(path: string): unknown {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    throw glaError("usage.bad_argument", `cannot read authoring file "${path}": ${String(e)}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw glaError("usage.bad_argument", `authoring file "${path}" is not valid JSON`);
+  }
+}
+
+function isAuthoringWorkspace(doc: unknown): doc is ProviderAuthoringWorkspaceInput {
+  return isRecord(doc) && (Array.isArray(doc.providers) || Array.isArray(doc.templatePackages));
+}
+
+function manifestKind(doc: unknown): string | undefined {
+  return isRecord(doc) && isRecord(doc.manifest) && typeof doc.manifest.kind === "string"
+    ? doc.manifest.kind
+    : undefined;
+}
+
+function manifestVersion(doc: unknown): string | undefined {
+  return isRecord(doc) &&
+    isRecord(doc.manifest) &&
+    isRecord(doc.manifest.metadata) &&
+    typeof doc.manifest.metadata.version === "string"
+    ? doc.manifest.metadata.version
+    : undefined;
+}
+
+function providerManifestId(doc: unknown): string | undefined {
+  return isRecord(doc) &&
+    isRecord(doc.manifest) &&
+    isRecord(doc.manifest.metadata) &&
+    typeof doc.manifest.metadata.name === "string"
+    ? doc.manifest.metadata.name
+    : undefined;
+}
+
+function providerManifestFamily(doc: unknown): string | undefined {
+  return isRecord(doc) &&
+    isRecord(doc.manifest) &&
+    isRecord(doc.manifest.spec) &&
+    typeof doc.manifest.spec.family === "string"
+    ? doc.manifest.spec.family
+    : undefined;
+}
+
+function templatePackageId(doc: unknown): string | undefined {
+  return isRecord(doc) &&
+    isRecord(doc.manifest) &&
+    isRecord(doc.manifest.metadata) &&
+    typeof doc.manifest.metadata.name === "string"
+    ? doc.manifest.metadata.name
+    : undefined;
+}
+
+function templateIds(doc: unknown): string[] {
+  if (
+    !isRecord(doc) ||
+    !isRecord(doc.manifest) ||
+    !isRecord(doc.manifest.spec) ||
+    !Array.isArray(doc.manifest.spec.templates)
+  ) {
+    return [];
+  }
+  return doc.manifest.spec.templates.flatMap((template) =>
+    isRecord(template) && isRecord(template.metadata) && typeof template.metadata.name === "string"
+      ? [template.metadata.name]
+      : [],
+  );
+}
+
+function providerManifestSpec(doc: unknown): Record<string, unknown> | undefined {
+  return isRecord(doc) && isRecord(doc.manifest) && isRecord(doc.manifest.spec)
+    ? doc.manifest.spec
+    : undefined;
+}
+
+function templatePackageSpec(doc: unknown): Record<string, unknown> | undefined {
+  return providerManifestSpec(doc);
+}
+
+function templateSummaries(doc: unknown): Array<Record<string, unknown>> {
+  const spec = templatePackageSpec(doc);
+  const templates = Array.isArray(spec?.templates) ? spec.templates : [];
+  return templates.flatMap((template) => {
+    if (!isRecord(template) || !isRecord(template.metadata) || !isRecord(template.spec)) {
+      return [];
+    }
+    return [
+      {
+        id: template.metadata.name,
+        version: template.metadata.version,
+        kind: template.kind,
+        requiredParts: template.spec.requiredParts,
+        openParts: template.spec.openParts,
+        compatibleProviders: template.spec.compatibleProviders,
+      },
+    ];
+  });
+}
+
+function defaultAuthoringProviders(): ProviderManifest[] {
+  return Object.values(PROVIDER_MANIFESTS);
+}
+
+function providerReportFromDoc(doc: unknown): AuthoringReport {
+  if (isAuthoringWorkspace(doc)) {
+    return validateProviderAuthoringWorkspace(doc);
+  }
+  if (manifestKind(doc) === "TemplatePackage") {
+    throw glaError(
+      "usage.bad_argument",
+      "provider authoring command received a TemplatePackage; use gla template-package validate/test/inspect",
+    );
+  }
+  return validateProviderPackageAuthoring(doc as ProviderPackageAuthoringInput);
+}
+
+function templatePackageReportFromDoc(doc: unknown): AuthoringReport {
+  if (isAuthoringWorkspace(doc)) {
+    return validateProviderAuthoringWorkspace(doc);
+  }
+  if (manifestKind(doc) !== "TemplatePackage") {
+    throw glaError(
+      "usage.bad_argument",
+      "template-package command expects a TemplatePackage authoring JSON file",
+    );
+  }
+  const templatePackage = doc as TemplatePackageAuthoringInput;
+  const providers = templatePackage.providers ?? defaultAuthoringProviders();
+  return validateTemplatePackageAuthoring({
+    ...templatePackage,
+    providers,
+  });
+}
+
+function emitAuthoringReport(
+  parsed: ParsedArgs,
+  out: Output,
+  noun: string,
+  verb: string,
+  report: AuthoringReport,
+): number {
+  const code = emitCommandResult(parsed, out, noun, verb, report);
+  return code === ExitCode.OK && !report.ok ? ExitCode.USAGE : code;
+}
+
+function providerScaffold(parsed: ParsedArgs, out: Output): number {
+  const family = parseAuthoringFamily(
+    requiredStringFlag(parsed, "family", "provider scaffold requires --family <family>"),
+  );
+  const providerId = requiredStringFlag(
+    parsed,
+    "id",
+    "provider scaffold requires --id <provider-id>",
+  );
+  const version = optionalStringFlag(parsed, "version");
+  const summary = optionalStringFlag(parsed, "summary");
+  const skeleton = createProviderPackageSkeleton({
+    providerId,
+    family,
+    ...(version !== undefined ? { version } : {}),
+    ...(summary !== undefined ? { summary } : {}),
+  });
+  return emitCommandResult(parsed, out, "provider", "scaffold", skeleton);
+}
+
+function providerValidate(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla provider validate <path>");
+  }
+  return emitAuthoringReport(
+    parsed,
+    out,
+    "provider",
+    "validate",
+    providerReportFromDoc(readAuthoringJson(path)),
+  );
+}
+
+function providerContractTests(doc: unknown): unknown[] {
+  return isRecord(doc) && Array.isArray(doc.contractTests) ? doc.contractTests : [];
+}
+
+function templateContractTests(doc: unknown): unknown[] {
+  const spec = templatePackageSpec(doc);
+  return Array.isArray(spec?.tests) ? spec.tests : [];
+}
+
+function authoringTestReport(
+  report: AuthoringReport,
+  declaredContractTests: readonly unknown[],
+): Record<string, unknown> {
+  return {
+    ok: report.ok,
+    harness: "authoring-contract-preflight",
+    declaredContractTests,
+    externalContractTests: "not-executed",
+    validation: report,
+    tests: [
+      {
+        id: "authoring-validation",
+        status: report.ok ? "passed" : "failed",
+        diagnostics: report.diagnostics,
+      },
+    ],
+  };
+}
+
+function providerTest(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla provider test <path>");
+  }
+  const doc = readAuthoringJson(path);
+  const report = providerReportFromDoc(doc);
+  const code = emitCommandResult(
+    parsed,
+    out,
+    "provider",
+    "test",
+    authoringTestReport(report, providerContractTests(doc)),
+  );
+  return code === ExitCode.OK && !report.ok ? ExitCode.USAGE : code;
+}
+
+function providerInspect(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla provider inspect <path>");
+  }
+  const doc = readAuthoringJson(path);
+  const report = providerReportFromDoc(doc);
+  const spec = providerManifestSpec(doc);
+  return emitCommandResult(parsed, out, "provider", "inspect", {
+    kind: isAuthoringWorkspace(doc) ? "ProviderAuthoringWorkspace" : "ProviderPackage",
+    providerId: providerManifestId(doc),
+    family: providerManifestFamily(doc),
+    version: manifestVersion(doc),
+    ok: report.ok,
+    diagnostics: report.diagnostics,
+    readiness: "readiness" in report ? report.readiness : undefined,
+    changedFiles: isRecord(doc) && Array.isArray(doc.changedFiles) ? doc.changedFiles : undefined,
+    capability: spec?.capability,
+    configSchema: spec?.config_schema,
+    factoryConfigSchema: spec?.factory_config_schema,
+    requirements: spec?.requires,
+    skills: spec?.skills,
+    docs: isRecord(doc) && Array.isArray(doc.docs) ? doc.docs : undefined,
+    contractTests: providerContractTests(doc),
+    module: isRecord(doc) && isRecord(doc.module) ? doc.module : undefined,
+    wpmSkeletons: isRecord(doc) && Array.isArray(doc.wpmSkeletons) ? doc.wpmSkeletons : undefined,
+  });
+}
+
+function parseOpenParts(value: string | undefined): string[] {
+  if (value === undefined) {
+    return ["entrypoint", "connector", "workspace", "detector"];
+  }
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function templateRequiredParts(parsed: ParsedArgs): Record<string, string> {
+  return {
+    launcher: optionalStringFlag(parsed, "launcher") ?? "launcher-process",
+    entrypoint: optionalStringFlag(parsed, "entrypoint") ?? "entrypoint-novnc",
+    connector: optionalStringFlag(parsed, "connector") ?? "connector-cdp",
+    workspace: optionalStringFlag(parsed, "workspace") ?? "workspace-profile",
+    detector: optionalStringFlag(parsed, "detector") ?? "url-watcher",
+  };
+}
+
+function compatibleProvidersForOpenParts(
+  requiredParts: Record<string, string>,
+  openParts: readonly string[],
+): Record<string, string[]> {
+  return Object.fromEntries(
+    openParts.flatMap((part) => {
+      const providerId = requiredParts[part];
+      return providerId === undefined ? [] : [[part, [providerId]]];
+    }),
+  );
+}
+
+function templatePackageScaffold(parsed: ParsedArgs, out: Output): number {
+  const packageId = requiredStringFlag(
+    parsed,
+    "id",
+    "template-package scaffold requires --id <package-id>",
+  );
+  const templateId = optionalStringFlag(parsed, "template") ?? packageId;
+  const requiredParts = templateRequiredParts(parsed);
+  const openParts = parseOpenParts(optionalStringFlag(parsed, "open-parts"));
+  const version = optionalStringFlag(parsed, "version");
+  const summary = optionalStringFlag(parsed, "summary");
+  const skeleton = createTemplatePackageSkeleton({
+    packageId,
+    templateId,
+    requiredParts,
+    openParts,
+    compatibleProviders: compatibleProvidersForOpenParts(requiredParts, openParts),
+    ...(version !== undefined ? { version } : {}),
+    ...(summary !== undefined ? { summary } : {}),
+  });
+  return emitCommandResult(parsed, out, "template-package", "scaffold", skeleton);
+}
+
+function templatePackageValidate(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla template-package validate <path>");
+  }
+  return emitAuthoringReport(
+    parsed,
+    out,
+    "template-package",
+    "validate",
+    templatePackageReportFromDoc(readAuthoringJson(path)),
+  );
+}
+
+function templatePackageTest(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla template-package test <path>");
+  }
+  const doc = readAuthoringJson(path);
+  const report = templatePackageReportFromDoc(doc);
+  const code = emitCommandResult(
+    parsed,
+    out,
+    "template-package",
+    "test",
+    authoringTestReport(report, templateContractTests(doc)),
+  );
+  return code === ExitCode.OK && !report.ok ? ExitCode.USAGE : code;
+}
+
+function templatePackageInspect(parsed: ParsedArgs, out: Output): number {
+  const path = parsed.positionals[2];
+  if (path === undefined) {
+    return usageError(out, "usage: gla template-package inspect <path>");
+  }
+  const doc = readAuthoringJson(path);
+  const report = templatePackageReportFromDoc(doc);
+  const spec = templatePackageSpec(doc);
+  return emitCommandResult(parsed, out, "template-package", "inspect", {
+    kind: isAuthoringWorkspace(doc) ? "ProviderAuthoringWorkspace" : "TemplatePackage",
+    packageId: templatePackageId(doc),
+    templateIds: templateIds(doc),
+    version: manifestVersion(doc),
+    ok: report.ok,
+    diagnostics: report.diagnostics,
+    readiness: "readiness" in report ? report.readiness : undefined,
+    changedFiles: isRecord(doc) && Array.isArray(doc.changedFiles) ? doc.changedFiles : undefined,
+    defaults: spec?.defaults,
+    compatibility: spec?.compatibility,
+    templates: templateSummaries(doc),
+    docs: Array.isArray(spec?.docs) ? spec.docs : undefined,
+    tests: templateContractTests(doc),
+    wpmSkeletons: isRecord(doc) && Array.isArray(doc.wpmSkeletons) ? doc.wpmSkeletons : undefined,
+  });
 }
 
 /**

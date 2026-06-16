@@ -1,14 +1,17 @@
 import { EMPTY_CONFIG_SCHEMA } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import {
+  CatalogService,
   PROVIDER_MANIFESTS,
   type ProviderFamily,
   type ProviderManifest,
   type ProviderPackageAuthoringReport,
+  type StoreContent,
   type TemplatePackageAuthoringReport,
   createProviderPackageSkeleton,
   createTemplatePackageSkeleton,
   resolveProviderGraphProjection,
+  validateProviderAuthoringWorkspace,
   validateProviderPackageAuthoring,
   validateTemplatePackageAuthoring,
 } from "../../src/index.js";
@@ -86,6 +89,7 @@ describe("provider package authoring validation", () => {
     });
     expect(skeleton.changedFiles).not.toContain("packages/app/src/composition.ts");
     expect(skeleton.changedFiles.some((file) => file.startsWith("packages/kernel/"))).toBe(false);
+    expect(skeleton.changedFiles.some((file) => file.includes("provider-set-"))).toBe(false);
   });
 
   it("aggregates stable provider diagnostics and redacts secret-shaped authoring input", () => {
@@ -169,6 +173,58 @@ describe("provider package authoring validation", () => {
         requires: [{ dependency: "../edge-proxy", hostTouching: true }],
       }),
     ).toThrow(/dependency/);
+  });
+
+  it("reports duplicate provider ids, provider versions, and template ids across an authored bundle", () => {
+    const firstProvider = createProviderPackageSkeleton({
+      providerId: "auth-duplicate",
+      family: "auth",
+    });
+    const duplicateProvider = createProviderPackageSkeleton({
+      providerId: "auth-duplicate",
+      family: "auth",
+    });
+    const firstTemplate = createTemplatePackageSkeleton({
+      packageId: "bundle-template-a",
+      templateId: "bundle-template",
+      requiredParts: {
+        launcher: "launcher-process",
+        entrypoint: "entrypoint-novnc",
+        connector: "connector-cdp",
+        detector: "url-watcher",
+      },
+      openParts: ["entrypoint"],
+      compatibleProviders: { entrypoint: ["entrypoint-novnc"] },
+    });
+    const duplicateTemplate = createTemplatePackageSkeleton({
+      packageId: "bundle-template-b",
+      templateId: "bundle-template",
+      requiredParts: {
+        launcher: "launcher-process",
+        entrypoint: "entrypoint-novnc",
+        connector: "connector-cdp",
+        detector: "url-watcher",
+      },
+      openParts: ["entrypoint"],
+      compatibleProviders: { entrypoint: ["entrypoint-novnc"] },
+    });
+
+    const result = validateProviderAuthoringWorkspace({
+      providers: [firstProvider, duplicateProvider],
+      templatePackages: [
+        { ...firstTemplate, providers: PROVIDERS },
+        { ...duplicateTemplate, providers: PROVIDERS },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(
+      expect.arrayContaining([
+        "provider_author.duplicate_provider_id",
+        "provider_author.duplicate_provider_version",
+        "template_author.duplicate_template_id",
+      ]),
+    );
   });
 });
 
@@ -353,5 +409,145 @@ describe("template package authoring validation", () => {
         requiredParts: { launcher: "launcher-process" },
       }),
     ).toThrow(/template id/);
+  });
+
+  it("rejects unprefixed template-default keys as unsupported authoring fields", () => {
+    const skeleton = createTemplatePackageSkeleton({
+      packageId: "legacy-defaults-package",
+      templateId: "legacy-defaults-template",
+      requiredParts: {
+        launcher: "launcher-process",
+        entrypoint: "entrypoint-novnc",
+        connector: "connector-cdp",
+        detector: "url-watcher",
+      },
+      openParts: ["entrypoint"],
+      compatibleProviders: { entrypoint: ["entrypoint-novnc"] },
+    });
+    const manifest = structuredClone(skeleton.manifest);
+    manifest.spec.defaults = {
+      "legacy-defaults-template": manifest.spec.defaults["template.legacy-defaults-template"],
+    };
+
+    const result = validateTemplatePackageAuthoring({
+      ...skeleton,
+      manifest,
+      providers: PROVIDERS,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "template_author.defaults_invalid",
+        path: "spec.defaults.legacy-defaults-template",
+        detail: expect.objectContaining({
+          expectedTargetId: "template.legacy-defaults-template",
+        }),
+      }),
+    );
+  });
+
+  it("projects generated provider and template package fixtures into a development catalog", () => {
+    const providerSkeleton = createProviderPackageSkeleton({
+      providerId: "launcher-authoring-local",
+      family: "launcher",
+      configSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          mode: { type: "string", enum: ["headless", "full"], default: "full" },
+        },
+      },
+    });
+    const templateSkeleton = createTemplatePackageSkeleton({
+      packageId: "authoring-template-package",
+      templateId: "authoring-template",
+      requiredParts: {
+        launcher: "launcher-authoring-local",
+        entrypoint: "entrypoint-authoring-local",
+        connector: "connector-authoring-local",
+        workspace: "workspace-authoring-local",
+        detector: "detector-authoring-local",
+      },
+      openParts: ["entrypoint", "connector", "workspace", "detector"],
+      compatibleProviders: {
+        entrypoint: ["entrypoint-authoring-local"],
+        connector: ["connector-authoring-local"],
+        workspace: ["workspace-authoring-local"],
+        detector: ["detector-authoring-local"],
+      },
+      providerDefaults: {
+        "provider.launcher-authoring-local": { mode: "headless" },
+      },
+    });
+    const providers = [
+      providerSkeleton.manifest,
+      provider("entrypoint-authoring-local", "entrypoint", "HumanEntrypoint"),
+      provider("connector-authoring-local", "connector", "AgentConnector"),
+      provider("workspace-authoring-local", "workspace", "Workspace"),
+      provider("detector-authoring-local", "detector", "CompletionDetector"),
+    ];
+
+    expect(validateProviderPackageAuthoring(providerSkeleton).ok).toBe(true);
+    expect(
+      validateTemplatePackageAuthoring({
+        ...templateSkeleton,
+        providers,
+      }).ok,
+    ).toBe(true);
+
+    const content: StoreContent = { providers, templates: [] };
+    const template = templateSkeleton.manifest.spec.templates[0];
+    if (template === undefined) {
+      throw new Error("template skeleton must include one template");
+    }
+    content.templates.push(template);
+    const graph = resolveProviderGraphProjection({
+      providerSet: { providers },
+      baseProfile: {
+        apiVersion: "gla.dev/v1",
+        kind: "ProviderProfile",
+        metadata: { name: "authoring-dev" },
+        spec: { select: { Launcher: "launcher-authoring-local" } },
+      },
+      templatePackages: [templateSkeleton.manifest],
+      configValidationMode: "runtime",
+    });
+    const catalog = new CatalogService({ content, providerGraph: graph });
+
+    expect(graph.ok).toBe(true);
+    expect(catalog.show("launcher-authoring-local")).toMatchObject({
+      name: "launcher-authoring-local",
+      family: "launcher",
+      available: true,
+      provenance: {
+        source: "provider-set",
+        version: "0.1.0",
+      },
+    });
+    expect(catalog.providerShow("launcher-authoring-local")).toMatchObject({
+      family: "launcher",
+      resolvedConfig: { mode: "headless" },
+      provenance: {
+        source: "provider-set",
+        version: "0.1.0",
+      },
+    });
+    expect(catalog.templateShow("authoring-template")).toMatchObject({
+      compatibilityConstraints: {
+        requiredParts: ["entrypoint", "connector", "workspace", "detector"],
+      },
+      defaultSources: {
+        launcher: expect.objectContaining({
+          source: "template-package-default",
+          providerId: "launcher-authoring-local",
+          templatePackage: "authoring-template-package",
+        }),
+      },
+      packageProvenance: {
+        packageId: "authoring-template-package",
+        version: "0.1.0",
+      },
+    });
   });
 });
