@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.09 complete; pending story-branch merge"
-branch: feature/provider-refactor-task-GLA-110.09
+phase_name: "Autonomous build — provider-layer refactor ready for GLA-110.10"
+branch: feature/provider-graph
 epic: provider-refactor-110
 active_story: null
-review_cycle: 2
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-refactor-task-GLA-110.09"
-  next_ready_sequence: "GLA-110.09 is Done with Goodall APPROVE and full pnpm run gate passing; merge story branch to feature/provider-graph, then start GLA-110.10."
-  note: "2026-06-16: GLA-110.09 completed. Scope delivered: executable operator/deployment-agent provider-install plan/apply/rollback UX, provider graph doctor diagnostics, activation preview, fail-closed package rejection with family/layer diagnostics, rollback/unchanged active-state evidence, and wording that separates operator work from provider authoring and runtime consumption UX."
+  current_branch: "feature/provider-graph"
+  next_ready_sequence: "GLA-110.09 is Done and merged into feature/provider-graph; next dependency-ready story is GLA-110.10."
+  note: "2026-06-16: GLA-110.09 completed and merged. Scope delivered: executable operator/deployment-agent provider-install plan/apply/rollback UX, provider graph doctor diagnostics, activation preview, fail-closed package rejection with family/layer diagnostics, rollback/unchanged active-state evidence, and wording that separates operator work from provider authoring and runtime consumption UX."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T21:38:00Z"
+last_updated: "2026-06-16T21:39:00Z"
