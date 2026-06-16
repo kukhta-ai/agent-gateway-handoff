@@ -8,6 +8,7 @@ import {
   type TemplatePackageAuthoringReport,
   createProviderPackageSkeleton,
   createTemplatePackageSkeleton,
+  resolveProviderGraphProjection,
   validateProviderPackageAuthoring,
   validateTemplatePackageAuthoring,
 } from "../../src/index.js";
@@ -209,9 +210,34 @@ describe("template package authoring validation", () => {
     expect(result.diagnostics).toEqual([]);
     expect(skeleton.manifest.spec.defaults).toEqual({
       "launcher-process": { startTimeoutMs: 42 },
+      "template.browser-handoff-lite": {
+        Launcher: "launcher-process",
+        HumanEntrypoint: "entrypoint-novnc",
+        AgentConnector: "connector-cdp",
+        CompletionDetector: "url-watcher",
+      },
     });
     expect(skeleton.manifest.spec.compatibility).toEqual({
       requiredParts: ["entrypoint", "connector", "detector"],
+    });
+    const graph = resolveProviderGraphProjection({
+      providerSet: { providers: PROVIDERS },
+      baseProfile: {
+        apiVersion: "gla.dev/v1",
+        kind: "ProviderProfile",
+        metadata: { name: "template-authoring-fixture" },
+        spec: {},
+      },
+      templatePackages: [skeleton.manifest],
+    });
+    expect(
+      graph.projection.templates.find((template) => template.templateId === "browser-handoff-lite")
+        ?.requiredParts,
+    ).toMatchObject({
+      launcher: "launcher-process",
+      entrypoint: "entrypoint-novnc",
+      connector: "connector-cdp",
+      detector: "url-watcher",
     });
     expect(result.readiness).toMatchObject({
       packageId: "browser-handoff-lite-package",
@@ -274,7 +300,8 @@ describe("template package authoring validation", () => {
             recipient: { type: "text" },
           },
           defaults: {
-            "missing-template": {
+            "template.broken-template": {
+              AuthProvider: "auth-webauthn",
               MadeUpFamily: "launcher-process",
               Launcher: "entrypoint-novnc",
             },

@@ -692,6 +692,14 @@ const PART_FAMILY: Record<string, ProviderFamily> = {
   detector: "detector",
 };
 
+const TEMPLATE_DEFAULT_FAMILY_TO_PART: Partial<Record<ProviderProfileFamilyId, string>> = {
+  Launcher: "launcher",
+  Workspace: "workspace",
+  HumanEntrypoint: "entrypoint",
+  AgentConnector: "connector",
+  CompletionDetector: "detector",
+};
+
 function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
@@ -1823,10 +1831,71 @@ function combineProviderManifests(
   return byName;
 }
 
+function templateDefaultKeys(templateId: string): string[] {
+  return [`template.${templateId}`, templateId];
+}
+
+function packageTemplateDefaultSelections(
+  pkg: TemplatePackageManifest,
+  templateId: string,
+): { key: string; defaults: Record<string, unknown> } | undefined {
+  for (const key of templateDefaultKeys(templateId)) {
+    const defaults = pkg.spec.defaults[key];
+    if (isRecord(defaults)) {
+      return { key, defaults };
+    }
+  }
+  return undefined;
+}
+
+function templateWithPackageDefaults(
+  pkg: TemplatePackageManifest,
+  template: TemplateManifest,
+  diagnostics: ProviderGraphDiagnostic[],
+): TemplateManifest {
+  const selection = packageTemplateDefaultSelections(pkg, template.metadata.name);
+  if (selection === undefined) {
+    return structuredClone(template);
+  }
+  const { key: defaultKey, defaults } = selection;
+  const resolved = structuredClone(template);
+  for (const [family, selection] of Object.entries(defaults)) {
+    const part = TEMPLATE_DEFAULT_FAMILY_TO_PART[family as ProviderProfileFamilyId];
+    if (part === undefined) {
+      graphAddDiagnostic(diagnostics, {
+        code: PROFILE_FAMILY_SET.has(family) ? "graph.family_mismatch" : "graph.unknown_family",
+        message: `template package "${pkg.metadata.name}" default "${family}" is not a capsule provider family`,
+        family,
+        template: template.metadata.name,
+        path: `spec.defaults.${defaultKey}.${family}`,
+        detail: { templatePackage: pkg.metadata.name },
+      });
+      continue;
+    }
+    const providerId = graphSelectionProviderId(selection as ProviderProfileSelection);
+    if (providerId === undefined) {
+      graphAddDiagnostic(diagnostics, {
+        code: "graph.unknown_provider",
+        message: `template package "${pkg.metadata.name}" default for "${family}" must name a provider id`,
+        family,
+        template: template.metadata.name,
+        path: `spec.defaults.${defaultKey}.${family}`,
+        detail: { templatePackage: pkg.metadata.name },
+      });
+      continue;
+    }
+    resolved.spec.requiredParts[part] = providerId;
+  }
+  return resolved;
+}
+
 function templatePackageTemplates(
   packages: readonly TemplatePackageManifest[] | undefined,
+  diagnostics: ProviderGraphDiagnostic[],
 ): TemplateManifest[] {
-  return (packages ?? []).flatMap((pkg) => pkg.spec.templates);
+  return (packages ?? []).flatMap((pkg) =>
+    pkg.spec.templates.map((template) => templateWithPackageDefaults(pkg, template, diagnostics)),
+  );
 }
 
 function combineTemplates(
@@ -1836,7 +1905,7 @@ function combineTemplates(
   const templates = [
     ...(input.providerSet?.templates ?? []),
     ...(input.templates ?? []),
-    ...templatePackageTemplates(input.templatePackages),
+    ...templatePackageTemplates(input.templatePackages, diagnostics),
   ];
   const byName = new Map<string, TemplateManifest>();
   for (const template of templates) {

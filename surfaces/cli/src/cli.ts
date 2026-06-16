@@ -16,10 +16,12 @@ import { readFileSync } from "node:fs";
 import { AgentBridge } from "@gla/bridge";
 import {
   type OpaqueToken,
+  assemblyDefectsToError,
   exitCodeFor,
   glaError,
   isGlaError,
   redactOperatorEgress,
+  validateAssembly,
 } from "@gla/kernel";
 import { Command, InvalidArgumentError } from "commander";
 import {
@@ -1605,6 +1607,15 @@ function proposalFromFile(path: string): CliProposal {
   }
   if (typeof doc !== "object" || doc === null) {
     throw glaError("usage.bad_argument", `assembly file "${path}" must be a JSON object`);
+  }
+  const structural = validateAssembly(doc);
+  if (!structural.ok) {
+    const error = assemblyDefectsToError(structural.defects);
+    throw glaError(error.code, error.message, {
+      ...(error.detail !== undefined ? { detail: error.detail } : {}),
+      ...(error.skill !== undefined ? { skill: error.skill } : {}),
+      ...(error.retryable !== undefined ? { retryable: error.retryable } : {}),
+    });
   }
   const d = doc as {
     metadata?: { intent?: unknown; task?: unknown };

@@ -248,6 +248,43 @@ describe("provider graph projection", () => {
     ).toContain("graph.config_invalid");
   });
 
+  it("materializes hand-authored TemplatePackage provider defaults into resolved capsule template parts", () => {
+    const pkg = templatePackage();
+    pkg.spec.defaults = {
+      ...pkg.spec.defaults,
+      "template.browser-handoff": {
+        Launcher: "launcher-process",
+        Workspace: "workspace-profile",
+        HumanEntrypoint: "entrypoint-novnc",
+        AgentConnector: "connector-cdp",
+        CompletionDetector: "user-done",
+      },
+    };
+
+    const graph = resolveProviderGraphProjection({
+      providerSet: { providers: PROVIDERS },
+      baseProfile: BASE_PROFILE,
+      templatePackages: [pkg],
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+
+    expect(graph.projection.templates[0]).toMatchObject({
+      templateId: "browser-handoff",
+      requiredParts: expect.objectContaining({
+        launcher: "launcher-process",
+        workspace: "workspace-profile",
+        entrypoint: "entrypoint-novnc",
+        connector: "connector-cdp",
+        detector: "user-done",
+      }),
+    });
+    expect(
+      toAdmissionCatalogFromProviderGraphProjection(graph).templateDefaults("browser-handoff"),
+    ).toMatchObject({
+      detectors: [{ use: "user-done" }],
+    });
+  });
+
   it("rejects graph resolution defects with stable diagnostics", () => {
     const brokenTemplate = structuredClone(BROWSER_HANDOFF_TEMPLATE);
     brokenTemplate.spec.compatibleProviders = {

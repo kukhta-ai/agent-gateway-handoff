@@ -86,6 +86,31 @@ describe("validateAssembly — collects EVERY defect in one pass, each with a JS
     }
   });
 
+  it("rejects app infrastructure provider selections from the assembly spec", () => {
+    const r = validateAssembly({
+      ...WELL_FORMED,
+      spec: {
+        ...WELL_FORMED.spec,
+        auth: { use: "authentik" },
+        authProvider: { use: "authentik" },
+        channel: { use: "channel-cli" },
+        secretStore: { use: "secret-store-reference" },
+      },
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.defects.map((d) => d.path)).toEqual(
+        expect.arrayContaining([
+          "spec.auth",
+          "spec.authProvider",
+          "spec.channel",
+          "spec.secretStore",
+        ]),
+      );
+    }
+  });
+
   it("rejects a non-object input with a $-rooted defect", () => {
     const r = validateAssembly(null);
     expect(r.ok).toBe(false);

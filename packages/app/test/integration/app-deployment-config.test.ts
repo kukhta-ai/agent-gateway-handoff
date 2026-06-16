@@ -4,6 +4,7 @@ import {
   CHANNEL_CLI_PROVIDER_ID,
   CONNECTOR_CDP_PROVIDER_ID,
   DETECTOR_URL_PROVIDER_ID,
+  DETECTOR_USER_DONE_PROVIDER_ID,
   ENTRYPOINT_NOVNC_PROVIDER_ID,
   LAUNCHER_PROCESS_PROVIDER_ID,
   REFERENCE_PROFILE_LOCAL_DEV_ID,
@@ -13,6 +14,7 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   createApp,
+  createBridge,
   referenceProviderSet,
   resolveAppDeploymentConfig,
   resolveCapsuleProviderSelection,
@@ -83,5 +85,21 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
     expect(capsule.detector).toBe(DETECTOR_URL_PROVIDER_ID);
     expect(app.wiring.auth).toBe("@gla/auth-webauthn");
     expect(app.wiring.secretStore).toBe("@gla/provider-set-reference");
+  });
+
+  it("resolves capsule provider defaults through the runtime template package", () => {
+    const bridge = createBridge({
+      providerSet: referenceProviderSet,
+      providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+    });
+
+    expect(bridge.templateShow("browser-handoff").parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          part: "detector",
+          provider: DETECTOR_USER_DONE_PROVIDER_ID,
+        }),
+      ]),
+    );
   });
 });

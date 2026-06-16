@@ -72,6 +72,8 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+const APP_INFRA_PROVIDER_SPEC_KEYS = ["auth", "authProvider", "channel", "secretStore"] as const;
+
 /** Validate one `PartRef` node (its `use` is a non-empty string; `params`, if present, an object). */
 function validatePartRef(node: unknown, path: string, defects: AssemblyDefect[]): void {
   if (!isObject(node)) {
@@ -254,6 +256,17 @@ export function validateAssembly(spec: unknown): AssemblyValidation {
     return { ok: false, defects };
   }
   const s = spec.spec;
+
+  for (const key of APP_INFRA_PROVIDER_SPEC_KEYS) {
+    if (Object.hasOwn(s, key)) {
+      defect(
+        defects,
+        `spec.${key}`,
+        "policy.denied",
+        `"spec.${key}" is app deployment provider selection and is not part of AssemblySpec`,
+      );
+    }
+  }
 
   if (typeof s.template !== "string" || s.template.length === 0) {
     defect(
