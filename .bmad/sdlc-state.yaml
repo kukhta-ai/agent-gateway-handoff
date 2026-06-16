@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.12 complete, ready to merge"
-branch: feature/provider-refactor-task-GLA-110.12
+phase_name: "Autonomous build — provider-layer refactor GLA-110.13 ready"
+branch: feature/provider-graph
 epic: provider-refactor-110
-active_story: GLA-110.12
-review_cycle: 1
+active_story: null
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-refactor-task-GLA-110.12"
-  next_ready_sequence: "GLA-110.12 is Done on its story branch after full gate and independent re-review approval; next merge back to feature/provider-graph, then start GLA-110.13."
-  note: "2026-06-16: GLA-110.12 completed. Architecture docs, UX docs, HTML diagrams, migration guidance, ADR language, and command/API doc checks align with ProviderRegistry/AppDeploymentConfig/CapsuleTemplate-AssemblySpec/CapabilityCatalog/Admission Resolver target model. Focused docs/CLI suite and pnpm run gate passed; Goodall re-review APPROVE."
+  current_branch: "feature/provider-graph"
+  next_ready_sequence: "GLA-110.12 is Done and merged into feature/provider-graph; next ready task is GLA-110.13."
+  note: "2026-06-16: GLA-110.12 completed and merged. Architecture docs, UX docs, HTML diagrams, migration guidance, ADR language, and command/API doc checks align with ProviderRegistry/AppDeploymentConfig/CapsuleTemplate-AssemblySpec/CapabilityCatalog/Admission Resolver target model. Focused docs/CLI suite and pnpm run gate passed; Goodall re-review APPROVE. GLA-110.13 is next for cross-layer regression verification."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T23:04:00Z"
+last_updated: "2026-06-16T23:12:00Z"
