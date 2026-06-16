@@ -275,6 +275,7 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
           },
           relations: {
             compatibleWith: {
+              templates: ["browser-handoff"],
               entrypoints: ["entrypoint-fake"],
               connectors: ["connector-fake"],
             },
@@ -295,6 +296,7 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
         spec: {
           family: "workspace",
           capability: { summary: "fake workspace selected through Provider Host" },
+          relations: { compatibleWith: { templates: ["browser-handoff"] } },
           probe: "workspace-fake",
         },
       },
@@ -311,6 +313,7 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
         spec: {
           family: "connector",
           capability: { summary: "fake connector selected through Provider Host" },
+          relations: { compatibleWith: { templates: ["browser-handoff"] } },
           probe: "connector-fake",
         },
       },
@@ -331,6 +334,7 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
             client: { kind: "fake-client" },
             transport: { kind: "reverse-proxy", protocols: ["websocket"] },
           },
+          relations: { compatibleWith: { templates: ["browser-handoff"] } },
           probe: "entrypoint-fake",
         },
       },
@@ -419,6 +423,32 @@ describe("provisioning composition root — real `session create` + `session con
     for (const module of fakeProviderModules(records)) {
       providerHost.registerModule(module);
     }
+    providerHost.registerModule({
+      manifest: {
+        apiVersion: "gla.dev/v1",
+        kind: "AgentConnector",
+        metadata: { name: "connector-incompatible", version: "0.1.0" },
+        spec: {
+          family: "connector",
+          capability: { summary: "available connector without browser-handoff compatibility" },
+          probe: "connector-incompatible",
+        },
+      },
+      register(ctx) {
+        ctx.registerAgentConnector("connector-incompatible", {
+          create: () => ({
+            async attach(): Promise<AgentConnector> {
+              return {
+                type: "incompatible",
+                resourceId: "connector:incompatible",
+                provider: "connector-incompatible",
+              };
+            },
+          }),
+        });
+        ctx.registerProbe("connector-incompatible", () => "available");
+      },
+    });
     const bridge = createBridge({
       providerHost,
       dependencyBindings: referenceWpmDependencyBindings(),
@@ -430,7 +460,7 @@ describe("provisioning composition root — real `session create` + `session con
           intent: "reg",
           template: "browser-handoff",
           recipient: "tg:user:1",
-          connector: { use: "connector-fake" },
+          connector: { use: "connector-incompatible" },
           detectors: [{ use: "user-done" }],
         },
       }),
@@ -438,8 +468,8 @@ describe("provisioning composition root — real `session create` + `session con
       code: "policy.denied",
       detail: {
         part: "connector",
-        use: "connector-fake",
-        compatibleWith: expect.not.arrayContaining(["connector-fake"]),
+        use: "connector-incompatible",
+        compatibleWith: expect.not.arrayContaining(["connector-incompatible"]),
       },
     });
     expect(bridge.stateSnapshot()).toEqual({ tasks: [], sessions: [] });

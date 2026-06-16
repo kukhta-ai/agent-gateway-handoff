@@ -57,6 +57,11 @@ import {
   createProvisioningBridge,
 } from "./composition.js";
 import { redactDaemonState } from "./daemon-state.js";
+import {
+  legacyProviderSelectionFromManifest,
+  legacyProviderSetProfileSelection,
+  legacyProviderSetSelectedProfileManifest,
+} from "./provider-compat.js";
 
 const BRIDGE_SOCKET_MODE = 0o600;
 const BRIDGE_RUNTIME_DIR_MODE = 0o700;
@@ -268,36 +273,17 @@ export function authAssuranceProviderDiagnostic(opts: {
 }
 
 function selectedProviderProfileManifest(opts: ServeOptions): ProviderProfileManifest | undefined {
-  const profileId = opts.providerProfileId ?? opts.providerSet?.selectedProfileId;
-  if (profileId === undefined) {
-    return undefined;
-  }
-  return opts.providerSet?.profiles?.find((profile) => profile.metadata.name === profileId);
-}
-
-function selectionProviderId(selection: unknown): string | undefined {
-  if (typeof selection === "string" && selection.length > 0) {
-    return selection;
-  }
-  if (
-    selection !== null &&
-    typeof selection === "object" &&
-    "providerId" in selection &&
-    typeof selection.providerId === "string" &&
-    selection.providerId.length > 0
-  ) {
-    return selection.providerId;
-  }
-  return undefined;
+  return legacyProviderSetSelectedProfileManifest(opts.providerSet, opts.providerProfileId);
 }
 
 function selectedServeAuthProvider(opts: ServeOptions): AuthProviderKind | undefined {
+  const manifest = selectedProviderProfileManifest(opts);
   return (
     opts.authProvider ??
     opts.appDeploymentConfig?.auth ??
     opts.providerProfile?.auth ??
-    selectionProviderId(selectedProviderProfileManifest(opts)?.spec.select?.AuthProvider) ??
-    opts.providerSet?.profile.auth
+    (manifest !== undefined ? legacyProviderSelectionFromManifest(manifest).auth : undefined) ??
+    legacyProviderSetProfileSelection(opts.providerSet)?.auth
   );
 }
 
@@ -442,6 +428,13 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       ? { appDeploymentConfig: opts.appDeploymentConfig }
       : {}),
     ...(opts.capsuleProviders !== undefined ? { capsuleProviders: opts.capsuleProviders } : {}),
+    ...(opts.capsuleProviderConfig !== undefined
+      ? { capsuleProviderConfig: opts.capsuleProviderConfig }
+      : {}),
+    ...(opts.entrypointClientAssets !== undefined
+      ? { entrypointClientAssets: opts.entrypointClientAssets }
+      : {}),
+    ...(opts.templateProbes !== undefined ? { templateProbes: opts.templateProbes } : {}),
     ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
