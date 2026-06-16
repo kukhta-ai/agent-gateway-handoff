@@ -531,8 +531,7 @@ function selectedProviderProfileManifest(
 ): ProviderProfileManifest {
   const profileId = opts.providerProfileId ?? opts.providerSet?.selectedProfileId;
   const namedManifest = providerSetProfileManifest(opts.providerSet, profileId);
-  const hasRuntimeOverride =
-    Object.keys(opts.providerProfile ?? {}).length > 0 || Object.keys(overrides).length > 0;
+  const hasRuntimeOverride = Object.keys(overrides).length > 0;
   if (namedManifest !== undefined && !hasRuntimeOverride) {
     return structuredClone(namedManifest);
   }
@@ -575,6 +574,9 @@ function resolveProviderSelections(
   overrides: ProviderSelectionResolutionOverrides = {},
 ): ProviderSelectionResolution {
   const mergedOverrides: Partial<ProviderSelectionProfile> = {
+    ...(opts.providerProfile ?? {}),
+    ...appDeploymentSelectionInput(opts.appDeploymentConfig),
+    ...capsuleSelectionInput(opts.capsuleProviders),
     ...appDeploymentSelectionInput(overrides.deployment),
     ...capsuleSelectionInput(overrides.capsule),
     ...(overrides.legacy ?? {}),
@@ -608,28 +610,6 @@ export function resolveCapsuleProviderSelection(
   overrides: CapsuleProviderSelectionInput = {},
 ): CapsuleProviderSelection {
   return resolveProviderSelections(opts, { capsule: overrides }).capsule;
-}
-
-function providerSetDefaultConfig(
-  providerSet: AppProviderSet | undefined,
-  profile: ProviderSelectionProfile,
-): Record<string, Record<string, unknown>> | undefined {
-  if (providerSet?.defaultConfig === undefined) {
-    return undefined;
-  }
-  const defaults: Record<string, Record<string, unknown>> = {};
-  for (const binding of PROVIDER_PROFILE_BINDINGS) {
-    const providerId = profile[binding.key];
-    const values = providerSet.defaultConfig({
-      family: binding.runtimeFamily,
-      providerId,
-      legacy: {},
-    });
-    if (hasEntries(values)) {
-      defaults[providerId] = values;
-    }
-  }
-  return Object.keys(defaults).length > 0 ? defaults : undefined;
 }
 
 function runtimeCapsuleTemplatePackage(capsule: CapsuleProviderSelection): TemplatePackageManifest {
@@ -686,13 +666,15 @@ function providerGraphRuntimeContext(opts: {
   if (opts.dependencyBindings !== undefined) {
     catalogOptions.dependencyBindings = opts.dependencyBindings;
   }
-  const defaultConfig = providerSetDefaultConfig(opts.providerSet, opts.profile);
   const graphInputBase: Parameters<typeof resolveProviderGraphProjection>[0] = {
-    providerSet: {
-      ...(opts.providerSet?.moduleId !== undefined ? { id: opts.providerSet.moduleId } : {}),
-      providers: content.providers,
-      ...(defaultConfig !== undefined ? { defaultConfig } : {}),
-    },
+    ...(opts.providerSet !== undefined
+      ? {
+          providerSet: {
+            id: opts.providerSet.moduleId,
+            providers: content.providers,
+          },
+        }
+      : { providerManifests: content.providers }),
     templatePackages,
     baseProfile: opts.profileManifest ?? providerProfileManifest(opts.profile),
     ...(opts.dependencyBindings !== undefined

@@ -1,3 +1,4 @@
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import {
   AUTH_AUTHENTIK_PROVIDER_ID,
   AUTH_WEBAUTHN_PROVIDER_ID,
@@ -15,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   createApp,
   createBridge,
+  createProvisioningBridge,
   referenceProviderSet,
   resolveAppDeploymentConfig,
   resolveCapsuleProviderSelection,
@@ -101,5 +103,46 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
         }),
       ]),
     );
+  });
+
+  it("projects split app deployment and capsule overrides into graph metadata", async () => {
+    const stack = createProvisioningBridge({
+      providerSet: referenceProviderSet,
+      providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      appDeploymentConfig: { auth: AUTH_AUTHENTIK_PROVIDER_ID },
+      capsuleProviders: { detector: DETECTOR_URL_PROVIDER_ID },
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+
+    try {
+      expect(stack.providerGraphDoctor.selectedProviders).toMatchObject({
+        AuthProvider: AUTH_AUTHENTIK_PROVIDER_ID,
+        CompletionDetector: DETECTOR_URL_PROVIDER_ID,
+      });
+      expect(stack.providerGraphDoctor.providers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            providerId: AUTH_AUTHENTIK_PROVIDER_ID,
+            selected: true,
+            defaultSource: expect.objectContaining({
+              source: "base-profile-select",
+              providerId: AUTH_AUTHENTIK_PROVIDER_ID,
+              profile: `${REFERENCE_PROFILE_LOCAL_DEV_ID}+runtime-override`,
+            }),
+          }),
+          expect.objectContaining({
+            providerId: DETECTOR_URL_PROVIDER_ID,
+            selected: true,
+            defaultSource: expect.objectContaining({
+              source: "base-profile-select",
+              providerId: DETECTOR_URL_PROVIDER_ID,
+              profile: `${REFERENCE_PROFILE_LOCAL_DEV_ID}+runtime-override`,
+            }),
+          }),
+        ]),
+      );
+    } finally {
+      await stack.close();
+    }
   });
 });

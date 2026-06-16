@@ -775,6 +775,14 @@ export interface IndexedEntity extends CatalogEntity {
   availability: Availability;
   /** The evaluated dependency diagnostics backing this provider (empty for pure in-tree parts). */
   requires: IndexedDependencyBinding[];
+  /** Where this catalog row came from in the resolved provider graph, when graph-backed. */
+  provenance?: ProviderGraphProvenance;
+  /** Selected-provider default source, when this row is selected by the graph profile. */
+  defaultSource?: ProviderGraphDefaultSource;
+  /** Package provenance for package-shipped templates. */
+  packageProvenance?: ProviderGraphPackageProvenance;
+  /** Default provider sources by template part role, when this row is a graph-backed template. */
+  defaultSources?: Record<string, ProviderGraphDefaultSource>;
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
 }
@@ -828,6 +836,8 @@ export interface PartBinding {
   dependencies: IndexedDependencyBinding[];
   /** Stable provider diagnostics for this template part. */
   diagnostics: CatalogDiagnostic[];
+  /** Where this template part's default provider selection came from, when graph-backed. */
+  defaultSource?: ProviderGraphDefaultSource;
 }
 
 /** What `templateShow` returns (GLA-017 AC#2): required parts + each backing dependency's binding. */
@@ -840,6 +850,12 @@ export interface TemplateShowResult extends TemplateDescriptor {
   availability: Availability;
   /** Open-part compatibility derived from provider manifests and any explicit template narrowing. */
   compatibleProviders?: Record<string, string[]>;
+  /** Compatibility constraints used by graph/catalog/admission for this template. */
+  compatibilityConstraints?: ProviderGraphCompatibilityConstraints;
+  /** Package provenance for package-shipped templates. */
+  packageProvenance?: ProviderGraphPackageProvenance;
+  /** Default provider source by template part role. */
+  defaultSources?: Record<string, ProviderGraphDefaultSource>;
   /** Template-level dependency diagnostics, e.g. public edge/proxy evidence. */
   dependencies: IndexedDependencyBinding[];
   /** Per required part, the backing provider + its dependency binding status. */
@@ -1348,6 +1364,15 @@ export class CatalogService implements CatalogPort {
       available: availability === "available",
       availability,
       ...(compatibleProviders !== undefined ? { compatibleProviders } : {}),
+      ...(graphTemplate?.compatibilityConstraints !== undefined
+        ? { compatibilityConstraints: structuredClone(graphTemplate.compatibilityConstraints) }
+        : {}),
+      ...(graphTemplate?.packageProvenance !== undefined
+        ? { packageProvenance: structuredClone(graphTemplate.packageProvenance) }
+        : {}),
+      ...(graphTemplate?.defaultSources !== undefined
+        ? { defaultSources: structuredClone(graphTemplate.defaultSources) }
+        : {}),
       dependencies,
       parts,
       diagnostics,
@@ -1423,6 +1448,8 @@ export interface CatalogProviderInfo {
   family: string;
   diagnostics: CatalogDiagnostic[];
   dependencies: IndexedDependencyBinding[];
+  provenance?: ProviderGraphProvenance;
+  defaultSource?: ProviderGraphDefaultSource;
   config_schema?: ConfigSchema;
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
@@ -1599,6 +1626,45 @@ export interface ProviderGraphDiagnostic {
   detail?: Record<string, unknown>;
 }
 
+/** Source location for providers/templates projected into the catalog graph. */
+export interface ProviderGraphProvenance {
+  source: "provider-set" | "provider-manifest" | "inline-template" | "template-package";
+  id?: string;
+  version?: string;
+}
+
+/** Template package evidence surfaced by catalog/doctor reads. */
+export interface ProviderGraphPackageProvenance {
+  packageId: string;
+  version: string;
+  docs: string[];
+  tests: string[];
+}
+
+/** Source of a selected provider/default provider outcome in the graph. */
+export interface ProviderGraphDefaultSource {
+  source:
+    | "base-profile-select"
+    | "overlay-select"
+    | "capsule-template-required-part"
+    | "template-package-default";
+  providerId: string;
+  profile?: string;
+  templateId?: string;
+  templatePackage?: string;
+  packageVersion?: string;
+  key?: string;
+  family?: string;
+  part?: string;
+}
+
+/** Compatibility constraints projected for one capsule template. */
+export interface ProviderGraphCompatibilityConstraints {
+  openParts: string[];
+  requiredParts: string[];
+  compatibleProviders?: Record<string, string[]>;
+}
+
 /** Provider-set manifest inputs consumed by deterministic graph projection. */
 export interface ProviderGraphProviderSetInput {
   /** Stable provider-set identity for diagnostics. */
@@ -1637,6 +1703,8 @@ export interface ProviderGraphResolvedProvider {
   dependencies: IndexedDependencyBinding[];
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
+  provenance: ProviderGraphProvenance;
+  defaultSource: ProviderGraphDefaultSource;
   config: Record<string, unknown>;
   configLayers: ProviderGraphConfigLayer[];
 }
@@ -1651,6 +1719,7 @@ export interface ProviderGraphProviderFact {
   dependencies: IndexedDependencyBinding[];
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
+  provenance: ProviderGraphProvenance;
 }
 
 /** Resolved template facts in the graph projection. */
@@ -1662,6 +1731,9 @@ export interface ProviderGraphResolvedTemplate {
   dependencies: IndexedDependencyBinding[];
   requiredParts: Record<string, string>;
   compatibleProviders?: Record<string, string[]>;
+  compatibilityConstraints: ProviderGraphCompatibilityConstraints;
+  packageProvenance?: ProviderGraphPackageProvenance;
+  defaultSources: Record<string, ProviderGraphDefaultSource>;
 }
 
 /** Resolved deterministic graph projection used by catalog, doctor, provider-host boot, and admission. */
@@ -2013,6 +2085,195 @@ function materializeSelections(
     Object.assign(selected, overlay.spec.select ?? {});
   }
   return selected;
+}
+
+function materializeSelectionSources(
+  input: ResolveProviderGraphProjectionInput,
+): Partial<Record<ProviderProfileFamilyId, ProviderGraphDefaultSource>> {
+  const sources: Partial<Record<ProviderProfileFamilyId, ProviderGraphDefaultSource>> = {};
+  for (const [family, selection] of Object.entries(input.baseProfile.spec.select ?? {})) {
+    if (!PROFILE_FAMILY_SET.has(family)) {
+      continue;
+    }
+    const providerId = graphSelectionProviderId(selection as ProviderProfileSelection);
+    if (providerId !== undefined) {
+      sources[family as ProviderProfileFamilyId] = {
+        source: "base-profile-select",
+        providerId,
+        profile: input.baseProfile.metadata.name,
+        family,
+      };
+    }
+  }
+  for (const overlay of input.overlays ?? []) {
+    for (const [family, selection] of Object.entries(overlay.spec.select ?? {})) {
+      if (!PROFILE_FAMILY_SET.has(family)) {
+        continue;
+      }
+      const providerId = graphSelectionProviderId(selection as ProviderProfileSelection);
+      if (providerId !== undefined) {
+        sources[family as ProviderProfileFamilyId] = {
+          source: "overlay-select",
+          providerId,
+          profile: overlay.metadata.name,
+          family,
+        };
+      }
+    }
+  }
+  return sources;
+}
+
+function providerProvenanceById(
+  input: ResolveProviderGraphProjectionInput,
+): Map<string, ProviderGraphProvenance> {
+  const provenance = new Map<string, ProviderGraphProvenance>();
+  const add = (provider: ProviderManifest, source: ProviderGraphProvenance): void => {
+    if (!provenance.has(provider.metadata.name)) {
+      provenance.set(provider.metadata.name, source);
+    }
+  };
+  for (const provider of input.providerSet?.providers ?? []) {
+    add(provider, {
+      source: "provider-set",
+      ...(input.providerSet?.id !== undefined ? { id: input.providerSet.id } : {}),
+      version: provider.metadata.version,
+    });
+  }
+  for (const provider of input.providerManifests ?? []) {
+    add(provider, {
+      source: "provider-manifest",
+      id: provider.metadata.name,
+      version: provider.metadata.version,
+    });
+  }
+  return provenance;
+}
+
+function defaultProviderProvenance(provider: ProviderManifest): ProviderGraphProvenance {
+  return {
+    source: "provider-manifest",
+    id: provider.metadata.name,
+    version: provider.metadata.version,
+  };
+}
+
+function templateProvenanceById(
+  input: ResolveProviderGraphProjectionInput,
+): Map<string, ProviderGraphProvenance> {
+  const provenance = new Map<string, ProviderGraphProvenance>();
+  const add = (template: TemplateManifest, source: ProviderGraphProvenance): void => {
+    if (!provenance.has(template.metadata.name)) {
+      provenance.set(template.metadata.name, source);
+    }
+  };
+  for (const template of input.providerSet?.templates ?? []) {
+    add(template, {
+      source: "provider-set",
+      ...(input.providerSet?.id !== undefined ? { id: input.providerSet.id } : {}),
+      version: template.metadata.version,
+    });
+  }
+  for (const template of input.templates ?? []) {
+    add(template, {
+      source: "inline-template",
+      id: template.metadata.name,
+      version: template.metadata.version,
+    });
+  }
+  for (const pkg of input.templatePackages ?? []) {
+    for (const template of pkg.spec.templates) {
+      add(template, {
+        source: "template-package",
+        id: pkg.metadata.name,
+        version: pkg.metadata.version,
+      });
+    }
+  }
+  return provenance;
+}
+
+function templatePackageProvenance(
+  input: ResolveProviderGraphProjectionInput,
+  provenance: ProviderGraphProvenance | undefined,
+): ProviderGraphPackageProvenance | undefined {
+  if (provenance?.source !== "template-package" || provenance.id === undefined) {
+    return undefined;
+  }
+  const pkg = (input.templatePackages ?? []).find(
+    (candidate) => candidate.metadata.name === provenance.id,
+  );
+  if (pkg === undefined) {
+    return undefined;
+  }
+  return {
+    packageId: pkg.metadata.name,
+    version: pkg.metadata.version,
+    docs: [...(pkg.spec.docs ?? [])],
+    tests: [...pkg.spec.tests],
+  };
+}
+
+function templateDefaultSources(
+  input: ResolveProviderGraphProjectionInput,
+  template: TemplateManifest,
+  provenance: ProviderGraphProvenance | undefined,
+): Record<string, ProviderGraphDefaultSource> {
+  const sources: Record<string, ProviderGraphDefaultSource> = {};
+  for (const [part, providerId] of Object.entries(template.spec.requiredParts)) {
+    sources[part] = {
+      source: "capsule-template-required-part",
+      providerId,
+      templateId: template.metadata.name,
+      part,
+    };
+  }
+  if (provenance?.source !== "template-package" || provenance.id === undefined) {
+    return sources;
+  }
+  const pkg = (input.templatePackages ?? []).find(
+    (candidate) => candidate.metadata.name === provenance.id,
+  );
+  if (pkg === undefined) {
+    return sources;
+  }
+  const selection = packageTemplateDefaultSelections(pkg, template.metadata.name);
+  if (selection === undefined) {
+    return sources;
+  }
+  for (const [family, selected] of Object.entries(selection.defaults)) {
+    const part = TEMPLATE_DEFAULT_FAMILY_TO_PART[family as ProviderProfileFamilyId];
+    const providerId = graphSelectionProviderId(selected as ProviderProfileSelection);
+    if (part === undefined || providerId === undefined) {
+      continue;
+    }
+    sources[part] = {
+      source: "template-package-default",
+      providerId,
+      templateId: template.metadata.name,
+      templatePackage: pkg.metadata.name,
+      packageVersion: pkg.metadata.version,
+      key: selection.key,
+      family,
+      part,
+    };
+  }
+  return sources;
+}
+
+function templateCompatibilityConstraints(
+  template: TemplateManifest,
+  input: ResolveProviderGraphProjectionInput,
+  providersByName: ReadonlyMap<string, ProviderManifest>,
+): ProviderGraphCompatibilityConstraints {
+  const compatibleProviders = deriveCompatibleProviders(template, providersByName.values());
+  return {
+    openParts: [...(template.spec.openParts ?? [])],
+    requiredParts: [...compatibilityRequiredPartsForTemplate(input, template)],
+    ...(compatibleProviders !== undefined
+      ? { compatibleProviders: structuredClone(compatibleProviders) }
+      : {}),
+  };
 }
 
 function profileConfigLayers(
@@ -2473,6 +2734,8 @@ export function resolveProviderGraphProjection(
   const diagnostics: ProviderGraphDiagnostic[] = [];
   const providersByName = combineProviderManifests(input, diagnostics);
   const templatesByName = combineTemplates(input, diagnostics);
+  const providerProvenances = providerProvenanceById(input);
+  const templateProvenances = templateProvenanceById(input);
 
   validateGraphInheritance(input, diagnostics);
   validateProviderRelations(providersByName, templatesByName, diagnostics);
@@ -2483,6 +2746,7 @@ export function resolveProviderGraphProjection(
     providersByName,
     diagnostics,
   );
+  const selectedSources = materializeSelectionSources(input);
 
   const availabilityById = new Map<string, Availability>();
   const dependenciesById = new Map<string, IndexedDependencyBinding[]>();
@@ -2508,6 +2772,9 @@ export function resolveProviderGraphProjection(
       availability,
       dependencies: structuredClone(dependencies),
       ...(authAssurance !== undefined ? { authAssurance } : {}),
+      provenance: structuredClone(
+        providerProvenances.get(provider.metadata.name) ?? defaultProviderProvenance(provider),
+      ),
     });
   }
 
@@ -2533,6 +2800,17 @@ export function resolveProviderGraphProjection(
       availability,
       dependencies: structuredClone(dependencies),
       ...(authAssurance !== undefined ? { authAssurance } : {}),
+      provenance: structuredClone(
+        providerProvenances.get(providerId) ?? defaultProviderProvenance(manifest),
+      ),
+      defaultSource: structuredClone(
+        selectedSources[family] ?? {
+          source: "base-profile-select",
+          providerId,
+          profile: input.baseProfile.metadata.name,
+          family,
+        },
+      ),
       config: config.config,
       configLayers: config.layers,
     });
@@ -2554,6 +2832,8 @@ export function resolveProviderGraphProjection(
       );
     }
     const compatibleProviders = deriveCompatibleProviders(template, providersByName.values());
+    const provenance = templateProvenances.get(template.metadata.name);
+    const packageProvenance = templatePackageProvenance(input, provenance);
     templates.push({
       templateId: template.metadata.name,
       manifest: structuredClone(template),
@@ -2564,6 +2844,9 @@ export function resolveProviderGraphProjection(
       ...(compatibleProviders !== undefined
         ? { compatibleProviders: structuredClone(compatibleProviders) }
         : {}),
+      compatibilityConstraints: templateCompatibilityConstraints(template, input, providersByName),
+      ...(packageProvenance !== undefined ? { packageProvenance } : {}),
+      defaultSources: templateDefaultSources(input, template, provenance),
     });
   }
 
@@ -2750,12 +3033,28 @@ function entityWithProviderGraph(
       ? templateFromProviderGraph(graph, entity.name)?.availability
       : providerFactFromProviderGraph(graph, entity.name)?.availability;
   const graphProvider = providerFactFromProviderGraph(graph, entity.name);
+  const graphTemplate = templateFromProviderGraph(graph, entity.name);
+  const selectedProvider = graphProjectionParts(graph).projection.providers.find(
+    (provider) => provider.providerId === entity.name,
+  );
   const availability = graphDefects ? "unavailable" : (graphAvailability ?? entity.availability);
   return {
     ...entity,
     availability,
     available: availability === "available",
     ...(graphProvider !== undefined ? { requires: graphProvider.dependencies } : {}),
+    ...(graphProvider !== undefined
+      ? { provenance: structuredClone(graphProvider.provenance) }
+      : {}),
+    ...(selectedProvider?.defaultSource !== undefined
+      ? { defaultSource: structuredClone(selectedProvider.defaultSource) }
+      : {}),
+    ...(graphTemplate?.packageProvenance !== undefined
+      ? { packageProvenance: structuredClone(graphTemplate.packageProvenance) }
+      : {}),
+    ...(graphTemplate?.defaultSources !== undefined
+      ? { defaultSources: structuredClone(graphTemplate.defaultSources) }
+      : {}),
     ...(graphProvider?.authAssurance !== undefined
       ? { authAssurance: structuredClone(graphProvider.authAssurance) }
       : {}),
@@ -2822,6 +3121,9 @@ function partBindingsFromProjectionTemplate(
       available: provider?.available === true,
       dependencies: provider?.dependencies ?? [],
       diagnostics: providerDiagnosticsFromGraphFact(provider, providerId, diagnostics, part),
+      ...(template.defaultSources[part] !== undefined
+        ? { defaultSource: structuredClone(template.defaultSources[part]) }
+        : {}),
     };
   });
 }
@@ -2900,7 +3202,12 @@ export function toAdmissionCatalogFromProviderGraphProjection(
         family: provider.runtimeFamily,
         dependencies: structuredClone(provider.dependencies),
         diagnostics: [...providerDiagnosticsFromGraphFact(provider, use, []), ...graphDiagnostics],
+        provenance: structuredClone(provider.provenance),
       };
+      const selected = projection.providers.find((candidate) => candidate.providerId === use);
+      if (selected !== undefined) {
+        info.defaultSource = structuredClone(selected.defaultSource);
+      }
       info.config_schema = provider.manifest.spec.config_schema ?? EMPTY_CONFIG_SCHEMA;
       if (provider.authAssurance !== undefined) {
         info.authAssurance = structuredClone(provider.authAssurance);
@@ -2923,6 +3230,8 @@ export interface ProviderGraphDoctorProvider {
   availability: Availability;
   dependencies: IndexedDependencyBinding[];
   diagnostics: CatalogDiagnostic[];
+  provenance: ProviderGraphProvenance;
+  defaultSource?: ProviderGraphDefaultSource;
   /** AuthProvider-only provider-neutral assurance capability declared by the provider manifest. */
   authAssurance?: AuthProviderAssuranceCapability;
 }
@@ -2933,6 +3242,9 @@ export interface ProviderGraphDoctorTemplate {
   availability: Availability;
   dependencies: IndexedDependencyBinding[];
   diagnostics: CatalogDiagnostic[];
+  compatibilityConstraints: ProviderGraphCompatibilityConstraints;
+  packageProvenance?: ProviderGraphPackageProvenance;
+  defaultSources: Record<string, ProviderGraphDefaultSource>;
 }
 
 /** Read-only doctor summary for the selected provider graph. */
@@ -2960,8 +3272,12 @@ export function providerGraphDoctorReport(
   const providersById = new Map(
     projection.providerFacts.map((provider) => [provider.providerId, provider]),
   );
+  const selectedById = new Map(
+    projection.providers.map((provider) => [provider.providerId, provider]),
+  );
   const providers = projection.providerFacts.map((provider) => {
     const selected = selectedIds.has(provider.providerId);
+    const selectedProvider = selectedById.get(provider.providerId);
     const graphDiagnostics = catalogDiagnosticsFromProviderGraph(input, {
       providerId: provider.providerId,
     });
@@ -2977,6 +3293,10 @@ export function providerGraphDoctorReport(
         ...providerDiagnosticsFromGraphFact(provider, provider.providerId, []),
         ...graphDiagnostics,
       ],
+      provenance: structuredClone(provider.provenance),
+      ...(selectedProvider?.defaultSource !== undefined
+        ? { defaultSource: structuredClone(selectedProvider.defaultSource) }
+        : {}),
       ...(provider.authAssurance !== undefined
         ? { authAssurance: structuredClone(provider.authAssurance) }
         : {}),
@@ -2996,6 +3316,11 @@ export function providerGraphDoctorReport(
       availability: graphDefects ? "unavailable" : template.availability,
       dependencies: structuredClone(template.dependencies),
       diagnostics: [...templateDiagnosticRows, ...graphDiagnostics],
+      compatibilityConstraints: structuredClone(template.compatibilityConstraints),
+      ...(template.packageProvenance !== undefined
+        ? { packageProvenance: structuredClone(template.packageProvenance) }
+        : {}),
+      defaultSources: structuredClone(template.defaultSources),
     };
   });
   const selectedProviderRows = providers.filter((provider) => provider.selected);
