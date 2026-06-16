@@ -47,6 +47,7 @@ interface FakeRecords {
   configs: Record<string, Record<string, unknown>>;
   serviceBindings: Record<string, boolean>;
   assetProviderIds: string[];
+  defaultConfigCalls: string[];
   delivered: Array<{ recipient: RecipientRef; link: string }>;
 }
 
@@ -71,6 +72,7 @@ function fakeRecords(): FakeRecords {
     configs: {},
     serviceBindings: {},
     assetProviderIds: [],
+    defaultConfigCalls: [],
     delivered: [],
   };
 }
@@ -385,6 +387,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
       secretStore: "fake-secret-store",
     },
     defaultConfig({ family, providerId, legacy }) {
+      records.defaultConfigCalls.push(`${family}:${providerId}`);
       if (family === "auth" && providerId === "fake-auth") {
         return legacy;
       }
@@ -496,7 +499,8 @@ describe("provider-set agnostic app composition", () => {
   });
 
   it("does not treat public-edge WPM evidence as reachable without a template probe", () => {
-    const { templateProbes: _templateProbes, ...providerSet } = fakeProviderSet(fakeRecords());
+    const records = fakeRecords();
+    const { templateProbes: _templateProbes, ...providerSet } = fakeProviderSet(records);
 
     const bridge = createBridge({
       providerSet,
@@ -504,6 +508,7 @@ describe("provider-set agnostic app composition", () => {
     });
     const show = bridge.templateShow("browser-handoff");
 
+    expect(records.defaultConfigCalls).toEqual([]);
     expect(show.available).toBe(false);
     expect(show.availability).toBe("unavailable");
     expect(show.dependencies[0]).toMatchObject({

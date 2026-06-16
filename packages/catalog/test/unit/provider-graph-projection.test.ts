@@ -192,6 +192,12 @@ describe("provider graph projection", () => {
       "runtime-assembly-params",
     ]);
     expect(launcher?.dependencies[0]?.dependency).toBe("browser-runtime");
+    expect(launcher?.provenance).toMatchObject({ source: "provider-set", id: "reference" });
+    expect(launcher?.defaultSource).toMatchObject({
+      source: "base-profile-select",
+      providerId: "launcher-process",
+      profile: "local-dev",
+    });
 
     const auth = result.projection.providers.find(
       (selected) => selected.providerId === "auth-webauthn",
@@ -212,6 +218,16 @@ describe("provider graph projection", () => {
     expect(result.projection.templates[0]).toMatchObject({
       templateId: "browser-handoff",
       available: true,
+      packageProvenance: {
+        packageId: "browser-handoff-package",
+        version: "0.1.0",
+        docs: ["docs/04-capsule-assembly.md"],
+        tests: ["packages/catalog/test/unit/provider-graph-projection.test.ts"],
+      },
+      compatibilityConstraints: expect.objectContaining({
+        openParts: ["entrypoint", "connector", "detector"],
+        requiredParts: ["launcher", "entrypoint", "connector", "workspace", "detector"],
+      }),
     });
   });
 
@@ -277,6 +293,34 @@ describe("provider graph projection", () => {
         connector: "connector-cdp",
         detector: "user-done",
       }),
+      defaultSources: {
+        launcher: expect.objectContaining({
+          source: "template-package-default",
+          templatePackage: "browser-handoff-package",
+          family: "Launcher",
+          providerId: "launcher-process",
+        }),
+        workspace: expect.objectContaining({
+          source: "template-package-default",
+          family: "Workspace",
+          providerId: "workspace-profile",
+        }),
+        entrypoint: expect.objectContaining({
+          source: "template-package-default",
+          family: "HumanEntrypoint",
+          providerId: "entrypoint-novnc",
+        }),
+        connector: expect.objectContaining({
+          source: "template-package-default",
+          family: "AgentConnector",
+          providerId: "connector-cdp",
+        }),
+        detector: expect.objectContaining({
+          source: "template-package-default",
+          family: "CompletionDetector",
+          providerId: "user-done",
+        }),
+      },
     });
     expect(
       toAdmissionCatalogFromProviderGraphProjection(graph).templateDefaults("browser-handoff"),
@@ -1045,8 +1089,31 @@ describe("provider graph projection", () => {
     expect(catalog.templateShow("sharelink-handoff")).toMatchObject({
       id: "sharelink-handoff",
       available: true,
+      packageProvenance: {
+        packageId: "sharelink-handoff-package",
+        version: "0.1.0",
+        docs: ["templates/sharelink-handoff/README.md"],
+        tests: ["packages/catalog/test/unit/provider-graph-projection.test.ts"],
+      },
+      compatibilityConstraints: expect.objectContaining({
+        openParts: ["entrypoint", "connector", "detector"],
+        requiredParts: ["entrypoint", "connector", "detector"],
+      }),
+      defaultSources: expect.objectContaining({
+        entrypoint: expect.objectContaining({
+          source: "capsule-template-required-part",
+          providerId: "entrypoint-sharelink",
+        }),
+      }),
       parts: expect.arrayContaining([
-        expect.objectContaining({ part: "entrypoint", provider: "entrypoint-sharelink" }),
+        expect.objectContaining({
+          part: "entrypoint",
+          provider: "entrypoint-sharelink",
+          defaultSource: expect.objectContaining({
+            source: "capsule-template-required-part",
+            providerId: "entrypoint-sharelink",
+          }),
+        }),
       ]),
     });
 
@@ -1079,6 +1146,17 @@ describe("provider graph projection", () => {
           diagnostics: expect.arrayContaining([
             expect.objectContaining({ code: "provider.available" }),
           ]),
+        }),
+      ]),
+      templates: expect.arrayContaining([
+        expect.objectContaining({
+          templateId: "sharelink-handoff",
+          packageProvenance: expect.objectContaining({
+            packageId: "sharelink-handoff-package",
+          }),
+          defaultSources: expect.objectContaining({
+            entrypoint: expect.objectContaining({ providerId: "entrypoint-sharelink" }),
+          }),
         }),
       ]),
     });

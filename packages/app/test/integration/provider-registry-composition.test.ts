@@ -9,7 +9,7 @@ import {
   referenceProviderRuntimeProfile,
 } from "@gla/provider-set-reference";
 import { describe, expect, it } from "vitest";
-import { createApp } from "../../src/composition.js";
+import { createApp, createBridge } from "../../src/composition.js";
 
 function sourceFiles(root: string): string[] {
   return readdirSync(root).flatMap((entry) => {
@@ -61,6 +61,21 @@ describe("ProviderRegistry app composition", () => {
     expect(providerRegistry.diagnostics()).toContainEqual(
       expect.objectContaining({ code: "provider.registry_sealed" }),
     );
+  });
+
+  it("labels catalog provenance as provider-manifest when composed from ProviderRegistry", () => {
+    const providerRegistry = ProviderRegistry.fromProviderModules(referenceProviderModules);
+    const providerProfile = referenceProviderRuntimeProfile(REFERENCE_PROFILE_SCENARIO_01_ID);
+    const bridge = createBridge({ providerRegistry, providerProfile });
+
+    expect(bridge.catalogShow(AUTH_WEBAUTHN_PROVIDER_ID)).toMatchObject({
+      name: AUTH_WEBAUTHN_PROVIDER_ID,
+      provenance: {
+        source: "provider-manifest",
+        id: AUTH_WEBAUTHN_PROVIDER_ID,
+        version: "0.1.0",
+      },
+    });
   });
 
   it("keeps legacy provider-set module reads isolated to the registry compatibility boundary", () => {
