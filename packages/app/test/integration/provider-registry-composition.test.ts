@@ -2,10 +2,15 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } f
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BROWSER_HANDOFF_TEMPLATE, createProviderPackageSkeleton } from "@gla/catalog";
+import {
+  BROWSER_HANDOFF_TEMPLATE,
+  createProviderPackageSkeleton,
+  referenceWpmDependencyBindings,
+} from "@gla/catalog";
 import type { LauncherPort, RuntimeHandle } from "@gla/kernel";
 import { type GlaProviderModule, ProviderRegistry } from "@gla/provider-host";
 import {
+  AUTH_AUTHENTIK_PROVIDER_ID,
   AUTH_WEBAUTHN_PROVIDER_ID,
   CHANNEL_CLI_PROVIDER_ID,
   CONNECTOR_CDP_PROVIDER_ID,
@@ -13,6 +18,7 @@ import {
   DETECTOR_USER_DONE_PROVIDER_ID,
   ENTRYPOINT_NOVNC_PROVIDER_ID,
   LAUNCHER_PROCESS_PROVIDER_ID,
+  REFERENCE_PROFILE_HARDENED_IDP_ID,
   REFERENCE_PROFILE_LOCAL_DEV_ID,
   REFERENCE_PROFILE_SCENARIO_01_ID,
   SECRET_STORE_REFERENCE_PROVIDER_ID,
@@ -22,7 +28,7 @@ import {
   referenceProviderModules,
 } from "@gla/provider-set-reference";
 import { describe, expect, it } from "vitest";
-import { createApp, createBridge } from "../../src/composition.js";
+import { createApp, createBridge, createProvisioningBridge } from "../../src/composition.js";
 import {
   createApp as createReferenceApp,
   createBridge as createReferenceBridge,
@@ -36,6 +42,23 @@ function sourceFiles(root: string): string[] {
     }
     return path.endsWith(".ts") ? [path] : [];
   });
+}
+
+function referenceBindingsWithReachableEdgeProxy(): ReturnType<
+  typeof referenceWpmDependencyBindings
+> {
+  return referenceWpmDependencyBindings().map((binding) =>
+    binding.dependency === "edge-proxy"
+      ? {
+          ...binding,
+          currentProbe: { result: "available" as const },
+          lastProbe: {
+            ...(binding.lastProbe ?? { at: "2026-06-13T00:00:00.000Z" }),
+            result: "available" as const,
+          },
+        }
+      : binding,
+  );
 }
 
 describe("ProviderRegistry app composition", () => {
@@ -225,6 +248,85 @@ describe("ProviderRegistry app composition", () => {
     });
   });
 
+  it("projects delegated auth from AppDeploymentConfig while capsule defaults stay separate", async () => {
+    const providerRegistry = ProviderRegistry.fromProviderModules(referenceProviderModules);
+    const deployment = referenceAppDeploymentConfigForProfile(REFERENCE_PROFILE_HARDENED_IDP_ID);
+    const { providerConfig: capsuleProviderConfig, ...capsuleProviders } =
+      referenceCapsuleProviderSelectionForProfile(REFERENCE_PROFILE_HARDENED_IDP_ID);
+    const stack = createProvisioningBridge({
+      providerRegistry,
+      appDeploymentConfig: deployment,
+      capsuleProviders,
+      ...(capsuleProviderConfig !== undefined ? { capsuleProviderConfig } : {}),
+      dependencyBindings: referenceBindingsWithReachableEdgeProxy(),
+      templateProbes: { [BROWSER_HANDOFF_TEMPLATE.metadata.name]: () => "available" },
+    });
+
+    try {
+      await stack.ready;
+
+      expect(deployment.auth).toBe(AUTH_AUTHENTIK_PROVIDER_ID);
+      expect(capsuleProviders).toMatchObject({
+        launcher: LAUNCHER_PROCESS_PROVIDER_ID,
+        workspace: WORKSPACE_PROFILE_PROVIDER_ID,
+        entrypoint: ENTRYPOINT_NOVNC_PROVIDER_ID,
+        connector: CONNECTOR_CDP_PROVIDER_ID,
+        detector: DETECTOR_URL_PROVIDER_ID,
+      });
+      expect(stack.providerGraphDoctor.status).toBe("PASS");
+      expect(stack.providerGraphDoctor.selectedProviders).toMatchObject({
+        AuthProvider: AUTH_AUTHENTIK_PROVIDER_ID,
+        Launcher: LAUNCHER_PROCESS_PROVIDER_ID,
+        CompletionDetector: DETECTOR_URL_PROVIDER_ID,
+      });
+      expect(
+        stack.providerGraphDoctor.providers.find(
+          (provider) => provider.providerId === AUTH_AUTHENTIK_PROVIDER_ID,
+        ),
+      ).toMatchObject({
+        providerId: AUTH_AUTHENTIK_PROVIDER_ID,
+        family: "auth",
+        selected: true,
+        available: true,
+        dependencies: [
+          expect.objectContaining({
+            dependency: "identity-provider",
+            status: "bound",
+          }),
+        ],
+      });
+      expect(stack.authModule).toBe("@gla/auth-authentik");
+      await expect(
+        stack.bridge.sessionCreate({
+          proposal: {
+            intent: "delegated auth deployment verification",
+            template: BROWSER_HANDOFF_TEMPLATE.metadata.name,
+            recipient: "tg:user:delegated-auth",
+            detectors: [{ use: DETECTOR_URL_PROVIDER_ID, params: { complete_on: "/dashboard" } }],
+          },
+          dryRun: true,
+        }),
+      ).resolves.toMatchObject({
+        decision: "accept",
+        dry_run: true,
+        capsule_plan: {
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              role: "launcher",
+              providerId: LAUNCHER_PROCESS_PROVIDER_ID,
+            }),
+            expect.objectContaining({
+              role: "detector",
+              providerId: DETECTOR_URL_PROVIDER_ID,
+            }),
+          ]),
+        },
+      });
+    } finally {
+      await stack.close();
+    }
+  });
+
   it("registers a locally authored provider into a development boot context and projects it to catalog", () => {
     const authoredProviderId = "launcher-authoring-boot";
     const skeleton = createProviderPackageSkeleton({
@@ -377,6 +479,133 @@ describe("ProviderRegistry app composition", () => {
       expect(missingAsset?.states).not.toContain("evidence-backed");
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies registry, deployment, capsule, catalog, admission, provisioning, and gateway asset evidence agree", async () => {
+    const assetRoot = mkdtempSync(join(tmpdir(), "gla-cross-layer-assets-"));
+    const providerRegistry = ProviderRegistry.fromProviderModules(referenceProviderModules);
+    const { providerConfig: capsuleProviderConfig, ...capsuleProviders } =
+      referenceCapsuleProviderSelectionForProfile(REFERENCE_PROFILE_LOCAL_DEV_ID);
+    const entrypointAsset = {
+      providerId: ENTRYPOINT_NOVNC_PROVIDER_ID,
+      ref: `${ENTRYPOINT_NOVNC_PROVIDER_ID}.novnc`,
+      source: "package" as const,
+      package: "@novnc/novnc",
+      root: assetRoot,
+      readOnly: true as const,
+      cacheControl: "no-cache" as const,
+    };
+    const stack = createProvisioningBridge({
+      providerRegistry,
+      appDeploymentConfig: referenceAppDeploymentConfigForProfile(REFERENCE_PROFILE_LOCAL_DEV_ID),
+      capsuleProviders,
+      ...(capsuleProviderConfig !== undefined ? { capsuleProviderConfig } : {}),
+      dependencyBindings: referenceBindingsWithReachableEdgeProxy(),
+      templateProbes: { [BROWSER_HANDOFF_TEMPLATE.metadata.name]: () => "available" },
+      entrypointClientAssets: [entrypointAsset],
+      handoff: {
+        expectedOrigin: "http://127.0.0.1:3000",
+        publicBaseUrl: "http://127.0.0.1:3000",
+        host: "127.0.0.1",
+        port: 0,
+        deliverySink: { write() {} },
+      },
+    });
+    try {
+      await stack.ready;
+
+      expect(providerRegistry.isSealed()).toBe(true);
+      expect(
+        stack.providerGraphDoctor.status,
+        JSON.stringify(stack.providerGraphDoctor, null, 2),
+      ).toBe("PASS");
+      expect(stack.providerGraphDoctor.selectedProviders).toMatchObject({
+        AuthProvider: AUTH_WEBAUTHN_PROVIDER_ID,
+        ChannelAdapter: CHANNEL_CLI_PROVIDER_ID,
+        SecretStore: SECRET_STORE_REFERENCE_PROVIDER_ID,
+        Launcher: LAUNCHER_PROCESS_PROVIDER_ID,
+        Workspace: WORKSPACE_PROFILE_PROVIDER_ID,
+        HumanEntrypoint: ENTRYPOINT_NOVNC_PROVIDER_ID,
+        AgentConnector: CONNECTOR_CDP_PROVIDER_ID,
+        CompletionDetector: DETECTOR_USER_DONE_PROVIDER_ID,
+      });
+
+      const template = stack.bridge.templateShow(BROWSER_HANDOFF_TEMPLATE.metadata.name);
+      expect(template.defaultSources).toMatchObject({
+        launcher: { providerId: LAUNCHER_PROCESS_PROVIDER_ID },
+        workspace: { providerId: WORKSPACE_PROFILE_PROVIDER_ID },
+        entrypoint: { providerId: ENTRYPOINT_NOVNC_PROVIDER_ID },
+        connector: { providerId: CONNECTOR_CDP_PROVIDER_ID },
+        detector: { providerId: DETECTOR_USER_DONE_PROVIDER_ID },
+      });
+
+      const entrypointCatalog = stack.bridge.catalogShow(ENTRYPOINT_NOVNC_PROVIDER_ID);
+      expect(entrypointCatalog).toMatchObject({
+        name: ENTRYPOINT_NOVNC_PROVIDER_ID,
+        available: true,
+        provenance: { source: "provider-manifest", id: ENTRYPOINT_NOVNC_PROVIDER_ID },
+      });
+      expect(entrypointCatalog.clientAssets).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            ref: entrypointAsset.ref,
+            source: "package",
+            status: "ready",
+            states: expect.arrayContaining(["packaged", "read-only"]),
+            provenance: expect.objectContaining({ source: "runtime-mount" }),
+          }),
+        ]),
+      );
+      expect(
+        stack.providerGraphDoctor.providers.find(
+          (provider) => provider.providerId === ENTRYPOINT_NOVNC_PROVIDER_ID,
+        )?.clientAssets,
+      ).toEqual(entrypointCatalog.clientAssets);
+      expect(stack.gateway).toBeDefined();
+
+      const dryRun = await stack.bridge.sessionCreate({
+        proposal: {
+          intent: "cross-layer provider verification",
+          template: BROWSER_HANDOFF_TEMPLATE.metadata.name,
+          recipient: "tg:user:matrix",
+        },
+        dryRun: true,
+      });
+      expect(dryRun).toMatchObject({
+        decision: "accept",
+        dry_run: true,
+        capsule_plan: {
+          template: BROWSER_HANDOFF_TEMPLATE.metadata.name,
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              role: "launcher",
+              providerId: LAUNCHER_PROCESS_PROVIDER_ID,
+              available: true,
+            }),
+            expect.objectContaining({
+              role: "entrypoint",
+              providerId: ENTRYPOINT_NOVNC_PROVIDER_ID,
+              available: true,
+            }),
+            expect.objectContaining({
+              role: "connector",
+              providerId: CONNECTOR_CDP_PROVIDER_ID,
+              available: true,
+            }),
+            expect.objectContaining({
+              role: "detector",
+              providerId: DETECTOR_USER_DONE_PROVIDER_ID,
+              available: true,
+            }),
+          ]),
+        },
+      });
+      expect(stack.registry.has(LAUNCHER_PROCESS_PROVIDER_ID)).toBe(true);
+      expect(stack.authModule).toBe("@gla/auth-webauthn");
+    } finally {
+      await stack.close();
+      rmSync(assetRoot, { recursive: true, force: true });
     }
   });
 });

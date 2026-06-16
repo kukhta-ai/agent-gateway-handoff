@@ -124,7 +124,8 @@ compatibility owner.
 
 **References.** The approved visual design is
 `docs/architecture/provider-layer-refactor-as-is-to-be.html`; implementation ownership is tracked by `GLA-110.02`
-through `GLA-110.13` below.
+through `GLA-110.13` below. The final cross-layer verification contract is
+`docs/architecture/provider-layer-refactor-regression-matrix.md`.
 
 ## 7. Task Ownership Map
 
