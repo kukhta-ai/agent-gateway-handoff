@@ -1,4 +1,5 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BROWSER_HANDOFF_TEMPLATE, createProviderPackageSkeleton } from "@gla/catalog";
@@ -308,5 +309,74 @@ describe("ProviderRegistry app composition", () => {
         requiredParts: expect.arrayContaining(["entrypoint", "connector", "detector"]),
       },
     });
+  });
+
+  it("projects entrypoint client asset provenance from runtime filesystem evidence", () => {
+    const root = mkdtempSync(join(tmpdir(), "gla-client-asset-facts-"));
+    const missingRoot = join(root, "missing");
+    const mutableRoot = join(root, "mutable");
+    mkdirSync(mutableRoot);
+    try {
+      const bridge = createReferenceBridge({
+        entrypointClientAssets: [
+          {
+            providerId: ENTRYPOINT_NOVNC_PROVIDER_ID,
+            ref: `${ENTRYPOINT_NOVNC_PROVIDER_ID}.novnc`,
+            source: "local-override",
+            env: "GLA_NOVNC_WEB_ROOT",
+            root: missingRoot,
+            readOnly: true,
+          },
+          {
+            providerId: ENTRYPOINT_NOVNC_PROVIDER_ID,
+            ref: `${ENTRYPOINT_NOVNC_PROVIDER_ID}.mutable`,
+            source: "local-override",
+            env: "GLA_NOVNC_WEB_ROOT",
+            root: mutableRoot,
+            readOnly: true,
+          },
+        ],
+      });
+
+      expect(bridge.catalogShow(ENTRYPOINT_NOVNC_PROVIDER_ID).clientAssets).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            ref: `${ENTRYPOINT_NOVNC_PROVIDER_ID}.novnc`,
+            source: "local-override",
+            status: "missing",
+            readOnly: "unknown",
+            states: expect.arrayContaining(["local-override", "missing", "unverifiable"]),
+            provenance: expect.objectContaining({
+              source: "local-override",
+              env: "GLA_NOVNC_WEB_ROOT",
+            }),
+            diagnostics: expect.arrayContaining([
+              expect.objectContaining({ code: "graph.client_asset_missing" }),
+            ]),
+          }),
+          expect.objectContaining({
+            ref: `${ENTRYPOINT_NOVNC_PROVIDER_ID}.mutable`,
+            source: "local-override",
+            status: "mutable",
+            states: expect.arrayContaining(["local-override", "mutable", "unverifiable"]),
+            provenance: expect.objectContaining({
+              source: "local-override",
+              env: "GLA_NOVNC_WEB_ROOT",
+            }),
+            diagnostics: expect.arrayContaining([
+              expect.objectContaining({ code: "graph.client_asset_mutable" }),
+            ]),
+          }),
+        ]),
+      );
+      const missingAsset = bridge
+        .catalogShow(ENTRYPOINT_NOVNC_PROVIDER_ID)
+        .clientAssets?.find((asset) => asset.ref === `${ENTRYPOINT_NOVNC_PROVIDER_ID}.novnc`);
+      expect(missingAsset).not.toHaveProperty("package");
+      expect(missingAsset?.states).not.toContain("packaged");
+      expect(missingAsset?.states).not.toContain("evidence-backed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

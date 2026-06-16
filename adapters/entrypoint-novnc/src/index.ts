@@ -41,6 +41,12 @@ export interface EntrypointClientAssetMount {
   readonly providerId: string;
   /** Provider-owned asset reference, used only as a same-origin URL segment. */
   readonly ref: string;
+  /** Provenance category surfaced by catalog/doctor diagnostics. */
+  readonly source?: "package" | "local-override" | "wpm-evidence";
+  /** Package that supplied packaged assets, when known. */
+  readonly package?: string;
+  /** Environment variable that selected a local override root, when applicable. */
+  readonly env?: string;
   /** Local read-only directory containing browser assets for this client. */
   readonly root: string;
   /** Reviewed declaration that the asset root is immutable/read-only during gateway serving. */
@@ -70,21 +76,33 @@ export function novncClientDescriptor(): RuntimeClientDescriptor {
 export function novncClientAssetMounts(
   env: NodeJS.ProcessEnv = process.env,
 ): EntrypointClientAssetMount[] {
-  const roots = [...(env.GLA_NOVNC_WEB_ROOT?.split(":") ?? []), bundledNovncRoot()].flatMap(
-    (root) => {
-      const trimmed = root?.trim();
-      return trimmed === undefined || trimmed.length === 0 ? [] : [resolvePath(trimmed)];
-    },
-  );
-  return [...new Set(roots)]
-    .filter((root) => existsSync(root))
-    .map((root) => ({
-      providerId: "entrypoint-novnc",
-      ref: NOVNC_CLIENT_ASSET_REF,
-      root,
-      readOnly: true as const,
-      cacheControl: "no-cache",
-    }));
+  const overrideRoots = (env.GLA_NOVNC_WEB_ROOT?.split(":") ?? []).flatMap((root) => {
+    const trimmed = root.trim();
+    return trimmed.length === 0 ? [] : [resolvePath(trimmed)];
+  });
+  const uniqueOverrides = [...new Set(overrideRoots)];
+  const selectedOverride = uniqueOverrides.find((root) => existsSync(root)) ?? uniqueOverrides[0];
+  const bundledRoot = bundledNovncRoot();
+  const selected =
+    selectedOverride !== undefined
+      ? { root: selectedOverride, source: "local-override" as const, env: "GLA_NOVNC_WEB_ROOT" }
+      : bundledRoot !== undefined
+        ? { root: bundledRoot, source: "package" as const, package: "@novnc/novnc" }
+        : undefined;
+  return selected === undefined
+    ? []
+    : [
+        {
+          providerId: "entrypoint-novnc",
+          ref: NOVNC_CLIENT_ASSET_REF,
+          root: selected.root,
+          source: selected.source,
+          ...(selected.env !== undefined ? { env: selected.env } : {}),
+          ...(selected.package !== undefined ? { package: selected.package } : {}),
+          readOnly: true as const,
+          cacheControl: "no-cache",
+        },
+      ];
 }
 
 function bundledNovncRoot(): string | undefined {

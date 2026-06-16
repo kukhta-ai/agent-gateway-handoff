@@ -489,17 +489,43 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
   it("serves configured provider client assets safely under the generic handoff asset route", async () => {
     const root = await mkdtemp(join(tmpdir(), "gla-client-assets-"));
     const outside = await mkdtemp(join(tmpdir(), "gla-client-assets-outside-"));
-    closers.push(() => rm(root, { recursive: true, force: true }));
+    closers.push(async () => {
+      await chmod(root, 0o700).catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    });
     closers.push(() => rm(outside, { recursive: true, force: true }));
     await writeFile(join(root, "viewer.js"), "export default class TestViewer {}\n");
     await writeFile(join(outside, "leak.js"), "export default 'outside root';\n");
     await symlink(join(outside, "leak.js"), join(root, "leak.js"));
+    await chmod(root, 0o555);
+    const evidenceRoot = await mkdtemp(join(tmpdir(), "gla-client-assets-evidence-"));
+    closers.push(async () => {
+      await chmod(evidenceRoot, 0o700).catch(() => {});
+      await rm(evidenceRoot, { recursive: true, force: true });
+    });
+    await writeFile(join(evidenceRoot, "viewer.js"), "export default class EvidenceViewer {}\n");
+    await chmod(evidenceRoot, 0o555);
     const { base, close } = await bootHandoffGateway(new StubSessionGrants(), new StubStepUp(), {
       entrypointClientAssets: [
         {
           providerId: "fake-entrypoint",
           ref: "fake-entrypoint.test-viewer",
+          source: "package",
+          package: "@fake/viewer",
           root,
+          readOnly: true,
+        },
+        {
+          providerId: "fake-entrypoint",
+          ref: "fake-entrypoint.evidence-viewer",
+          source: "wpm-evidence",
+          evidence: {
+            source: "wpm-receipt",
+            bundleId: "human-view",
+            bundleVersion: "0.1.0",
+            taskId: "GLA-008",
+          },
+          root: evidenceRoot,
           readOnly: true,
         },
       ],
@@ -512,6 +538,12 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
     expect(ok.headers.get("referrer-policy")).toBe("no-referrer");
     expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await ok.text()).toContain("TestViewer");
+
+    const evidenceOk = await fetch(
+      `${base}/handoff/client-assets/fake-entrypoint.evidence-viewer/viewer.js`,
+    );
+    expect(evidenceOk.status).toBe(200);
+    expect(await evidenceOk.text()).toContain("EvidenceViewer");
 
     const traversal = await fetch(
       `${base}/handoff/client-assets/fake-entrypoint.test-viewer/%2e%2e/package.json`,
@@ -571,6 +603,24 @@ describe("Access Gateway — handoff page grant enforcement (GLA-035)", () => {
           entrypointClientAssets: [{ ...mount, readOnly: false as never }],
         }),
     ).toThrow(/mutable/);
+    expect(
+      () =>
+        new AccessGateway({
+          sessionGrants: new StubSessionGrants(),
+          stepUp: new StubStepUp(),
+          entrypointClientAssets: [{ ...mount, source: "local-override" }],
+        }),
+    ).toThrow(/owner\/group\/world writable/);
+    expect(
+      () =>
+        new AccessGateway({
+          sessionGrants: new StubSessionGrants(),
+          stepUp: new StubStepUp(),
+          entrypointClientAssets: [
+            { ...mount, ref: "fake-entrypoint.missing", root: join(root, "missing") },
+          ],
+        }),
+    ).toThrow(/unavailable/);
     await chmod(root, 0o777);
     expect(
       () =>

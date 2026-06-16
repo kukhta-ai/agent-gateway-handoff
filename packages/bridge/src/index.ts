@@ -97,6 +97,7 @@ export type CatalogShowResult =
           | "defaultSource"
           | "resolvedConfig"
           | "config_schema"
+          | "clientAssets"
           | "authAssurance"
         >
       >)

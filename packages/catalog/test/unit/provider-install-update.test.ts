@@ -125,6 +125,19 @@ function referenceInventory(
       CompletionDetector: "url-watcher",
     },
     dependencyBindings: referenceWpmDependencyBindings(),
+    clientAssetSources: [
+      {
+        providerId: "entrypoint-novnc",
+        ref: "entrypoint-novnc.novnc",
+        source: "package",
+        package: "@novnc/novnc",
+        root: "/opt/gla/assets/novnc",
+        readOnly: true,
+        exists: true,
+        verified: true,
+        cacheControl: "no-cache",
+      },
+    ],
     ...overrides,
   };
 }
@@ -171,6 +184,18 @@ describe("provider install/update planning", () => {
           ownerId: "entrypoint-novnc",
           dependency: "human-view",
           status: "bound",
+        }),
+      ]),
+    );
+    expect(plan.candidate.clientAssets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerId: "entrypoint-novnc",
+          ref: "entrypoint-novnc.novnc",
+          source: "package",
+          status: "ready",
+          states: expect.arrayContaining(["packaged", "read-only"]),
+          provenance: expect.objectContaining({ source: "runtime-mount" }),
         }),
       ]),
     );
@@ -327,6 +352,97 @@ describe("provider install/update planning", () => {
           providerId: "auth-external",
           selected: true,
           available: false,
+        }),
+      ]),
+    );
+  });
+
+  it("reports provider client asset provenance and mutability without treating local overrides as packaged evidence", () => {
+    const report = doctorProviderInstallInventory(
+      referenceInventory({
+        clientAssetSources: [
+          {
+            providerId: "entrypoint-novnc",
+            ref: "entrypoint-novnc.novnc",
+            source: "local-override",
+            env: "GLA_NOVNC_WEB_ROOT",
+            root: "/srv/gla/novnc-local",
+            readOnly: true,
+            exists: true,
+            verified: true,
+          },
+          {
+            providerId: "entrypoint-novnc",
+            ref: "entrypoint-novnc.mutable",
+            source: "local-override",
+            env: "GLA_NOVNC_WEB_ROOT",
+            root: "/srv/gla/novnc-mutable",
+            readOnly: false,
+            exists: true,
+            verified: false,
+          },
+          {
+            providerId: "entrypoint-novnc",
+            ref: "entrypoint-novnc.missing",
+            source: "wpm-evidence",
+            root: "/srv/gla/novnc-missing",
+            readOnly: true,
+            exists: false,
+            verified: true,
+            evidence: {
+              source: "wpm-receipt",
+              bundleId: "human-view",
+              bundleVersion: "0.1.0",
+              taskId: "GLA-008",
+            },
+          },
+        ],
+      }),
+    );
+
+    const provider = report.doctor.providers.find((row) => row.providerId === "entrypoint-novnc");
+    expect(provider?.clientAssets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ref: "entrypoint-novnc.novnc",
+          source: "local-override",
+          status: "ready",
+          states: expect.arrayContaining(["local-override", "read-only"]),
+          provenance: expect.objectContaining({
+            source: "local-override",
+            env: "GLA_NOVNC_WEB_ROOT",
+          }),
+        }),
+        expect.objectContaining({
+          ref: "entrypoint-novnc.mutable",
+          source: "local-override",
+          status: "mutable",
+          states: expect.arrayContaining(["local-override", "mutable", "unverifiable"]),
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({ code: "graph.client_asset_mutable" }),
+          ]),
+        }),
+        expect.objectContaining({
+          ref: "entrypoint-novnc.missing",
+          source: "wpm-evidence",
+          status: "missing",
+          states: expect.arrayContaining(["evidence-backed", "missing", "read-only"]),
+          provenance: expect.objectContaining({
+            source: "wpm-receipt",
+            bundleId: "human-view",
+          }),
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({ code: "graph.client_asset_missing" }),
+          ]),
+        }),
+      ]),
+    );
+    expect(report.inventory.clientAssets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ref: "entrypoint-novnc.novnc",
+          source: "local-override",
+          states: expect.not.arrayContaining(["packaged", "evidence-backed"]),
         }),
       ]),
     );

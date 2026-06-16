@@ -248,6 +248,20 @@ export interface EntrypointClientAssetMount {
   providerId: string;
   /** Provider-owned reference from `HumanEntrypointClientBinding.ref`; must start with `<providerId>.`. */
   ref: string;
+  /** Provenance category used by catalog/doctor diagnostics; serving rules stay provider-neutral. */
+  source?: "package" | "wpm-evidence" | "local-override";
+  /** Package that supplied packaged assets, when known. */
+  package?: string;
+  /** Environment variable or local setting that selected an override root, when applicable. */
+  env?: string;
+  /** WPM receipt evidence that backs this asset root, when applicable. */
+  evidence?: {
+    source: "wpm-receipt";
+    bundleId?: string;
+    bundleVersion?: string;
+    taskId?: string;
+    refs?: string[];
+  };
   /** Local read-only directory containing browser assets for that ref. */
   root: string;
   /** Reviewed declaration that the asset root is immutable/read-only during gateway serving. */
@@ -1899,10 +1913,15 @@ function normalizeClientAssetMount(mount: EntrypointClientAssetMount): Entrypoin
         `provider client asset root must be a directory: ${mount.ref}`,
       );
     }
-    if ((statSync(root).mode & 0o022) !== 0) {
+    const rootMode = statSync(root).mode;
+    const forbiddenWritableBits =
+      mount.source === "local-override" || mount.source === "wpm-evidence" ? 0o222 : 0o022;
+    if ((rootMode & forbiddenWritableBits) !== 0) {
       throw layerError(
         "client-asset-mount",
-        `provider client asset root must not be group/world writable: ${mount.ref}`,
+        mount.source === "local-override" || mount.source === "wpm-evidence"
+          ? `provider client asset root must not be owner/group/world writable: ${mount.ref}`
+          : `provider client asset root must not be group/world writable: ${mount.ref}`,
       );
     }
   } catch (error) {
@@ -1917,6 +1936,10 @@ function normalizeClientAssetMount(mount: EntrypointClientAssetMount): Entrypoin
   return {
     providerId: mount.providerId,
     ref: mount.ref,
+    ...(mount.source !== undefined ? { source: mount.source } : {}),
+    ...(mount.package !== undefined ? { package: mount.package } : {}),
+    ...(mount.env !== undefined ? { env: mount.env } : {}),
+    ...(mount.evidence !== undefined ? { evidence: structuredClone(mount.evidence) } : {}),
     root,
     readOnly: true,
     ...(mount.cacheControl !== undefined ? { cacheControl: mount.cacheControl } : {}),
