@@ -4,11 +4,11 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — corrected provider graph follow-up complete"
-branch: feature/provider-graph
-epic: provider-graph-107
-active_story: null
-review_cycle: 1
+phase_name: "Autonomous build — provider-layer refactor GLA-110 initialized"
+branch: feature/provider-refactor-task-GLA-110.01
+epic: provider-refactor-110
+active_story: GLA-110.01
+review_cycle: 0
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -108,6 +108,14 @@ provider_graph_107_specialists:
   reviewer: {spawned: true, id: "019ec85b-6cde-7691-b01d-a58ee3f0d133", open: true, resumable: true, role: "TEA/test/security and independent story review for provider graph epic", last_skill: "Corrected GLA-109 story-automator-review adversarial review found daemon-preflight blocker; fix re-reviewed APPROVE with no remaining blocking findings"}
   investigator: {spawned: true, id: "019ec85b-8959-70c0-be10-b8df6540447b", open: true, resumable: true, role: "root-cause analysis for graph validation, availability, diagnostics, and boundary regressions", last_skill: "bmad-investigate loaded/resolved; initialized for GLA-107..GLA-107.13"}
 
+provider_refactor_110_specialists:
+  architect: {spawned: true, id: "019ecfe8-3773-7b22-beed-6d099213ed0b", nickname: "Archimedes", open: true, resumable: true, role: "provider-layer target contract, migration map, and architecture boundary review", last_skill: "bmad-agent-architect and bmad-create-architecture loaded/resolved; unattended run blocked by interactive PRD/input confirmation and architecture artifact writes; docs-driven fallback recorded"}
+  ux: {spawned: true, id: "019ecfe8-6bac-7893-a621-054bfe1c9615", nickname: "Confucius", open: true, resumable: true, role: "provider authoring, install/update, and runtime consumption UX separation", last_skill: "bmad-ux loaded/resolved; unattended run blocked by artifact-producing Create/Update/Validate modes and no-edit initialization constraint; docs-driven fallback recorded"}
+  sm: {spawned: true, id: "019ecfe8-92ac-78b2-a02e-3b940ba8763a", nickname: "Leibniz", open: true, resumable: true, role: "story sequencing, create-story evidence, and backlog readiness", last_skill: "bmad-create-story loaded/resolved; unattended run blocked by missing sprint-status/story artifacts and artifact writes; Backlog.md/docs fallback recorded"}
+  worker: {spawned: true, id: "019ecfe8-d9be-7100-b1df-1e5d50999552", nickname: "Banach", open: true, resumable: true, role: "provider-layer implementation and E2E/contract test generation", last_skill: "bmad-dev-story and bmad-qa-generate-e2e-tests loaded/resolved; unattended run blocked by missing BMAD story artifact and initialization no-edit constraint; docs/backlog fallback recorded"}
+  reviewer: {spawned: true, id: "019ecfe8-fe09-7790-9d13-d17110e8848f", nickname: "Goodall", open: true, resumable: true, role: "TEA/test/security and independent story review", last_skill: "bmad-story-automator-review plus bmad-testarch-trace/NFR/test-review loaded/resolved; unattended run blocked by choice prompts or artifact writes under no-edit init; review fallback recorded"}
+  investigator: {spawned: true, id: "019ecfe9-29ce-75a1-a436-5f44a075fd54", nickname: "Hume", open: true, resumable: true, role: "root-cause analysis for provider-layer regressions", last_skill: "bmad-investigate loaded/resolved; unattended run blocked by investigation case-file write and outcome pause under no-edit init; read-only fault-map fallback recorded"}
+
 gates_pending: ["human approval to open PR against dev"]
 retrospective_note: "bmad-retrospective loaded for GLA-107 closure, but the workflow is explicitly user-interactive with multiple WAIT gates; formal retrospective deferred to human-led gate rather than fabricated during unattended implementation."
 
@@ -137,4 +145,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-15T14:34:00Z"
+last_updated: "2026-06-16T10:30:00Z"
