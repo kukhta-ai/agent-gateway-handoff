@@ -66,9 +66,10 @@ import {
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
 import {
   type GlaProviderModule,
-  ProviderHost,
+  type ProviderHost,
   type ProviderId,
   type ProviderKvStore,
+  ProviderRegistry,
   type ProviderStateNamespaceMetadata,
   type ProviderStateRoot,
   type RuntimeProviderFamily,
@@ -172,6 +173,8 @@ export interface AppProviderSet {
 
 /** App options that can receive a trusted provider set or a prebuilt host plus selected profile. */
 export interface ProviderCompositionOptions {
+  /** Boot-time executable provider registry. Preferred over legacy provider-set module discovery. */
+  providerRegistry?: ProviderRegistry;
   /** Trusted install/boot-time provider set. Required unless a `providerHost` and full `providerProfile` are supplied. */
   providerSet?: AppProviderSet;
   /** Prebuilt trusted Provider Host, mainly for tests or external composition. */
@@ -197,14 +200,23 @@ export interface App {
   listen(port?: number): Promise<import("./daemon.js").DaemonHandle>;
 }
 
-function requireProviderHost(opts: ProviderCompositionOptions): ProviderHost {
+function requireProviderRegistry(opts: ProviderCompositionOptions): ProviderHost {
+  if (opts.providerRegistry !== undefined) {
+    return opts.providerRegistry.isSealed() ? opts.providerRegistry : opts.providerRegistry.seal();
+  }
   if (opts.providerHost !== undefined) {
     return opts.providerHost;
   }
   if (opts.providerSet !== undefined) {
-    return new ProviderHost().registerModules(opts.providerSet.modules);
+    return ProviderRegistry.fromProviderModules(opts.providerSet.modules);
   }
-  throw new Error("provider composition requires a providerSet or prebuilt providerHost");
+  throw new Error(
+    "provider composition requires a providerRegistry, providerSet, or prebuilt providerHost",
+  );
+}
+
+function requireProviderHost(opts: ProviderCompositionOptions): ProviderHost {
+  return requireProviderRegistry(opts);
 }
 
 function selectionProviderId(selection: unknown): string | undefined {

@@ -432,6 +432,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
   const stack = createProvisioningBridge({
+    ...(opts.providerRegistry !== undefined ? { providerRegistry: opts.providerRegistry } : {}),
     ...(opts.providerSet !== undefined ? { providerSet: opts.providerSet } : {}),
     ...(opts.providerHost !== undefined ? { providerHost: opts.providerHost } : {}),
     ...(opts.providerProfileId !== undefined ? { providerProfileId: opts.providerProfileId } : {}),
