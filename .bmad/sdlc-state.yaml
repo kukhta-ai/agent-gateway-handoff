@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.10 ready to merge"
-branch: feature/provider-refactor-task-GLA-110.10
+phase_name: "Autonomous build — provider-layer refactor ready for GLA-110.11"
+branch: feature/provider-graph
 epic: provider-refactor-110
-active_story: GLA-110.10
-review_cycle: 1
+active_story: null
+review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-refactor-task-GLA-110.10"
-  next_ready_sequence: "GLA-110.10 is Done on its story branch and ready to merge into feature/provider-graph; next ready task after merge is GLA-110.11."
-  note: "2026-06-16: GLA-110.10 completed. Executable runtime consumption UX uses catalog/template/session dry-run surfaces for capsule provider discovery/defaults/overrides, rejects deployment-provider override paths, exposes runtime diagnostics, and has Goodall approval plus focused/full gate evidence. DoD audit confirmed GLA-110 through GLA-110.14 have task-specific DoD entries."
+  current_branch: "feature/provider-graph"
+  next_ready_sequence: "GLA-110.10 is Done and merged into feature/provider-graph; next ready task is GLA-110.11."
+  note: "2026-06-16: GLA-110.10 completed and merged. Executable runtime consumption UX uses catalog/template/session dry-run surfaces for capsule provider discovery/defaults/overrides, rejects deployment-provider override paths, exposes runtime diagnostics, and has Goodall approval plus focused/full gate evidence. DoD audit confirmed GLA-110 through GLA-110.14 have task-specific DoD entries."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-16T21:58:00Z"
+last_updated: "2026-06-16T22:00:00Z"
