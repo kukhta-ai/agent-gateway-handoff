@@ -27,6 +27,8 @@ export type ProviderAuthoringRuntimeFamily = Exclude<ProviderFamily, "template">
 /** Stable machine-readable diagnostics returned by provider package authoring validation. */
 export type ProviderAuthoringDiagnosticCode =
   | "provider_author.manifest_invalid"
+  | "provider_author.duplicate_provider_id"
+  | "provider_author.duplicate_provider_version"
   | "provider_author.family_contract_invalid"
   | "provider_author.schema_invalid"
   | "provider_author.probe_missing"
@@ -41,6 +43,7 @@ export type ProviderAuthoringDiagnosticCode =
 /** Stable machine-readable diagnostics returned by template package authoring validation. */
 export type TemplateAuthoringDiagnosticCode =
   | "template_author.catalog_entity_invalid"
+  | "template_author.duplicate_template_id"
   | "template_author.schema_invalid"
   | "template_author.defaults_invalid"
   | "template_author.compatibility_invalid"
@@ -171,6 +174,22 @@ export interface TemplatePackageAuthoringReport {
   ok: boolean;
   diagnostics: AuthoringDiagnostic[];
   readiness: TemplateAuthoringReadiness;
+}
+
+/** Multi-package authoring input for validating a local provider/template development bundle. */
+export interface ProviderAuthoringWorkspaceInput {
+  /** Runtime provider package authoring inputs in the local bundle. */
+  providers?: readonly ProviderPackageAuthoringInput[];
+  /** Template package authoring inputs in the local bundle. */
+  templatePackages?: readonly TemplatePackageAuthoringInput[];
+}
+
+/** Multi-package authoring report that includes package-local and cross-package diagnostics. */
+export interface ProviderAuthoringWorkspaceReport {
+  ok: boolean;
+  diagnostics: AuthoringDiagnostic[];
+  providers: ProviderPackageAuthoringReport[];
+  templatePackages: TemplatePackageAuthoringReport[];
 }
 
 /** Input for producing a provider package skeleton. */
@@ -750,15 +769,21 @@ function validateProviderManifestIdentity(
 }
 
 function templateIdsFromManifest(manifest: unknown): string[] {
+  return templateIdEntriesFromManifest(manifest).map((entry) => entry.templateId);
+}
+
+function templateIdEntriesFromManifest(
+  manifest: unknown,
+): Array<{ templateId: string; index: number }> {
   if (!isRecord(manifest) || !isRecord(manifest.spec) || !Array.isArray(manifest.spec.templates)) {
     return [];
   }
-  return manifest.spec.templates.flatMap((template) =>
+  return manifest.spec.templates.flatMap((template, index) =>
     isRecord(template) &&
     isRecord(template.metadata) &&
     typeof template.metadata.name === "string" &&
     template.metadata.name.length > 0
-      ? [template.metadata.name]
+      ? [{ templateId: template.metadata.name, index }]
       : [],
   );
 }
@@ -779,16 +804,22 @@ function providerIdFromDefaultTarget(targetId: string): string {
   return targetId.startsWith("provider.") ? targetId.slice("provider.".length) : targetId;
 }
 
-function templateDefaultKeys(templateId: string): string[] {
-  return [`template.${templateId}`, templateId];
+function templateDefaultKey(templateId: string): string {
+  return `template.${templateId}`;
 }
 
 function templateDefaultTargets(manifest: unknown): Map<string, string> {
   const targets = new Map<string, string>();
   for (const templateId of templateIdsFromManifest(manifest)) {
-    for (const key of templateDefaultKeys(templateId)) {
-      targets.set(key, templateId);
-    }
+    targets.set(templateDefaultKey(templateId), templateId);
+  }
+  return targets;
+}
+
+function unprefixedTemplateDefaultTargets(manifest: unknown): Map<string, string> {
+  const targets = new Map<string, string>();
+  for (const templateId of templateIdsFromManifest(manifest)) {
+    targets.set(templateId, templateDefaultKey(templateId));
   }
   return targets;
 }
@@ -999,6 +1030,7 @@ function validateTemplateDefaults(
     return;
   }
   const templateTargets = templateDefaultTargets(manifest);
+  const legacyTemplateTargets = unprefixedTemplateDefaultTargets(manifest);
   for (const [targetId, targetDefaults] of Object.entries(defaults)) {
     const templateId = templateTargets.get(targetId);
     if (templateId !== undefined) {
@@ -1010,6 +1042,18 @@ function validateTemplateDefaults(
         providerIndex,
         packageId,
       );
+      continue;
+    }
+    const expectedTemplateTarget = legacyTemplateTargets.get(targetId);
+    if (expectedTemplateTarget !== undefined) {
+      pushDiagnostic(diagnostics, {
+        code: "template_author.defaults_invalid",
+        message:
+          "template provider defaults must be keyed by template.<template-id>; unprefixed template ids are unsupported in authored packages",
+        path: `spec.defaults.${targetId}`,
+        ...(packageId !== undefined ? { packageId } : {}),
+        detail: { targetId, expectedTargetId: expectedTemplateTarget },
+      });
       continue;
     }
     const providerId = providerIdFromDefaultTarget(targetId);
@@ -1390,7 +1434,7 @@ export function createProviderPackageSkeleton(
       `adapters/${input.providerId}/src/index.ts`,
       `adapters/${input.providerId}/test/contract/${input.providerId}.test.ts`,
       `adapters/${input.providerId}/README.md`,
-      `packages/provider-set-${input.providerId}/src/index.ts`,
+      `packages/provider-${input.providerId}/src/index.ts`,
     ],
     wpmSkeletons,
   };
@@ -1456,6 +1500,108 @@ export function createTemplatePackageSkeleton(
       `templates/${input.templateId}/README.md`,
     ],
     wpmSkeletons,
+  };
+}
+
+/** Validate a local authoring bundle and fail closed on cross-package identity collisions. */
+export function validateProviderAuthoringWorkspace(
+  input: ProviderAuthoringWorkspaceInput,
+): ProviderAuthoringWorkspaceReport {
+  const diagnostics: AuthoringDiagnostic[] = [];
+  const providers = input.providers ?? [];
+  const providerReports = providers.map((provider) => validateProviderPackageAuthoring(provider));
+  const providerManifests = providers.flatMap((provider) =>
+    providerIdFromManifest(provider.manifest) !== undefined &&
+    providerFamilyFromManifest(provider.manifest) !== undefined
+      ? [provider.manifest as unknown as ProviderManifest]
+      : [],
+  );
+  const templatePackages = input.templatePackages ?? [];
+  const templateReports = templatePackages.map((templatePackage) =>
+    validateTemplatePackageAuthoring({
+      ...templatePackage,
+      providers: templatePackage.providers ?? providerManifests,
+    }),
+  );
+
+  const seenProviderIds = new Map<string, { index: number; version?: string }>();
+  const seenProviderVersions = new Map<string, { index: number }>();
+  for (const [index, provider] of providers.entries()) {
+    const id = providerIdFromManifest(provider.manifest);
+    if (id === undefined) {
+      continue;
+    }
+    const version =
+      isRecord(provider.manifest) &&
+      isRecord(provider.manifest.metadata) &&
+      typeof provider.manifest.metadata.version === "string"
+        ? provider.manifest.metadata.version
+        : undefined;
+    const prior = seenProviderIds.get(id);
+    if (prior !== undefined) {
+      const family = providerFamilyFromManifest(provider.manifest);
+      pushDiagnostic(diagnostics, {
+        code: "provider_author.duplicate_provider_id",
+        message: "provider id appears more than once in the authoring bundle",
+        path: `providers.${index}.manifest.metadata.name`,
+        packageId: id,
+        ...(family !== undefined ? { family } : {}),
+        detail: { firstIndex: prior.index, duplicateIndex: index },
+      });
+    } else {
+      seenProviderIds.set(id, { index, ...(version !== undefined ? { version } : {}) });
+    }
+    if (version === undefined) {
+      continue;
+    }
+    const versionKey = `${id}@${version}`;
+    const priorVersion = seenProviderVersions.get(versionKey);
+    if (priorVersion !== undefined) {
+      const family = providerFamilyFromManifest(provider.manifest);
+      pushDiagnostic(diagnostics, {
+        code: "provider_author.duplicate_provider_version",
+        message: "provider id/version appears more than once in the authoring bundle",
+        path: `providers.${index}.manifest.metadata.version`,
+        packageId: id,
+        ...(family !== undefined ? { family } : {}),
+        detail: { version, firstIndex: priorVersion.index, duplicateIndex: index },
+      });
+    } else {
+      seenProviderVersions.set(versionKey, { index });
+    }
+  }
+
+  const seenTemplateIds = new Map<string, { packageIndex: number; templateIndex: number }>();
+  for (const [packageIndex, templatePackage] of templatePackages.entries()) {
+    for (const { templateId, index: templateIndex } of templateIdEntriesFromManifest(
+      templatePackage.manifest,
+    )) {
+      const prior = seenTemplateIds.get(templateId);
+      if (prior !== undefined) {
+        const packageId = templatePackageIdFromManifest(templatePackage.manifest);
+        pushDiagnostic(diagnostics, {
+          code: "template_author.duplicate_template_id",
+          message: "template id appears more than once in the authoring bundle",
+          path: `templatePackages.${packageIndex}.manifest.spec.templates.${templateIndex}.metadata.name`,
+          ...(packageId !== undefined ? { packageId } : {}),
+          detail: { templateId, first: prior, duplicate: { packageIndex, templateIndex } },
+        });
+      } else {
+        seenTemplateIds.set(templateId, { packageIndex, templateIndex });
+      }
+    }
+  }
+
+  const allDiagnostics = [
+    ...diagnostics,
+    ...providerReports.flatMap((report) => report.diagnostics),
+    ...templateReports.flatMap((report) => report.diagnostics),
+  ];
+  return {
+    ok: allDiagnostics.length === 0,
+    diagnostics: allDiagnostics,
+    providers: providerReports,
+    templatePackages: templateReports,
   };
 }
 
