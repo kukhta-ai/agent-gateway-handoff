@@ -83,6 +83,7 @@ function providerManifest(opts: {
   configSchema?: ConfigSchema;
   factoryConfigSchema?: ConfigSchema;
   capability?: Record<string, unknown>;
+  relations?: ProviderManifest["spec"]["relations"];
 }): ProviderManifest {
   return {
     apiVersion: "gla.dev/v1",
@@ -95,6 +96,7 @@ function providerManifest(opts: {
       ...(opts.factoryConfigSchema !== undefined
         ? { factory_config_schema: opts.factoryConfigSchema }
         : {}),
+      ...(opts.relations !== undefined ? { relations: opts.relations } : {}),
       probe: opts.id,
       skills: [{ id: `use-${opts.id}`, for: opts.id, body: `Use ${opts.id}.` }],
     },
@@ -251,6 +253,12 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         configSchema: objectSchema({
           mode: { type: "string", enum: ["auto", "headless"], default: "headless" },
         }),
+        relations: {
+          compatibleWith: {
+            entrypoints: ["fake-entrypoint"],
+            connectors: ["fake-connector"],
+          },
+        },
       }),
       "@fake/launcher",
       (ctx) =>
@@ -313,6 +321,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         summary: "fake detector",
         factoryConfigSchema: objectSchema({ pollMs: { type: "number", minimum: 1 } }, ["pollMs"]),
         capability: { completion: { statuses: { fake: { status: "done" } } } },
+        relations: { compatibleWith: { templates: ["browser-handoff"] } },
       }),
       "@fake/detector",
       (ctx) =>

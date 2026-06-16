@@ -270,6 +270,12 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
             summary: "fake launcher selected through Provider Host",
             mounts: { host_paths: ["file", "directory"], modes: ["ro", "rw"] },
           },
+          relations: {
+            compatibleWith: {
+              entrypoints: ["entrypoint-fake"],
+              connectors: ["connector-fake"],
+            },
+          },
           probe: "launcher-fake",
         },
       },
@@ -345,6 +351,7 @@ function fakeProviderModules(records: FakeRuntimeRecords): GlaProviderModule[] {
               },
             },
           },
+          relations: { compatibleWith: { templates: ["browser-handoff"] } },
           probe: "detector-fake",
         },
       },
@@ -509,6 +516,7 @@ describe("provisioning composition root — real `session create` + `session con
         spec: {
           family: "connector",
           capability: { summary: "connector without suspend/resume support" },
+          relations: { compatibleWith: { templates: ["browser-handoff"] } },
           probe: "connector-no-control",
         },
       },

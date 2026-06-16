@@ -15,6 +15,8 @@ import type {
   WpmBundleEvidence,
 } from "./manifests.js";
 import {
+  type ProviderProfileFamilyId,
+  type ProviderProfileSelection,
   type TemplatePackageManifest,
   validateTemplatePackageManifest,
 } from "./provider-profile.js";
@@ -257,6 +259,20 @@ const RELATION_KEY_TO_FAMILY: Record<string, ProviderFamily> = {
   "secret-stores": "secret-store",
   secretStores: "secret-store",
   templates: "template",
+};
+const TEMPLATE_DEFAULT_FAMILY_TO_PART: Partial<Record<ProviderProfileFamilyId, string>> = {
+  Launcher: "launcher",
+  Workspace: "workspace",
+  HumanEntrypoint: "entrypoint",
+  AgentConnector: "connector",
+  CompletionDetector: "detector",
+};
+const TEMPLATE_PART_TO_DEFAULT_FAMILY: Record<string, ProviderProfileFamilyId> = {
+  launcher: "Launcher",
+  workspace: "Workspace",
+  entrypoint: "HumanEntrypoint",
+  connector: "AgentConnector",
+  detector: "CompletionDetector",
 };
 const FAMILY_TO_KIND: Record<ProviderAuthoringRuntimeFamily, string> = {
   auth: "AuthProvider",
@@ -763,6 +779,32 @@ function providerIdFromDefaultTarget(targetId: string): string {
   return targetId.startsWith("provider.") ? targetId.slice("provider.".length) : targetId;
 }
 
+function templateDefaultKeys(templateId: string): string[] {
+  return [`template.${templateId}`, templateId];
+}
+
+function templateDefaultTargets(manifest: unknown): Map<string, string> {
+  const targets = new Map<string, string>();
+  for (const templateId of templateIdsFromManifest(manifest)) {
+    for (const key of templateDefaultKeys(templateId)) {
+      targets.set(key, templateId);
+    }
+  }
+  return targets;
+}
+
+function providerIdFromSelection(
+  selection: ProviderProfileSelection | undefined,
+): string | undefined {
+  if (typeof selection === "string") {
+    return selection.length > 0 ? selection : undefined;
+  }
+  if (isRecord(selection) && typeof selection.providerId === "string") {
+    return selection.providerId.length > 0 ? selection.providerId : undefined;
+  }
+  return undefined;
+}
+
 function validateProviderRelations(
   diagnostics: AuthoringDiagnostic[],
   manifest: ProviderManifest,
@@ -956,7 +998,20 @@ function validateTemplateDefaults(
     });
     return;
   }
+  const templateTargets = templateDefaultTargets(manifest);
   for (const [targetId, targetDefaults] of Object.entries(defaults)) {
+    const templateId = templateTargets.get(targetId);
+    if (templateId !== undefined) {
+      validateTemplateProviderDefaults(
+        diagnostics,
+        targetId,
+        templateId,
+        targetDefaults,
+        providerIndex,
+        packageId,
+      );
+      continue;
+    }
     const providerId = providerIdFromDefaultTarget(targetId);
     const provider = providerIndex.get(providerId);
     if (provider === undefined) {
@@ -990,6 +1045,74 @@ function validateTemplateDefaults(
         ...(packageId !== undefined ? { packageId } : {}),
         family: provider.spec.family,
         detail: { providerId, defects: validation.defects },
+      });
+    }
+  }
+}
+
+function validateTemplateProviderDefaults(
+  diagnostics: AuthoringDiagnostic[],
+  targetId: string,
+  templateId: string,
+  targetDefaults: unknown,
+  providerIndex: ReadonlyMap<string, ProviderManifest>,
+  packageId: string | undefined,
+): void {
+  if (!isRecord(targetDefaults)) {
+    pushDiagnostic(diagnostics, {
+      code: "template_author.defaults_invalid",
+      message:
+        "template provider defaults target must be an object keyed by capsule provider family",
+      path: `spec.defaults.${targetId}`,
+      ...(packageId !== undefined ? { packageId } : {}),
+      detail: { templateId },
+    });
+    return;
+  }
+  for (const [family, selection] of Object.entries(targetDefaults)) {
+    const part = TEMPLATE_DEFAULT_FAMILY_TO_PART[family as ProviderProfileFamilyId];
+    if (part === undefined) {
+      pushDiagnostic(diagnostics, {
+        code: "template_author.defaults_invalid",
+        message: "template provider defaults may only name capsule provider families",
+        path: `spec.defaults.${targetId}.${family}`,
+        ...(packageId !== undefined ? { packageId } : {}),
+        detail: { family, templateId },
+      });
+      continue;
+    }
+    const providerId = providerIdFromSelection(selection as ProviderProfileSelection);
+    if (providerId === undefined) {
+      pushDiagnostic(diagnostics, {
+        code: "template_author.defaults_invalid",
+        message: "template provider defaults must select a provider id",
+        path: `spec.defaults.${targetId}.${family}`,
+        ...(packageId !== undefined ? { packageId } : {}),
+        detail: { family, templateId },
+      });
+      continue;
+    }
+    const provider = providerIndex.get(providerId);
+    if (provider === undefined) {
+      pushDiagnostic(diagnostics, {
+        code: "template_author.defaults_invalid",
+        message: "template provider defaults must select a known provider id",
+        path: `spec.defaults.${targetId}.${family}`,
+        ...(packageId !== undefined ? { packageId } : {}),
+        detail: { family, providerId, templateId },
+      });
+      continue;
+    }
+    const expectedFamily = RELATION_KEY_TO_FAMILY[part];
+    if (expectedFamily !== undefined && provider.spec.family !== expectedFamily) {
+      pushDiagnostic(diagnostics, {
+        code: "template_author.defaults_invalid",
+        message:
+          "template provider defaults must select a provider from the matching capsule family",
+        path: `spec.defaults.${targetId}.${family}`,
+        ...(packageId !== undefined ? { packageId } : {}),
+        family: provider.spec.family,
+        detail: { expectedFamily, providerId, templateId },
       });
     }
   }
@@ -1310,7 +1433,12 @@ export function createTemplatePackageSkeleton(
     spec: {
       templates: [template],
       schema: input.openParams ?? EMPTY_CONFIG_SCHEMA,
-      defaults: input.providerDefaults ?? {},
+      defaults: {
+        ...(input.providerDefaults ?? {}),
+        [`template.${input.templateId}`]: templateProviderDefaultsFromRequiredParts(
+          input.requiredParts,
+        ),
+      },
       compatibility: { requiredParts: input.openParts ?? Object.keys(compatibleProviders) },
       docs: [`templates/${input.templateId}/README.md`],
       tests: [`templates/${input.templateId}/test/contract/${input.templateId}.test.ts`],
@@ -1329,4 +1457,17 @@ export function createTemplatePackageSkeleton(
     ],
     wpmSkeletons,
   };
+}
+
+function templateProviderDefaultsFromRequiredParts(
+  requiredParts: Record<string, string>,
+): Record<string, ProviderProfileSelection> {
+  const defaults: Record<string, ProviderProfileSelection> = {};
+  for (const [part, providerId] of Object.entries(requiredParts)) {
+    const family = TEMPLATE_PART_TO_DEFAULT_FAMILY[part];
+    if (family !== undefined && providerId.length > 0) {
+      defaults[family] = providerId;
+    }
+  }
+  return defaults;
 }

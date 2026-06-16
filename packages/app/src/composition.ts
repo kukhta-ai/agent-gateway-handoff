@@ -31,6 +31,7 @@ import {
   type ProviderProfileFamilyId,
   type ProviderProfileManifest,
   type StoreContent,
+  type TemplatePackageManifest,
   providerGraphDoctorReport,
   resolveProviderGraphProjection,
   toAdmissionCatalogFromProviderGraphProjection,
@@ -463,35 +464,19 @@ function providerServiceBindings(
   return providerSet?.defaultServices?.({ family, providerId, legacy }) ?? {};
 }
 
-function templateWithProviderProfile(
-  profile: ProviderSelectionProfile,
-): typeof BROWSER_HANDOFF_TEMPLATE {
-  const template = structuredClone(BROWSER_HANDOFF_TEMPLATE);
-  template.spec.requiredParts.launcher = profile.launcher;
-  template.spec.requiredParts.entrypoint = profile.entrypoint;
-  template.spec.requiredParts.connector = profile.connector;
-  template.spec.requiredParts.workspace = profile.workspace;
-  template.spec.requiredParts.detector = profile.detector;
-  return template;
-}
-
-/** Catalog store content derived from Provider Host registration data and the selected provider profile. */
-export function providerStoreContent(
-  host: ProviderHost,
-  profile: ProviderSelectionProfile,
-): StoreContent {
+/** Catalog store content derived from Provider Host registration data. */
+export function providerStoreContent(host: ProviderHost): StoreContent {
   return {
     providers: host.providerManifests(),
-    templates: [templateWithProviderProfile(profile)],
+    templates: [structuredClone(BROWSER_HANDOFF_TEMPLATE)],
   };
 }
 
 function providerCatalogOptions(
   dependencyBindings: DependencyBinding[] | undefined,
   host: ProviderHost,
-  profile: ProviderSelectionProfile,
 ): CatalogServiceOptions {
-  const content = providerStoreContent(host, profile);
+  const content = providerStoreContent(host);
   const options: CatalogServiceOptions = {
     content,
   };
@@ -647,6 +632,37 @@ function providerSetDefaultConfig(
   return Object.keys(defaults).length > 0 ? defaults : undefined;
 }
 
+function runtimeCapsuleTemplatePackage(capsule: CapsuleProviderSelection): TemplatePackageManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "TemplatePackage",
+    metadata: {
+      name: "runtime-browser-handoff-template-defaults",
+      version: BROWSER_HANDOFF_TEMPLATE.metadata.version,
+    },
+    spec: {
+      templates: [structuredClone(BROWSER_HANDOFF_TEMPLATE)],
+      ...(BROWSER_HANDOFF_TEMPLATE.spec.openParams !== undefined
+        ? { schema: structuredClone(BROWSER_HANDOFF_TEMPLATE.spec.openParams) }
+        : {}),
+      defaults: {
+        [`template.${BROWSER_HANDOFF_TEMPLATE.metadata.name}`]: {
+          Launcher: capsule.launcher,
+          Workspace: capsule.workspace,
+          HumanEntrypoint: capsule.entrypoint,
+          AgentConnector: capsule.connector,
+          CompletionDetector: capsule.detector,
+        },
+      },
+      compatibility: {
+        requiredParts: [...(BROWSER_HANDOFF_TEMPLATE.spec.openParts ?? [])],
+      },
+      docs: ["docs/04-capsule-assembly.md"],
+      tests: ["packages/app/test/integration/provider-set-composition.test.ts"],
+    },
+  };
+}
+
 interface ProviderGraphRuntimeContext {
   readonly catalogOptions: CatalogServiceOptions;
   readonly graph: ProviderGraphProjectionResult;
@@ -657,13 +673,15 @@ function providerGraphRuntimeContext(opts: {
   providerHost: ProviderHost;
   providerSet?: AppProviderSet | undefined;
   profile: ProviderSelectionProfile;
+  capsule: CapsuleProviderSelection;
   profileManifest?: ProviderProfileManifest | undefined;
   dependencyBindings?: DependencyBinding[] | undefined;
   runtimeAssemblyParams?: Record<string, Record<string, unknown>> | undefined;
   configValidationProviderIds?: readonly ProviderId[] | undefined;
   templateProbes?: Readonly<Record<string, Probe>> | undefined;
 }): ProviderGraphRuntimeContext {
-  const content = providerStoreContent(opts.providerHost, opts.profile);
+  const content = providerStoreContent(opts.providerHost);
+  const templatePackages = [runtimeCapsuleTemplatePackage(opts.capsule)];
   const catalogOptions: CatalogServiceOptions = { content };
   if (opts.dependencyBindings !== undefined) {
     catalogOptions.dependencyBindings = opts.dependencyBindings;
@@ -673,9 +691,9 @@ function providerGraphRuntimeContext(opts: {
     providerSet: {
       ...(opts.providerSet?.moduleId !== undefined ? { id: opts.providerSet.moduleId } : {}),
       providers: content.providers,
-      templates: content.templates,
       ...(defaultConfig !== undefined ? { defaultConfig } : {}),
     },
+    templatePackages,
     baseProfile: opts.profileManifest ?? providerProfileManifest(opts.profile),
     ...(opts.dependencyBindings !== undefined
       ? { dependencyBindings: opts.dependencyBindings }
@@ -1009,10 +1027,9 @@ function providerDependencyEvidence(
   providerId: ProviderId,
   dependencyBindings: DependencyBinding[] | undefined,
   providerHost: ProviderHost,
-  profile: ProviderSelectionProfile,
 ): IndexedDependencyBinding[] | undefined {
   const requires = new CatalogService(
-    providerCatalogOptions(dependencyBindings, providerHost, profile),
+    providerCatalogOptions(dependencyBindings, providerHost),
   ).show(providerId)?.requires;
   return requires !== undefined && requires.length > 0 ? requires : undefined;
 }
@@ -1034,12 +1051,7 @@ function buildChannelProvider(opts: {
       : undefined;
   const dependencyEvidence =
     graphInputs?.dependencyBindings ??
-    providerDependencyEvidence(
-      opts.providerId,
-      opts.dependencyBindings,
-      opts.providerHost,
-      opts.profile,
-    );
+    providerDependencyEvidence(opts.providerId, opts.dependencyBindings, opts.providerHost);
   const serviceBindings = providerServiceBindings(opts.providerSet, "channel", opts.providerId, {});
   return opts.providerHost.createProviderSync("channel", opts.providerId, {
     config: graphInputs?.config ?? opts.config ?? {},
@@ -1278,6 +1290,7 @@ export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
     providerHost,
     providerSet: opts.providerSet,
     profile,
+    capsule: selections.capsule,
     profileManifest: selections.profileManifest,
     dependencyBindings: opts.dependencyBindings,
     configValidationProviderIds: [],
@@ -1644,6 +1657,7 @@ export function createProvisioningBridge(
       providerHost,
       providerSet: opts.providerSet,
       profile,
+      capsule,
       profileManifest: selections.profileManifest,
       dependencyBindings: opts.dependencyBindings,
       runtimeAssemblyParams,
@@ -1809,7 +1823,6 @@ export function createProvisioningBridge(
           h.authProvider ?? deployment.auth,
           opts.dependencyBindings,
           providerHost,
-          profile,
         ),
         providerHost,
         opts.providerSet,
@@ -2346,7 +2359,7 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
         expectedOrigin: opts.expectedOrigin,
       },
       undefined,
-      providerDependencyEvidence(deployment.auth, opts.dependencyBindings, providerHost, profile),
+      providerDependencyEvidence(deployment.auth, opts.dependencyBindings, providerHost),
       providerHost,
       opts.providerSet,
       profile,

@@ -1100,6 +1100,37 @@ describe("gla session create — dry-run (admission only)", () => {
     }
   });
 
+  it("assembly files cannot smuggle app infrastructure provider selections", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
+    try {
+      const path = specFile(dir, {
+        ...OK_ASSEMBLY,
+        spec: {
+          ...OK_ASSEMBLY.spec,
+          auth: { use: "auth-webauthn" },
+          authProvider: { use: "authentik" },
+          channel: { use: "channel-cli" },
+          secretStore: { use: "secret-store-reference" },
+        },
+      });
+      const c = capture(false);
+      const code = await run(["session", "create", "-f", path, "--dry-run"], c.out, services());
+      expect(code).toBe(ExitCode.POLICY);
+      const error = JSON.parse(c.stderr()).error;
+      expect(error.code).toBe("policy.denied");
+      expect(error.detail.defects.map((defect: { path: string }) => defect.path)).toEqual(
+        expect.arrayContaining([
+          "spec.auth",
+          "spec.authProvider",
+          "spec.channel",
+          "spec.secretStore",
+        ]),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("UNKNOWN template → exit 5 (catalog.unknown)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
     try {
