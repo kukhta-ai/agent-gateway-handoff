@@ -30,14 +30,6 @@ export const REFERENCE_PROVIDER_SET_PACKAGES = Object.freeze(["@gla/provider-set
 /** Runtime source files that intentionally select a provider-set distribution at boot. */
 export const PROVIDER_SET_ENTRYPOINT_FILES = Object.freeze(["packages/app/src/index.ts"]);
 
-/** Migration files that may mention retired provider-layer names until GLA-110.14 removes them. */
-export const RETIRED_PROVIDER_LAYER_COMPAT_FILES = Object.freeze([
-  "packages/app/src/provider-compat.ts",
-  "packages/app/src/composition.ts",
-  "packages/app/src/index.ts",
-  "packages/app/src/daemon.ts",
-]);
-
 /** Runtime packages whose production source must not know concrete provider adapters. */
 export const PROTECTED_RUNTIME_PACKAGES = Object.freeze([
   "packages/app",
@@ -70,10 +62,6 @@ function isReferenceProviderSetSpecifier(specifier) {
 
 function isProviderSetEntrypoint(file) {
   return PROVIDER_SET_ENTRYPOINT_FILES.includes(file.replaceAll("\\", "/"));
-}
-
-function isRetiredProviderLayerCompatFile(file) {
-  return RETIRED_PROVIDER_LAYER_COMPAT_FILES.includes(file.replaceAll("\\", "/"));
 }
 
 function relativeImportTargets(file, specifier) {
@@ -137,9 +125,6 @@ function importSpecifiers(source) {
 }
 
 function retiredProviderLayerViolations(file, source) {
-  if (isRetiredProviderLayerCompatFile(file)) {
-    return [];
-  }
   const violations = [];
   const retiredToken = /\b(AppProviderSet|ProviderSelectionProfile|ProviderProfileManifest)\b/g;
   let tokenMatch = retiredToken.exec(source);
@@ -149,7 +134,7 @@ function retiredProviderLayerViolations(file, source) {
       file,
       line: lineNumberFor(source, tokenMatch.index),
       token: tokenMatch[1],
-      message: `${file}:${lineNumberFor(source, tokenMatch.index)} uses retired provider-layer token "${tokenMatch[1]}". Protected runtime packages must use ProviderRegistry, AppDeploymentConfig, capsule templates/assembly, and resolved capsule plans; legacy names are limited to migration compatibility files.`,
+      message: `${file}:${lineNumberFor(source, tokenMatch.index)} uses retired provider-layer token "${tokenMatch[1]}". Protected runtime packages must use ProviderRegistry, AppDeploymentConfig, capsule templates/assembly, and resolved capsule plans; no legacy runtime compatibility files are supported.`,
     });
     tokenMatch = retiredToken.exec(source);
   }
@@ -163,7 +148,7 @@ function retiredProviderLayerViolations(file, source) {
       file,
       line: lineNumberFor(source, readMatch.index),
       token: `providerSet.${readMatch[1]}`,
-      message: `${file}:${lineNumberFor(source, readMatch.index)} reads legacy provider-set shape "${readMatch[1]}". Runtime code must go through the compatibility adapter until GLA-110.14 removes the legacy path.`,
+      message: `${file}:${lineNumberFor(source, readMatch.index)} reads legacy provider-set shape "${readMatch[1]}". Runtime code must use ProviderRegistry, AppDeploymentConfig, capsule templates/assembly, and resolved capsule plans; the legacy compatibility adapter has been removed.`,
     });
     readMatch = directProviderSetRead.exec(source);
   }

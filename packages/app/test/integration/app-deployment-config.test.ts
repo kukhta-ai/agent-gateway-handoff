@@ -11,22 +11,32 @@ import {
   REFERENCE_PROFILE_LOCAL_DEV_ID,
   SECRET_STORE_REFERENCE_PROVIDER_ID,
   WORKSPACE_PROFILE_PROVIDER_ID,
+  referenceAppDeploymentConfigForProfile,
+  referenceCapsuleProviderSelectionForProfile,
 } from "@gla/provider-set-reference";
 import { describe, expect, it } from "vitest";
 import {
   createApp,
   createBridge,
   createProvisioningBridge,
-  referenceProviderSet,
   resolveAppDeploymentConfig,
   resolveCapsuleProviderSelection,
 } from "../../src/index.js";
 
+function referenceSplitOptions(profileId = REFERENCE_PROFILE_LOCAL_DEV_ID) {
+  const { providerConfig, ...capsuleProviders } =
+    referenceCapsuleProviderSelectionForProfile(profileId);
+  return {
+    appDeploymentConfig: referenceAppDeploymentConfigForProfile(profileId),
+    capsuleProviders,
+    ...(providerConfig !== undefined ? { capsuleProviderConfig: providerConfig } : {}),
+  };
+}
+
 describe("AppDeploymentConfig and capsule provider selection", () => {
   it("exposes app deployment providers without capsule provider fields", () => {
     const deployment = resolveAppDeploymentConfig({
-      providerSet: referenceProviderSet,
-      providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      ...referenceSplitOptions(),
     });
 
     expect(deployment).toMatchObject({
@@ -52,8 +62,11 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
 
   it("exposes capsule providers without app infrastructure provider fields", () => {
     const capsule = resolveCapsuleProviderSelection({
-      providerSet: referenceProviderSet,
-      appDeploymentConfig: { auth: AUTH_AUTHENTIK_PROVIDER_ID },
+      ...referenceSplitOptions(),
+      appDeploymentConfig: {
+        ...referenceAppDeploymentConfigForProfile(REFERENCE_PROFILE_LOCAL_DEV_ID),
+        auth: AUTH_AUTHENTIK_PROVIDER_ID,
+      },
     });
 
     expect(capsule).toEqual({
@@ -61,7 +74,7 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
       connector: CONNECTOR_CDP_PROVIDER_ID,
       workspace: WORKSPACE_PROFILE_PROVIDER_ID,
       entrypoint: ENTRYPOINT_NOVNC_PROVIDER_ID,
-      detector: DETECTOR_URL_PROVIDER_ID,
+      detector: DETECTOR_USER_DONE_PROVIDER_ID,
     });
     expect(capsule).not.toHaveProperty("auth");
     expect(capsule).not.toHaveProperty("channel");
@@ -69,10 +82,13 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
   });
 
   it("preserves deployment defaults, provider config, and SecretStore when capsule providers are overridden", () => {
+    const splitDefaults = referenceSplitOptions();
     const opts = {
-      providerSet: referenceProviderSet,
-      providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
-      capsuleProviders: { detector: DETECTOR_URL_PROVIDER_ID },
+      ...splitDefaults,
+      capsuleProviders: {
+        ...splitDefaults.capsuleProviders,
+        detector: DETECTOR_URL_PROVIDER_ID,
+      },
     };
 
     const deployment = resolveAppDeploymentConfig(opts);
@@ -91,8 +107,7 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
 
   it("resolves capsule provider defaults through the runtime template package", () => {
     const bridge = createBridge({
-      providerSet: referenceProviderSet,
-      providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      referencePresetId: REFERENCE_PROFILE_LOCAL_DEV_ID,
     });
 
     expect(bridge.templateShow("browser-handoff").parts).toEqual(
@@ -107,8 +122,7 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
 
   it("projects split app deployment and capsule overrides into graph metadata", async () => {
     const stack = createProvisioningBridge({
-      providerSet: referenceProviderSet,
-      providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      referencePresetId: REFERENCE_PROFILE_LOCAL_DEV_ID,
       appDeploymentConfig: { auth: AUTH_AUTHENTIK_PROVIDER_ID },
       capsuleProviders: { detector: DETECTOR_URL_PROVIDER_ID },
       dependencyBindings: referenceWpmDependencyBindings(),
@@ -127,7 +141,7 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
             defaultSource: expect.objectContaining({
               source: "base-profile-select",
               providerId: AUTH_AUTHENTIK_PROVIDER_ID,
-              profile: `${REFERENCE_PROFILE_LOCAL_DEV_ID}+runtime-override`,
+              profile: "resolved-runtime-selection",
             }),
           }),
           expect.objectContaining({
@@ -136,7 +150,7 @@ describe("AppDeploymentConfig and capsule provider selection", () => {
             defaultSource: expect.objectContaining({
               source: "base-profile-select",
               providerId: DETECTOR_URL_PROVIDER_ID,
-              profile: `${REFERENCE_PROFILE_LOCAL_DEV_ID}+runtime-override`,
+              profile: "resolved-runtime-selection",
             }),
           }),
         ]),

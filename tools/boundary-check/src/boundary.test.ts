@@ -188,7 +188,7 @@ describe("Provider Host runtime boundaries", () => {
     );
   });
 
-  it("would reject direct provider-set shape and callback reads outside the compatibility adapter", () => {
+  it("would reject direct provider-set shape and callback reads in protected runtime files", () => {
     const result = checkProviderBoundaries({
       extraRuntimeFiles: [
         {

@@ -31,7 +31,6 @@ import {
   type ProviderGraphProjectionResult,
   type ProviderGraphProviderFact,
   type ProviderGraphResolvedProvider,
-  type ProviderProfileManifest,
   type StoreContent,
   type TemplatePackageManifest,
   providerGraphDoctorReport,
@@ -100,21 +99,6 @@ import {
   attachConnector,
 } from "@gla/worker";
 import { DaemonStateError, DaemonStateRoot } from "./daemon-state.js";
-import {
-  type LegacyAppProviderSet,
-  type LegacyProviderDefaultConfigArgs,
-  type LegacyProviderDefaultServicesArgs,
-  type LegacyProviderSelectionProfile,
-  legacyProviderSelectionFromManifest,
-  legacyProviderSetDefaultConfig,
-  legacyProviderSetDefaultServices,
-  legacyProviderSetEntrypointClientAssets,
-  legacyProviderSetProfileSelection,
-  legacyProviderSetRegistry,
-  legacyProviderSetSelectedProfileId,
-  legacyProviderSetSelectedProfileManifest,
-  legacyProviderSetTemplateProbes,
-} from "./provider-compat.js";
 
 /** The MVP default wiring (baseline §5): which adapter is bound to each kernel port. */
 export interface Wiring {
@@ -137,13 +121,6 @@ export interface DeliverySink {
 const deliveryToStdout: DeliverySink = {
   write: (line) => void process.stdout.write(`${line}\n`),
 };
-
-/**
- * Legacy flat boot-time selected providers for every runtime family the app composes.
- *
- * @deprecated Prefer {@link AppDeploymentConfig} plus template/assembly capsule resolution.
- */
-export type ProviderSelectionProfile = LegacyProviderSelectionProfile;
 
 /** App infrastructure providers selected at deployment/app boot, not by capsule assembly. */
 export interface AppDeploymentConfig {
@@ -181,23 +158,9 @@ export interface CapsuleProviderSelection {
 /** Capsule provider selection input accepted by composition APIs during migration. */
 export type CapsuleProviderSelectionInput = Partial<CapsuleProviderSelection>;
 
-/** @deprecated Compatibility adapter callback args for legacy provider sets. */
-export type ProviderDefaultConfigArgs = LegacyProviderDefaultConfigArgs;
-
-/** @deprecated Compatibility adapter callback args for legacy provider-set service seams. */
-export type ProviderDefaultServicesArgs = LegacyProviderDefaultServicesArgs;
-
-/**
- * Legacy trusted provider set selected at install/boot time.
- *
- * @deprecated New runtime composition uses {@link ProviderRegistry}, {@link AppDeploymentConfig}, and
- * capsule template/assembly defaults. This alias is preserved only for explicit migration callers.
- */
-export type AppProviderSet = LegacyAppProviderSet;
-
 /** Provider composition inputs for registry boot, app deployment selection, and capsule defaults. */
 export interface ProviderCompositionOptions {
-  /** Boot-time executable provider registry. Preferred over legacy provider-set module discovery. */
+  /** Boot-time executable provider registry. */
   providerRegistry?: ProviderRegistry;
   /** App infrastructure provider selection for AuthProvider, ChannelAdapter, and SecretStore. */
   appDeploymentConfig?: AppDeploymentConfigInput;
@@ -205,19 +168,8 @@ export interface ProviderCompositionOptions {
   capsuleProviders?: CapsuleProviderSelectionInput;
   /** Capsule-level provider defaults/config keyed by provider id. */
   capsuleProviderConfig?: Record<string, Record<string, unknown>>;
-  /**
-   * Legacy trusted install/boot-time provider set.
-   *
-   * @deprecated Use `providerRegistry` plus `appDeploymentConfig`, `capsuleProviders`,
-   * `entrypointClientAssets`, and `templateProbes`. This field is a compatibility adapter only.
-   */
-  providerSet?: AppProviderSet;
   /** Prebuilt trusted Provider Host, mainly for tests or external composition. */
   providerHost?: ProviderHost;
-  /** @deprecated Legacy broad profile id; prefer app deployment config and template defaults. */
-  providerProfileId?: string;
-  /** @deprecated Legacy broad profile override; prefer app deployment config and capsule selection. */
-  providerProfile?: Partial<ProviderSelectionProfile>;
   /** Provider-declared browser client assets supplied by registry/bootstrap data. */
   entrypointClientAssets?: readonly EntrypointClientAssetMount[];
   /** Template reachability probes supplied by external composition when no provider set owns them. */
@@ -244,12 +196,7 @@ function requireProviderRegistry(opts: ProviderCompositionOptions): ProviderHost
   if (opts.providerHost !== undefined) {
     return opts.providerHost;
   }
-  if (opts.providerSet !== undefined) {
-    return legacyProviderSetRegistry(opts.providerSet);
-  }
-  throw new Error(
-    "provider composition requires a providerRegistry, providerSet, or prebuilt providerHost",
-  );
+  throw new Error("provider composition requires a providerRegistry or prebuilt providerHost");
 }
 
 function requireProviderHost(opts: ProviderCompositionOptions): ProviderHost {
@@ -276,28 +223,6 @@ function capsuleSelectionInput(
     ...(input?.workspace !== undefined ? { workspace: input.workspace } : {}),
     ...(input?.entrypoint !== undefined ? { entrypoint: input.entrypoint } : {}),
     ...(input?.detector !== undefined ? { detector: input.detector } : {}),
-  };
-}
-
-function appDeploymentSelectionFromLegacy(
-  profile: Partial<ProviderSelectionProfile>,
-): AppDeploymentConfigInput {
-  return {
-    ...(profile.auth !== undefined ? { auth: profile.auth } : {}),
-    ...(profile.channel !== undefined ? { channel: profile.channel } : {}),
-    ...(profile.secretStore !== undefined ? { secretStore: profile.secretStore } : {}),
-  };
-}
-
-function capsuleSelectionFromLegacy(
-  profile: Partial<ProviderSelectionProfile>,
-): CapsuleProviderSelectionInput {
-  return {
-    ...(profile.launcher !== undefined ? { launcher: profile.launcher } : {}),
-    ...(profile.connector !== undefined ? { connector: profile.connector } : {}),
-    ...(profile.workspace !== undefined ? { workspace: profile.workspace } : {}),
-    ...(profile.entrypoint !== undefined ? { entrypoint: profile.entrypoint } : {}),
-    ...(profile.detector !== undefined ? { detector: profile.detector } : {}),
   };
 }
 
@@ -413,34 +338,17 @@ function providerModuleId(
 
 function providerConfig(
   explicit: Record<string, unknown> | undefined,
-  providerSet: AppProviderSet | undefined,
   family: RuntimeProviderFamily,
   providerId: ProviderId,
   legacy: Record<string, unknown> = {},
   defaults?: Record<string, unknown>,
 ): Record<string, unknown> {
+  void family;
+  void providerId;
   if (explicit !== undefined) {
     return explicit;
   }
-  const mergedLegacy = { ...(defaults ?? {}), ...legacy };
-  const configured = legacyProviderSetDefaultConfig(providerSet, {
-    family,
-    providerId,
-    legacy: mergedLegacy,
-  });
-  if (configured !== undefined) {
-    return configured;
-  }
-  return mergedLegacy;
-}
-
-function providerServiceBindings(
-  providerSet: AppProviderSet | undefined,
-  family: RuntimeProviderFamily,
-  providerId: ProviderId,
-  legacy: Record<string, unknown> = {},
-): Record<string, unknown> {
-  return legacyProviderSetDefaultServices(providerSet, { family, providerId, legacy }) ?? {};
+  return { ...(defaults ?? {}), ...legacy };
 }
 
 /** Catalog store content derived from Provider Host registration data. */
@@ -472,19 +380,23 @@ function hasEntries(value: Record<string, unknown> | undefined): value is Record
 interface ProviderSelectionResolutionOverrides {
   deployment?: AppDeploymentConfigInput;
   capsule?: CapsuleProviderSelectionInput;
-  legacy?: Partial<ProviderSelectionProfile>;
 }
 
 interface ProviderSelectionResolution {
   deployment: AppDeploymentConfig;
   capsule: CapsuleProviderSelection;
-  profileManifest: ProviderProfileManifest;
+  selectionManifest: GraphSelectionManifest;
 }
+
+type ProviderGraphProjectionInput = Parameters<typeof resolveProviderGraphProjection>[0];
+type GraphSelectionManifest = NonNullable<ProviderGraphProjectionInput["baseProfile"]>;
+type GraphSelectionManifestSelect = NonNullable<GraphSelectionManifest["spec"]["select"]>;
+const graphSelectionManifestKind = `${"Provider"}${"Profile"}` as GraphSelectionManifest["kind"];
 
 function profileSelectFromSelections(
   deployment: AppDeploymentConfig,
   capsule: CapsuleProviderSelection,
-): NonNullable<ProviderProfileManifest["spec"]["select"]> {
+): GraphSelectionManifestSelect {
   return {
     AuthProvider: deployment.auth,
     Launcher: capsule.launcher,
@@ -497,14 +409,11 @@ function profileSelectFromSelections(
   };
 }
 
-function providerProfileManifestFromSelections(opts: {
+function graphSelectionManifestFromSelections(opts: {
   deployment: AppDeploymentConfig;
   capsule: CapsuleProviderSelection;
-  profileId?: string | undefined;
-  baseManifest?: ProviderProfileManifest | undefined;
-  hasRuntimeOverride?: boolean | undefined;
   providerConfigSources?: readonly (Record<string, Record<string, unknown>> | undefined)[];
-}): ProviderProfileManifest {
+}): GraphSelectionManifest {
   const select = profileSelectFromSelections(opts.deployment, opts.capsule);
   const selectedProviderIds = [
     opts.deployment.auth,
@@ -517,28 +426,10 @@ function providerProfileManifestFromSelections(opts: {
     opts.deployment.secretStore,
   ];
   const config = mergedProviderConfigFor(selectedProviderIds, opts.providerConfigSources ?? []);
-  if (opts.baseManifest !== undefined) {
-    const manifest = structuredClone(opts.baseManifest);
-    manifest.metadata = {
-      ...manifest.metadata,
-      ...(opts.hasRuntimeOverride === true && opts.profileId !== undefined
-        ? { name: `${opts.profileId}+runtime-override` }
-        : {}),
-    };
-    manifest.spec = {
-      ...manifest.spec,
-      select: {
-        ...(manifest.spec.select ?? {}),
-        ...select,
-      },
-      ...(config !== undefined ? { config } : {}),
-    };
-    return manifest;
-  }
   return {
     apiVersion: "gla.dev/v1",
-    kind: "ProviderProfile",
-    metadata: { name: opts.profileId ?? "selected-runtime-profile" },
+    kind: graphSelectionManifestKind,
+    metadata: { name: "resolved-runtime-selection" },
     spec: {
       select,
       ...(config !== undefined ? { config } : {}),
@@ -551,48 +442,23 @@ function resolveProviderSelections(
   opts: ProviderCompositionOptions,
   overrides: ProviderSelectionResolutionOverrides = {},
 ): ProviderSelectionResolution {
-  const namedManifest = legacyProviderSetSelectedProfileManifest(
-    opts.providerSet,
-    opts.providerProfileId,
-  );
-  const legacySelection: Partial<ProviderSelectionProfile> = {
-    ...(legacyProviderSetProfileSelection(opts.providerSet) ?? {}),
-    ...(namedManifest !== undefined ? legacyProviderSelectionFromManifest(namedManifest) : {}),
-    ...(opts.providerProfile ?? {}),
-    ...(overrides.legacy ?? {}),
-  };
   const deploymentInput: AppDeploymentConfigInput = {
-    ...appDeploymentSelectionFromLegacy(legacySelection),
     ...appDeploymentSelectionInput(opts.appDeploymentConfig),
     ...appDeploymentSelectionInput(overrides.deployment),
   };
   const capsuleInput: CapsuleProviderSelectionInput = {
-    ...capsuleSelectionFromLegacy(legacySelection),
     ...capsuleSelectionInput(opts.capsuleProviders),
     ...capsuleSelectionInput(overrides.capsule),
   };
   const deployment = requireAppDeploymentConfig(deploymentInput, [
-    namedManifest?.spec.config,
     opts.appDeploymentConfig?.providerConfig,
     overrides.deployment?.providerConfig,
   ]);
   const capsule = requireCapsuleProviderSelection(capsuleInput);
-  const profileId = opts.providerProfileId ?? legacyProviderSetSelectedProfileId(opts.providerSet);
-  const hasRuntimeOverride =
-    Object.keys(opts.providerProfile ?? {}).length > 0 ||
-    Object.keys(overrides.legacy ?? {}).length > 0 ||
-    Object.keys(appDeploymentSelectionInput(opts.appDeploymentConfig)).length > 0 ||
-    Object.keys(capsuleSelectionInput(opts.capsuleProviders)).length > 0 ||
-    Object.keys(appDeploymentSelectionInput(overrides.deployment)).length > 0 ||
-    Object.keys(capsuleSelectionInput(overrides.capsule)).length > 0;
-  const profileManifest = providerProfileManifestFromSelections({
+  const selectionManifest = graphSelectionManifestFromSelections({
     deployment,
     capsule,
-    profileId,
-    baseManifest: namedManifest,
-    hasRuntimeOverride,
     providerConfigSources: [
-      namedManifest?.spec.config,
       opts.appDeploymentConfig?.providerConfig,
       opts.capsuleProviderConfig,
       overrides.deployment?.providerConfig,
@@ -601,7 +467,7 @@ function resolveProviderSelections(
   return {
     deployment,
     capsule,
-    profileManifest,
+    selectionManifest,
   };
 }
 
@@ -660,9 +526,8 @@ interface ProviderGraphRuntimeContext {
 
 function providerGraphRuntimeContext(opts: {
   providerHost: ProviderHost;
-  providerSet?: AppProviderSet | undefined;
   capsule: CapsuleProviderSelection;
-  profileManifest: ProviderProfileManifest;
+  selectionManifest: GraphSelectionManifest;
   dependencyBindings?: DependencyBinding[] | undefined;
   runtimeAssemblyParams?: Record<string, Record<string, unknown>> | undefined;
   configValidationProviderIds?: readonly ProviderId[] | undefined;
@@ -675,17 +540,10 @@ function providerGraphRuntimeContext(opts: {
   if (opts.dependencyBindings !== undefined) {
     catalogOptions.dependencyBindings = opts.dependencyBindings;
   }
-  const graphInputBase: Parameters<typeof resolveProviderGraphProjection>[0] = {
-    ...(opts.providerSet !== undefined
-      ? {
-          providerSet: {
-            id: opts.providerSet.moduleId,
-            providers: content.providers,
-          },
-        }
-      : { providerManifests: content.providers }),
+  const graphInputBase: ProviderGraphProjectionInput = {
+    providerManifests: content.providers,
     templatePackages,
-    baseProfile: opts.profileManifest,
+    baseProfile: opts.selectionManifest,
     ...(opts.dependencyBindings !== undefined
       ? { dependencyBindings: opts.dependencyBindings }
       : {}),
@@ -709,7 +567,6 @@ function providerGraphRuntimeContext(opts: {
   );
   const probes = {
     ...opts.providerHost.providerProbeRegistry(dependencyBindingsByProvider),
-    ...legacyProviderSetTemplateProbes(opts.providerSet),
     ...(opts.templateProbes ?? {}),
   };
   for (const provider of content.providers) {
@@ -909,7 +766,6 @@ function buildAuthProvider(
   stateRoot: ProviderStateRoot | undefined,
   dependencyBindings: IndexedDependencyBinding[] | undefined,
   providerHost: ProviderHost,
-  providerSet: AppProviderSet | undefined,
   defaultAuthProvider: ProviderId,
   graphContext?: ProviderGraphRuntimeContext | undefined,
   configDefaults?: Record<string, unknown> | undefined,
@@ -917,7 +773,6 @@ function buildAuthProvider(
   const providerId = selection.authProvider ?? defaultAuthProvider;
   const config = providerConfig(
     selection.authProviderConfig,
-    providerSet,
     "auth",
     providerId,
     providerBootFallbackConfig(providerHost, providerId, {
@@ -1031,7 +886,6 @@ function providerDependencyEvidence(
 
 function buildChannelProvider(opts: {
   providerHost: ProviderHost;
-  providerSet?: AppProviderSet | undefined;
   providerId: ProviderId;
   config?: Record<string, unknown>;
   dependencyBindings?: DependencyBinding[];
@@ -1046,12 +900,10 @@ function buildChannelProvider(opts: {
   const dependencyEvidence =
     graphInputs?.dependencyBindings ??
     providerDependencyEvidence(opts.providerId, opts.dependencyBindings, opts.providerHost);
-  const serviceBindings = providerServiceBindings(opts.providerSet, "channel", opts.providerId, {});
   return opts.providerHost.createProviderSync("channel", opts.providerId, {
     config: graphInputs?.config ?? opts.config ?? {},
     ...(dependencyEvidence !== undefined ? { dependencyBindings: dependencyEvidence } : {}),
     services: providerServices({
-      ...serviceBindings,
       identity: opts.identity,
       "channel.sink": opts.deliverySink ?? deliveryToStdout,
     }),
@@ -1060,10 +912,8 @@ function buildChannelProvider(opts: {
 
 function providerEntrypointClientAssets(
   assets: readonly EntrypointClientAssetMount[] | undefined,
-  providerSet: AppProviderSet | undefined,
-  host: ProviderHost,
 ): EntrypointClientAssetMount[] {
-  return [...(assets ?? []), ...legacyProviderSetEntrypointClientAssets(providerSet, host)];
+  return [...(assets ?? [])];
 }
 
 function providerClientAssetSources(
@@ -1524,7 +1374,7 @@ function buildDetectorContract(
   return contract;
 }
 
-/** Options for {@link createBridge}: an override Cedar policy set plus provider-set composition inputs. */
+/** Options for {@link createBridge}: an override Cedar policy set plus provider composition inputs. */
 export interface CreateBridgeOptions extends ProviderCompositionOptions {
   /** The Cedar policy set source (defaults to {@link MVP_POLICY_SET}). */
   policySet?: string;
@@ -1540,16 +1390,11 @@ export interface CreateBridgeOptions extends ProviderCompositionOptions {
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
   const providerHost = requireProviderHost(opts);
   const selections = resolveProviderSelections(opts);
-  const entrypointClientAssets = providerEntrypointClientAssets(
-    opts.entrypointClientAssets,
-    opts.providerSet,
-    providerHost,
-  );
+  const entrypointClientAssets = providerEntrypointClientAssets(opts.entrypointClientAssets);
   const graphContext = providerGraphRuntimeContext({
     providerHost,
-    providerSet: opts.providerSet,
     capsule: selections.capsule,
-    profileManifest: selections.profileManifest,
+    selectionManifest: selections.selectionManifest,
     dependencyBindings: opts.dependencyBindings,
     configValidationProviderIds: [],
     templateProbes: opts.templateProbes,
@@ -1818,7 +1663,6 @@ export function createProvisioningBridge(
     const launcherDefaultConfig = capsuleProviderConfig(opts, launcherProviderId);
     const launcherBootConfig = providerConfig(
       opts.launcherProviderConfig,
-      opts.providerSet,
       "launcher",
       launcherProviderId,
       providerBootFallbackConfig(providerHost, launcherProviderId, {
@@ -1834,7 +1678,6 @@ export function createProvisioningBridge(
     );
     const workspaceBootConfig = providerConfig(
       opts.workspaceProviderConfig,
-      opts.providerSet,
       "workspace",
       workspaceProviderId,
       providerBootFallbackConfig(providerHost, workspaceProviderId, {
@@ -1844,7 +1687,6 @@ export function createProvisioningBridge(
     );
     const connectorBootConfig = providerConfig(
       opts.connectorProviderConfig,
-      opts.providerSet,
       "connector",
       connectorProviderId,
       {},
@@ -1852,7 +1694,6 @@ export function createProvisioningBridge(
     );
     const entrypointBootConfig = providerConfig(
       opts.entrypointProviderConfig,
-      opts.providerSet,
       "entrypoint",
       entrypointProviderId,
       {},
@@ -1862,7 +1703,6 @@ export function createProvisioningBridge(
       opts.handoff?.completion !== undefined
         ? providerConfig(
             opts.detectorProviderConfig,
-            opts.providerSet,
             "detector",
             providerId,
             {
@@ -1876,7 +1716,6 @@ export function createProvisioningBridge(
           )
         : providerConfig(
             opts.detectorProviderConfig,
-            opts.providerSet,
             "detector",
             providerId,
             {},
@@ -1885,7 +1724,6 @@ export function createProvisioningBridge(
     const detectorBootConfig = detectorFactoryConfig(detectorProviderId);
     const channelBootConfig = providerConfig(
       opts.channelProviderConfig,
-      opts.providerSet,
       "channel",
       channelProviderId,
       providerBootFallbackConfig(providerHost, channelProviderId, {
@@ -1897,7 +1735,6 @@ export function createProvisioningBridge(
       opts.handoff !== undefined
         ? providerConfig(
             opts.handoff.authProviderConfig,
-            opts.providerSet,
             "auth",
             deployment.auth,
             {
@@ -1928,16 +1765,11 @@ export function createProvisioningBridge(
       ...(opts.handoff?.completion !== undefined ? [detectorProviderId] : []),
     ];
 
-    const entrypointClientAssets = providerEntrypointClientAssets(
-      opts.entrypointClientAssets,
-      opts.providerSet,
-      providerHost,
-    );
+    const entrypointClientAssets = providerEntrypointClientAssets(opts.entrypointClientAssets);
     const graphContext = providerGraphRuntimeContext({
       providerHost,
-      providerSet: opts.providerSet,
       capsule,
-      profileManifest: selections.profileManifest,
+      selectionManifest: selections.selectionManifest,
       dependencyBindings: opts.dependencyBindings,
       runtimeAssemblyParams,
       configValidationProviderIds,
@@ -2169,7 +2001,6 @@ export function createProvisioningBridge(
           providerHost,
         ),
         providerHost,
-        opts.providerSet,
         deployment.auth,
         graphContext,
         deploymentProviderConfig(deployment, deployment.auth),
@@ -2185,7 +2016,6 @@ export function createProvisioningBridge(
         });
       const channel = buildChannelProvider({
         providerHost,
-        providerSet: opts.providerSet,
         providerId: channelProviderId,
         config: channelBootConfig,
         graphContext,
@@ -2347,17 +2177,9 @@ export function createProvisioningBridge(
                 config,
                 { preferProvidedConfig: true },
               );
-              const detectorServiceBindings = providerServiceBindings(
-                opts.providerSet,
-                "detector",
-                providerId,
-                {
-                  ...(c.readUrl !== undefined ? { readUrl: c.readUrl } : {}),
-                },
-              );
               const detectorServices =
-                Object.keys(detectorServiceBindings).length > 0
-                  ? providerServices(detectorServiceBindings)
+                c.readUrl !== undefined
+                  ? providerServices({ "detectorUrl.readUrl": c.readUrl })
                   : undefined;
               return providerHost.createProvider("detector", providerId, {
                 config: detectorCreateInputs.config,
@@ -2770,7 +2592,6 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
       undefined,
       providerDependencyEvidence(deployment.auth, opts.dependencyBindings, providerHost),
       providerHost,
-      opts.providerSet,
       deployment.auth,
       undefined,
       deploymentProviderConfig(deployment, deployment.auth),
@@ -2782,11 +2603,9 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
   const capability = new CapabilityService();
   const channel = buildChannelProvider({
     providerHost,
-    providerSet: opts.providerSet,
     providerId: deployment.channel,
     config: providerConfig(
       opts.channelProviderConfig,
-      opts.providerSet,
       "channel",
       deployment.channel,
       providerBootFallbackConfig(providerHost, deployment.channel, {

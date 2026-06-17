@@ -138,8 +138,6 @@ Current deferred surfaces and diagnostics:
 | Surface | Current behavior | Future direction |
 |---|---|---|
 | `policy mounts` | `usage.unsupported` | policy inspection for host-mount planning |
-| profile install/update commands | `usage.unsupported` | `profile list/show/validate` and overlay validation |
-| provider-set install/update commands | `usage.unsupported` | `provider-set inspect/plan/apply/rollback` |
 | `events [--follow]` | `usage.unsupported` | NDJSON state-change and handoff lifecycle stream |
 | `audit list` | `usage.unsupported` | redacted audit browsing and trace correlation |
 | `auth login/logout` | `usage.unsupported`; local profile remains credential-free | authenticated-agent profiles |

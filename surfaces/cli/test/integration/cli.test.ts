@@ -756,8 +756,6 @@ describe("gla current contract/schema/help (GLA-094)", () => {
       ["events"],
       ["audit", "list"],
       ["auth", "login"],
-      ["profile", "list"],
-      ["provider-set", "plan", "--profile", "scenario-01"],
       ["-o", "ndjson", "version"],
       ["--context", "prod", "version"],
       ["--trace-id", "trace-1", "version"],

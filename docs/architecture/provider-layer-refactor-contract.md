@@ -1,8 +1,8 @@
 # Provider Layer Refactor Contract
 
-> **Status:** GLA-110.01 implementation contract. This document makes the approved
-> `provider-layer-refactor-as-is-to-be.html` diagram executable for the remaining GLA-110 tasks. It reconciles the
-> current ProviderSet/Profile/Host implementation with the target model: one provider-layer entity per responsibility.
+> **Status:** Final GLA-110 provider-layer contract after GLA-110.14 legacy compatibility removal. This document makes
+> the approved `provider-layer-refactor-as-is-to-be.html` diagram executable and records the archived migration from
+> the former ProviderSet/Profile/Host implementation to the target model: one provider-layer entity per responsibility.
 
 ## 1. Target Contract
 
@@ -17,9 +17,9 @@ other code may rely on it.
 | `CapabilityCatalog` | Read-only capability projection. | Projects registry data, templates, app deployment config, WPM/install evidence, probes, compatibility facts, default sources, package provenance, and diagnostics into the catalog views used by Bridge, doctor, and Admission. | It does not run factories, write installed inventory, or make admission decisions. Status is derived, never authored. |
 | `Admission Resolver` | Proposal-to-plan resolution. | Resolves an assembly proposal against catalog capabilities and returns a validated `ResolvedCapsulePlan` with selected capsule provider ids, provider config, compatibility decisions, evidence requirements, and stable diagnostics. | It does not create providers, repeat app boot selection, or mutate the registry/catalog. |
 
-The app composition root wires these entities together. It can keep thin compatibility adapters while GLA-110 is in
-flight, but the target architecture must be understandable without `AppProviderSet`, broad profiles, or `ProviderHost`
-as public nouns.
+The app composition root wires these entities together. Runtime composition has no supported provider-set/profile
+compatibility adapter: old ProviderSet/Profile nouns appear only below as archived migration history or as names of
+historical packages/files, not as supported app inputs.
 
 ## 2. Eliminated Or Narrowed Entities
 
@@ -27,30 +27,30 @@ as public nouns.
 |---|---|---|
 | `AppProviderSet` as central runtime input | **Eliminate as an architecture entity.** A distribution package may still provide boot helpers during migration, but runtime composition must not discover providers, defaults, services, assets, and probes through one broad object. | Provider package registration functions, `AppDeploymentConfig`, template packages, and catalog projection inputs. |
 | `ProviderSelectionProfile` | **Split.** The current flat all-family selection shape mixes app infrastructure and capsule composition. | `AppDeploymentConfig` for `AuthProvider` / `ChannelAdapter` / `SecretStore`; `CapsuleTemplate` defaults plus `AssemblySpec` overrides for capsule families. |
-| `ProviderProfileManifest` / broad profile overlays | **Narrow and migrate.** Broad all-family manifests stop being the primary runtime selection format. | `AppDeploymentConfigManifest` for app boot selections, template package defaults for capsule selections, and compatibility-only migration readers while old manifests are accepted. |
-| `templateWithProviderProfile()` | **Delete after migration.** It mutates `browser-handoff` from a broad profile. | Template package descriptors where `CapsuleTemplate` owns fixed/default/open capsule parts directly. |
-| Provider-set callbacks: `defaultConfig`, `defaultServices`, `entrypointClientAssets`, `templateProbes` | **Move or isolate.** They are not target runtime composition seams. | Provider factory config from registry/deployment/template config, app/test service resolver seams, provider asset descriptors in registry/catalog, and provider/template probes. |
+| `ProviderProfileManifest` / broad profile overlays | **Eliminate from supported app/runtime selection.** Broad all-family manifests are not accepted as the runtime selection model. | `AppDeploymentConfig` for app boot selections, template package defaults for capsule selections, and catalog-internal projection inputs where still needed. |
+| `templateWithProviderProfile()` | **Delete.** It mutates `browser-handoff` from a broad profile. | Template package descriptors where `CapsuleTemplate` owns fixed/default/open capsule parts directly. |
+| Provider-set callbacks: `defaultConfig`, `defaultServices`, `entrypointClientAssets`, `templateProbes` | **Delete from runtime composition seams.** They are not target runtime composition seams. | Provider factory config from registry/deployment/template config, app/test service resolver seams, provider asset descriptors in registry/catalog, and provider/template probes. |
 | `ProviderHost` as a public architecture noun | **Narrow to an internal factory runner or replace with `ProviderRegistry`.** Existing factory mechanics may be reused internally, but callers should depend on registry/deployment/plan concepts. | `ProviderRegistry` as the executable provider boundary; typed factory creation through resolved deployment config or resolved capsule plan. |
 | `ProviderRuntime` / similar generic runtime nouns | **Avoid unless they name a real interface.** They obscure whether the responsibility is registration, selection, projection, admission, or factory execution. | The five target entities above. |
 
 ProviderHost as a public architecture noun is therefore retired even if existing implementation mechanics survive behind
-the registry during migration.
+the registry internally.
 
-## 2.1. Compatibility Boundary
+## 2.1. Archived Migration Boundary
 
-`packages/app/src/provider-compat.ts` is the only app-owned compatibility adapter for legacy provider-set/profile
-runtime inputs during GLA-110 migration.
+GLA-110.14 closes the temporary compatibility boundary. `packages/app/src/provider-compat.ts` is deleted, app runtime
+APIs no longer accept legacy provider-set/profile runtime inputs, and provider-set callback seams are not supported
+composition inputs. The table below is retained as archived migration evidence only.
 
-| Legacy surface | Compatibility owner | Allowed callers | Removal condition |
-|---|---|---|---|
-| `AppProviderSet.modules` | `packages/app/src/provider-compat.ts` | App composition may call `legacyProviderSetRegistry()` only to turn an explicitly supplied legacy set into a sealed `ProviderRegistry`. | Removed after distribution entrypoints, tests, and install/update UX no longer accept `providerSet`. |
-| `ProviderSelectionProfile` and broad `ProviderProfileManifest` conversion | `packages/app/src/provider-compat.ts` plus catalog validation for manifest parsing | App composition may consume the converted shape only to preserve old `providerProfileId` / `providerProfile` inputs. | Removed after app deployment config manifests and template packages replace broad profile inputs in CLI/API docs. |
-| `defaultConfig` / `defaultServices` callbacks | `packages/app/src/provider-compat.ts` | Runtime composition may invoke these only through `legacyProviderSetDefaultConfig()` and `legacyProviderSetDefaultServices()`. | Removed after provider factory config and test service seams are explicit non-provider inputs. |
-| `entrypointClientAssets` / `templateProbes` callbacks | `packages/app/src/provider-compat.ts` | Runtime composition may merge these only through `legacyProviderSetEntrypointClientAssets()` and `legacyProviderSetTemplateProbes()`. | Removed after registry/catalog asset descriptors and explicit probe maps cover all reference and extension packages. |
+| Legacy surface | Final state | Evidence |
+|---|---|---|
+| `AppProviderSet.modules` | No allowed runtime owner or caller. Distribution entrypoints register provider modules into a sealed `ProviderRegistry`. | `packages/app/src/provider-compat.ts` is absent; boundary checks reject `AppProviderSet` and direct `providerSet.modules` reads in protected runtime packages. |
+| `ProviderSelectionProfile` and broad `ProviderProfileManifest` conversion | No supported app/runtime input. Reference defaults are expanded through `referencePresetId` wrappers or explicit `AppDeploymentConfig` plus capsule selections. | CLI help and public app exports omit `--provider-profile`, `providerProfileId`, `providerProfile`, and broad profile aliases. |
+| `defaultConfig` / `defaultServices` callbacks | No runtime callback seam. Config is explicit by provider id in deployment config, capsule config, template defaults, and provider schemas; non-provider services are explicit test/app seams. | Runtime source and boundary tests reject provider-set callback reads. |
+| `entrypointClientAssets` / `templateProbes` callbacks | No provider-set callback seam. Assets and probes are explicit registry/catalog inputs with provenance and mutability diagnostics. | Gateway/catalog tests cover packaged, evidence-backed, local override, missing, mutable, and unverifiable asset sources. |
 
-Boundary tests must fail if `packages/app/src/composition.ts` or default distribution code reads those legacy members
-directly again. `packages/app/src/index.ts` may continue to export `referenceProviderSet` only as a deprecated migration
-object; the default reference app path must use `ProviderRegistry`, app deployment defaults, capsule defaults, explicit
+Boundary tests must fail if app runtime source reads those legacy members or reintroduces the removed compatibility
+adapter. The default reference app path uses `ProviderRegistry`, app deployment defaults, capsule defaults, explicit
 entrypoint assets, and explicit template probes.
 
 ## 3. Provider Family Assignment
@@ -72,18 +72,18 @@ Every provider family belongs to exactly one selection surface.
 
 | Surface | Current responsibility drift | Required GLA-110 migration / verification |
 |---|---|---|
-| `packages/app/src/composition.ts` | `ProviderSelectionProfile`, `AppProviderSet`, `requireSelectedProfile()`, `templateWithProviderProfile()`, graph context construction, and `createProvisioningBridge()` mix registration, app selection, capsule selection, catalog projection, and factory execution. | Introduce separate deployment and capsule-plan inputs; preserve named reference defaults; make boot create app infrastructure from deployment config; make provisioning consume a resolved capsule plan; remove or isolate broad profile/provider-set paths. |
-| `packages/app/src/index.ts` | Public app exports still expose `ProviderSelectionProfile`, `AppProviderSet`, `referenceProviderProfile`, and `referenceProviderSet` as caller-facing provider-layer concepts. | Replace public exports with registry/bootstrap helpers, `AppDeploymentConfig` defaults, template package defaults, and compatibility exports whose names and docs mark them as legacy. |
-| `packages/app/src/daemon.ts` | Daemon options still parse provider-profile and legacy auth-provider paths separately. | Resolve enrollment policy and delegated auth diagnostics from `AppDeploymentConfig`, including deployment-config-selected delegated providers without the old `--auth-provider` fallback. |
+| `packages/app/src/composition.ts` | Historical drift mixed registration, app selection, capsule selection, catalog projection, and factory execution through broad profile/provider-set paths. | Runtime composition accepts separate deployment and capsule-plan inputs; boot creates app infrastructure from deployment config; provisioning consumes a resolved capsule plan; broad profile/provider-set paths are removed. |
+| `packages/app/src/index.ts` | Historical public exports exposed broad provider-layer concepts as caller-facing inputs. | Public reference wrappers expand `referencePresetId` into registry/bootstrap helpers, `AppDeploymentConfig` defaults, template defaults, explicit assets, and explicit probes; legacy provider-set/profile exports are absent. |
+| `packages/app/src/daemon.ts` | Historical daemon options parsed provider-profile and auth-provider paths separately. | Enrollment policy and delegated auth diagnostics use the selected deployment `AuthProvider`; `--provider-profile` and profile env parsing are absent. |
 | `packages/catalog/src/index.ts` | Provider graph projection consumes `providerSet`, broad profiles, template packages, dependency bindings, probes, and admission projection in one path. | Rebuild projection from `ProviderRegistry`, template packages, `AppDeploymentConfig`, WPM evidence, and probes; fail closed on duplicates, unknown compatibility relation keys, ambiguous defaults, and missing/evidence-gated providers. |
-| `packages/catalog/src/provider-profile.ts` | `ProviderProfileManifest` models all provider families as one selection surface. | Split or narrow the manifest contract so app-infrastructure families and capsule families cannot be selected through one primary runtime shape. Keep migration readers explicit. |
+| `packages/catalog/src/provider-profile.ts` | Historical broad manifests model all provider families as one selection surface. | Broad manifests are not supported app/runtime inputs. Any remaining catalog-level reader is internal or archived history and must not be advertised as the runtime model. |
 | `packages/catalog/src/provider-authoring.ts` | Scaffold/validation can emit fields that do not affect graph resolution. | Generated provider/template packages must use consumed default-provider and compatibility fields; validation reports inert or unsupported fields. |
 | `packages/provider-host/src/index.ts` | `ProviderHost` is the executable factory registry and is named by app/runtime code. | Either become the implementation behind `ProviderRegistry` or be narrowed to an internal compatibility runner. Public callers use registry/deployment/plan concepts. |
-| `packages/provider-set-reference/src/index.ts` | Reference distribution mixes modules, broad profiles, template defaults, direct helper factories, service defaults, and asset resolution. | Export registry/bootstrap data, app deployment defaults, template package defaults, and migration helpers separately. Reference scenarios must keep externally observable defaults. |
+| `packages/provider-set-reference/src/index.ts` | Reference distribution historically mixed modules, broad profiles, template defaults, direct helper factories, service defaults, and asset resolution. | Export registry/bootstrap data, app deployment defaults, template package defaults, explicit probes, and client asset mounts separately. Reference scenarios keep externally observable defaults without broad runtime profile inputs. |
 | `packages/kernel/src/assembly.ts` and `packages/assembly/src/index.ts` | Assembly currently needs stable capsule-part selection without app infrastructure leakage, while proposal/template resolution can still inherit provider-profile-era defaults. | Ensure serialized session proposal shapes can carry only capsule provider choices and provider config for template-open parts. Template resolution uses template-owned defaults instead of app profile mutation. |
 | `surfaces/cli/src/cli.ts` and CLI/MCP surfaces | Runtime flags and docs can drift from implemented provider/profile commands. | Runtime consumption can list/inspect defaults and propose capsule overrides only through implemented CLI/API surfaces; authoring/install docs cannot name unavailable commands as executable. |
 | `packages/gateway/src/index.ts` and entrypoint assets | Gateway serves provider client assets while local overrides can look like packaged provider evidence. | Asset provenance and mutability are visible in catalog/doctor output; gateway distinguishes packaged, evidence-backed, local override, writable, missing, and unverifiable roots. |
-| `docs/` | Older docs still use ProviderSet/Profile/Host as target nouns in places. | Update target architecture language to the five-entity model; mark old nouns as compatibility/internal where retained; keep UX docs aligned with implemented commands/APIs. |
+| `docs/` | Older docs used ProviderSet/Profile/Host as target nouns in places. | Target architecture language uses the five-entity model; old nouns are archived migration history or historical package/file names only; UX docs align with implemented commands/APIs. |
 | Tests and quality gates | Existing tests can pass while broad profiles remain central. | Add boundary checks for retired central dependencies; add package-local and cross-layer tests for registry, deployment config, template/assembly defaults, catalog, admission, provisioning, CLI, gateway assets, and docs. |
 
 ## 5. Migration Guidance By Artifact
@@ -92,9 +92,9 @@ Existing provider-layer inputs migrate by responsibility, not by renaming old fi
 
 | Existing artifact or field | Target owner | Migration rule |
 |---|---|---|
-| Current reference profile ids such as `local-dev`, `single-operator`, `scenario-01`, and `hardened-idp` | `AppDeploymentConfig` plus `TemplatePackage` defaults | Split each named scenario into app deployment defaults for `AuthProvider`, `ChannelAdapter`, and `SecretStore`, and capsule template defaults for `Launcher`, `Workspace`, `HumanEntrypoint`, `AgentConnector`, and `CompletionDetector`. Keep the scenario name only as a compatibility/default preset label. |
-| `--provider-profile` / `providerProfileId` / `providerProfile` | Compatibility reader over app deployment and template defaults | Accept only as a migration input while emitting or resolving the split target shapes. Runtime session proposals must not use it to override deployment providers. |
-| Legacy `--auth-provider` and enrollment policy fallback | `AppDeploymentConfig` | Enrollment policy parsing and diagnostics use the deployment-selected `AuthProvider`; the legacy flag is an override compatibility path, not a second source of truth. |
+| Current reference profile ids such as `local-dev`, `single-operator`, `scenario-01`, and `hardened-idp` | `AppDeploymentConfig` plus `TemplatePackage` defaults | Split each named scenario into app deployment defaults for `AuthProvider`, `ChannelAdapter`, and `SecretStore`, and capsule template defaults for `Launcher`, `Workspace`, `HumanEntrypoint`, `AgentConnector`, and `CompletionDetector`. Reference app wrappers may keep the scenario name as a preset label that expands to target inputs. |
+| `--provider-profile` / `providerProfileId` / `providerProfile` | Removed runtime input | Use explicit `AppDeploymentConfig` plus capsule selections in generic APIs, or `referencePresetId` in the reference wrapper. The serve CLI no longer parses a provider-profile flag or env var. |
+| Explicit `--auth-provider` and enrollment policy parsing | `AppDeploymentConfig` | Enrollment policy parsing and diagnostics use the deployment-selected `AuthProvider`; an explicit auth provider flag is an app deployment override, not a broad profile fallback. |
 | `AppProviderSet.modules` | `ProviderRegistry` bootstrap | Distribution entrypoints register trusted provider modules into a sealed registry. Generic app composition receives a registry/host from outside and does not discover concrete modules through a broad set. |
 | `defaultConfig(providerId)` | `AppDeploymentConfig`, `CapsuleTemplate` defaults, and provider schemas | Provider-owned config is keyed by provider id in the owning selection surface and validated against that provider's schema before factory creation. |
 | `defaultServices()` | Explicit app/test service resolver seams | Non-provider services stay provider-neutral and explicit. They do not ride on a provider-set object. |
@@ -103,7 +103,7 @@ Existing provider-layer inputs migrate by responsibility, not by renaming old fi
 | Template defaults keyed by plain template id | `TemplatePackage.spec.defaults["template.<id>"]` | Template-package defaults use the consumed `template.<template-id>` key and provider-family names. Unprefixed or inert defaults fail authoring validation. |
 | Template compatibility using `openParts` or unsupported relation keys | `TemplatePackage.spec.compatibility.requiredParts` and provider `relations.compatibleWith` | Required compatibility is declared through consumed fields only. Unknown compatibility relation keys are diagnostics, not comments. |
 | Provider authoring scaffold fields | Provider authoring APIs and validation | Scaffolded provider/template JSON must emit fields consumed by graph resolution: provider manifests, `clientAssets`, dependency requirements, `template.<id>` defaults, `compatibility.requiredParts`, docs, skills, and tests. |
-| Install/update inventory `profileId` labels | Operator audit label only | The active inventory owns `appDeployment`, `capsuleDefaults`, package wrappers, dependency bindings, and client asset evidence. `profileId` is not the target runtime selection model. |
+| Install/update inventory preset labels | Operator audit label only | The active inventory owns `appDeployment`, `capsuleDefaults`, package wrappers, dependency bindings, and client asset evidence. A preset label is not the runtime selection model. |
 
 ## 6. Architecture Decision Note
 
@@ -118,14 +118,14 @@ deployment config for daemon infrastructure, templates/specs for capsule composi
 and admission for proposal-to-plan resolution.
 
 **Consequences.** `AppProviderSet`, broad `ProviderProfileManifest`, `ProviderSelectionProfile`, and `ProviderHost`
-remain only as compatibility/internal implementation terms during migration. New docs, diagrams, CLI UX, and
-authoring/install/runtime guidance must explain the five target entities first and link old terms to their removal or
-compatibility owner.
+remain only as archived migration history, historical package/file names, or internal implementation mechanics where
+explicitly named. New docs, diagrams, CLI UX, and authoring/install/runtime guidance explain the five target entities
+and do not advertise old runtime inputs.
 
 **References.** The approved visual design is
 `docs/architecture/provider-layer-refactor-as-is-to-be.html`; implementation ownership is tracked by `GLA-110.02`
-through `GLA-110.13` below. The final cross-layer verification contract is
-`docs/architecture/provider-layer-refactor-regression-matrix.md`.
+through `GLA-110.14` below. `GLA-110.13` owns the cross-layer verification contract in
+`docs/architecture/provider-layer-refactor-regression-matrix.md`, and `GLA-110.14` owns final legacy removal.
 
 ## 7. Task Ownership Map
 
@@ -143,10 +143,11 @@ through `GLA-110.13` below. The final cross-layer verification contract is
 | `GLA-110.11` | Provider client asset provenance and gateway/catalog diagnostics. |
 | `GLA-110.12` | Documentation, diagrams, migration guidance, and this decision-note alignment. |
 | `GLA-110.13` | Cross-layer regression matrix and clean-checkout-equivalent gate evidence. |
+| `GLA-110.14` | Final removal of provider-set/profile compatibility adapters, runtime inputs, CLI flags, docs, and allowlists. |
 
 ## 8. Difference From The Approved Diagram
 
 No functional difference is intended from `provider-layer-refactor-as-is-to-be.html`. The only implementation latitude is
-that existing `ProviderHost` mechanics may remain as an internal factory runner while callers migrate. If a later task
-keeps any old entity as more than a compatibility/internal seam, that task must record the deviation in its backlog notes
-and update this contract before closure.
+that existing `ProviderHost` mechanics may remain as an internal factory runner behind `ProviderRegistry`. If a later
+task reintroduces any old ProviderSet/Profile entity as more than archived history or an explicitly internal catalog
+implementation detail, that task must record the deviation in backlog notes and update this contract before closure.

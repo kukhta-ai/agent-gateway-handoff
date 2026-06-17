@@ -14,6 +14,7 @@ import {
   DETECTOR_USER_DONE_PROVIDER_ID,
   REFERENCE_PROFILE_HARDENED_IDP_ID,
   REFERENCE_PROFILE_LOCAL_DEV_ID,
+  referenceAppDeploymentConfigForProfile,
 } from "@gla/provider-set-reference";
 import { describe, expect, it } from "vitest";
 import {
@@ -26,7 +27,6 @@ import {
   type AuthProviderConfig,
   createEnrollmentStack,
   createProvisioningBridge,
-  referenceProviderSet,
 } from "../../src/index.js";
 
 const AUTHENTIK: AuthProviderConfig = {
@@ -206,9 +206,9 @@ describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unc
     expect(stack.authModule).toBe(AUTH_WEBAUTHN_MODULE);
   });
 
-  it("createProvisioningBridge() applies an explicit named reference provider profile at boot", async () => {
+  it("createProvisioningBridge() applies an explicit named reference preset at boot", async () => {
     const stack = createProvisioningBridge({
-      providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      referencePresetId: REFERENCE_PROFILE_LOCAL_DEV_ID,
       dependencyBindings: referenceWpmDependencyBindings(),
       launcherMode: "headless",
       handoff: { ...ENROLL_BASE },
@@ -216,7 +216,7 @@ describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unc
     try {
       expect(stack.providerGraphDoctor).toMatchObject({
         status: "PASS",
-        profileId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+        profileId: "resolved-runtime-selection",
         selectedProviders: expect.objectContaining({
           CompletionDetector: DETECTOR_USER_DONE_PROVIDER_ID,
         }),
@@ -393,9 +393,9 @@ describe("AC#6 · daemon parseServeArgs threads opaque provider ids and provider
     }
   });
 
-  it("parses enrollment policy JSON against a provider selected by provider profile", () => {
+  it("parses enrollment policy JSON against a provider selected by reference deployment config", () => {
     const parsed = parseServeArgs(
-      ["--provider-profile", REFERENCE_PROFILE_HARDENED_IDP_ID],
+      [],
       {
         GLA_AUTH_ENROLLMENT_POLICY_JSON: JSON.stringify({
           declared: true,
@@ -406,7 +406,11 @@ describe("AC#6 · daemon parseServeArgs threads opaque provider ids and provider
           optionalRecipientChoices: [],
         }),
       } as NodeJS.ProcessEnv,
-      { providerSet: referenceProviderSet },
+      {
+        appDeploymentConfig: referenceAppDeploymentConfigForProfile(
+          REFERENCE_PROFILE_HARDENED_IDP_ID,
+        ),
+      },
     );
     expect(parsed.help).toBe(false);
     if (!parsed.help) {
@@ -428,7 +432,6 @@ describe("AC#6 · daemon parseServeArgs threads opaque provider ids and provider
         }),
       } as NodeJS.ProcessEnv,
       {
-        providerSet: referenceProviderSet,
         appDeploymentConfig: { auth: "authentik" },
       },
     );

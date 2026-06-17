@@ -3,8 +3,8 @@
 > **Status:** historical migration addendum. `ProviderHost` remains an internal factory runner used by current
 > implementation mechanics, but GLA-110 replaces it as a public target architecture noun with `ProviderRegistry`,
 > `AppDeploymentConfig`, `CapsuleTemplate`/`AssemblySpec`, `CapabilityCatalog`, and `Admission Resolver`.
-> Provider set/profile wording below describes the pre-refactor migration path or compatibility boundary, not the
-> target model for new docs or APIs.
+> Provider set/profile wording below describes archived pre-refactor migration history, not the target model for new
+> docs or APIs.
 > **Scope:** record how the provider-extension model in `docs/02-provider-and-extension-model.md` first became
 > concrete in code: generic app composition consumed a trusted provider set/profile at boot, Provider Host owned
 > registered provider metadata and runtime creation, and the reference build was one explicit distribution

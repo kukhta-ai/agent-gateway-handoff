@@ -266,8 +266,8 @@ them.
 Resolution order:
 
 1. Register trusted provider modules into `ProviderRegistry`.
-2. Resolve `AppDeploymentConfig`, template-package defaults, and any operator-approved migration readers. Selection
-   changes happen only inside the operator install/update flow.
+2. Resolve `AppDeploymentConfig`, template-package defaults, and any operator-approved preset/default expansion.
+   Selection changes happen only inside the operator install/update flow.
 3. Reject cycles in compatibility/default inheritance, unknown family keys, unknown provider ids, family mismatches,
    duplicate provider ids, and multiple
    versions of the same provider id. Version ranges are not solved automatically in this phase; incompatible
@@ -525,7 +525,7 @@ The direction is implemented when:
 ## Related
 
 `docs/02-provider-and-extension-model.md` (uniform provider contract and registry model) ·
-`docs/architecture/provider-host-extension-architecture.md` (internal factory-runner history and provider-set compatibility boundary) ·
+`docs/architecture/provider-host-extension-architecture.md` (internal factory-runner and archived provider-set history) ·
 `docs/architecture/provider-author-workflow.md` (provider contribution rules) ·
 `docs/architecture/provider-authoring-ux.md` (provider-authoring UX flow) ·
 `docs/architecture/provider-install-update-ux.md` (operator install/update UX flow) ·

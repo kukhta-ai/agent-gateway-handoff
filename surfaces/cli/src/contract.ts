@@ -52,26 +52,6 @@ export const CURRENT_GLOBAL_FLAGS = [
 
 const DEFERRED_CLI_SURFACE_CONTRACTS: readonly DeferredCliSurfaceContract[] = [
   {
-    surface: "profile install/update commands",
-    reason:
-      "profile list/show/validate/overlay validation are UX-specified target commands, not part of the current executable CLI contract",
-    followUp: "future provider install/update CLI surface",
-    nouns: ["profile"],
-    matchesAnyVerb: true,
-    message:
-      "profile list/show/validate/overlay validation are planned UX command names, not current executable commands",
-  },
-  {
-    surface: "provider-set install/update commands",
-    reason:
-      "provider-set inspect/plan/apply/rollback are UX-specified target commands, not part of the current executable CLI contract",
-    followUp: "future provider install/update CLI surface",
-    nouns: ["provider-set"],
-    matchesAnyVerb: true,
-    message:
-      "provider-set inspect/plan/apply/rollback are planned UX command names, not current executable commands",
-  },
-  {
     surface: "policy mounts",
     reason: "policy inspection is planned but not part of the current executable agent CLI slice",
     followUp: "future CLI policy surface",

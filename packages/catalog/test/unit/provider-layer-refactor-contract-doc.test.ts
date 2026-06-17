@@ -145,7 +145,7 @@ describe("provider layer refactor contract documentation", () => {
     for (const requiredArtifact of [
       "Current reference profile ids such as local-dev, single-operator, scenario-01, and hardened-idp",
       "--provider-profile / providerProfileId / providerProfile",
-      "Legacy --auth-provider and enrollment policy fallback",
+      "Explicit --auth-provider and enrollment policy parsing",
       "AppProviderSet.modules",
       "defaultConfig(providerId)",
       "defaultServices()",
@@ -154,7 +154,7 @@ describe("provider layer refactor contract documentation", () => {
       "Template defaults keyed by plain template id",
       "Template compatibility using openParts or unsupported relation keys",
       "Provider authoring scaffold fields",
-      "Install/update inventory profileId labels",
+      "Install/update inventory preset labels",
     ]) {
       const row = rows.get(requiredArtifact);
       expect(row, requiredArtifact).toBeDefined();
@@ -176,6 +176,7 @@ describe("provider layer refactor contract documentation", () => {
       "provider-layer-refactor-regression-matrix.md",
       "GLA-110.02",
       "GLA-110.13",
+      "GLA-110.14",
     ]) {
       expect(decision).toContain(requiredPhrase);
     }
@@ -255,8 +256,8 @@ describe("provider layer refactor contract documentation", () => {
     ]) {
       const row = rows.get(retiredSurface);
       expect(row, retiredSurface).toBeDefined();
-      expect(row?.[1], `${retiredSurface} allowed scope`).toMatch(/compatibility|provider-compat/);
-      expect(row?.[2], `${retiredSurface} blocking check`).toMatch(/test\.ts/);
+      expect(row?.[1], `${retiredSurface} allowed scope`).toMatch(/None|no supported/);
+      expect(row?.[2], `${retiredSurface} blocking check`).toMatch(/test\.ts|boundary-check/);
     }
   });
 

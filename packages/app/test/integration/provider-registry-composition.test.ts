@@ -158,14 +158,14 @@ describe("ProviderRegistry app composition", () => {
   });
 
   it("applies reference capsule provider config through the registry-backed runtime graph", () => {
-    const bridge = createReferenceBridge({ providerProfileId: REFERENCE_PROFILE_LOCAL_DEV_ID });
+    const bridge = createReferenceBridge({ referencePresetId: REFERENCE_PROFILE_LOCAL_DEV_ID });
 
     expect(bridge.catalogShow(LAUNCHER_PROCESS_PROVIDER_ID)).toMatchObject({
       resolvedConfig: { mode: "headless" },
     });
   });
 
-  it("keeps legacy provider-set shape reads isolated to the compatibility boundary", () => {
+  it("keeps legacy provider-set shape reads absent from runtime composition", () => {
     const srcRoot = fileURLToPath(new URL("../../src", import.meta.url));
     const legacyShapeReadLines = sourceFiles(srcRoot).flatMap((path) =>
       readFileSync(path, "utf8")
@@ -181,15 +181,10 @@ describe("ProviderRegistry app composition", () => {
         .map((line) => `${basename(path)}:${line.trim()}`),
     );
 
-    expect(legacyShapeReadLines).toEqual([
-      "provider-compat.ts:const manifest = providerSet.profiles?.find((profile) => profile.metadata.name === profileId);",
-      "provider-compat.ts:return providerSet?.selectedProfileId;",
-      "provider-compat.ts:return providerSet?.profile;",
-      "provider-compat.ts:return ProviderRegistry.fromProviderModules(providerSet.modules);",
-    ]);
+    expect(legacyShapeReadLines).toEqual([]);
   });
 
-  it("keeps provider-set callbacks out of runtime composition except through the compatibility adapter", () => {
+  it("keeps provider-set callbacks out of runtime composition", () => {
     const srcRoot = fileURLToPath(new URL("../../src", import.meta.url));
     const callbackLines = sourceFiles(srcRoot).flatMap((path) =>
       readFileSync(path, "utf8")
@@ -205,12 +200,7 @@ describe("ProviderRegistry app composition", () => {
         .map((line) => `${basename(path)}:${line.trim()}`),
     );
 
-    expect(callbackLines).toEqual([
-      "provider-compat.ts:return providerSet?.defaultConfig?.(args);",
-      "provider-compat.ts:return providerSet?.defaultServices?.(args);",
-      'provider-compat.ts:return providerSet?.entrypointClientAssets?.(host, host.providerIds("entrypoint")) ?? [];',
-      "provider-compat.ts:return providerSet?.templateProbes ?? {};",
-    ]);
+    expect(callbackLines).toEqual([]);
   });
 
   it("reference package exposes split deployment and capsule defaults for named profiles", () => {
