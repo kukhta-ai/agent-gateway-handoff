@@ -31,12 +31,12 @@ handling, and documentation.
 
 ## Boundary Checks
 
-The GLA-110.13 boundary checks intentionally allow legacy compatibility code only where GLA-110.07 placed it.
-They must fail if new central runtime composition code reintroduces direct provider-set/profile shape reads or
-provider-set callback seams outside the compatibility adapter.
+The final GLA-110 boundary checks allow no runtime compatibility adapter or allowlist for legacy provider-set/profile
+composition. They must fail if protected runtime code reintroduces direct provider-set/profile shape reads, provider-set
+callback seams, or broad profile runtime selection tokens.
 
-| Retired surface | Allowed before GLA-110.14 | Blocking check |
+| Retired surface | Final allowed runtime scope | Blocking check |
 |---|---|---|
-| `AppProviderSet.modules`, `providerSet.profiles`, `providerSet.profile`, `providerSet.selectedProfileId` | `packages/app/src/provider-compat.ts` only, plus deprecated alias/export plumbing that calls the adapter. | `provider-registry-composition.test.ts` scans `packages/app/src` for direct shape reads and expects them only in `provider-compat.ts`. |
-| `defaultConfig`, `defaultServices`, `entrypointClientAssets`, `templateProbes` provider-set callbacks | `packages/app/src/provider-compat.ts` only. | `provider-registry-composition.test.ts` scans runtime composition source and fails if callback access appears outside the compatibility adapter. |
-| Broad `ProviderSelectionProfile` / `ProviderProfileManifest` runtime selection | compatibility migration readers only until GLA-110.14 removes them. | `provider-layer-refactor-contract-doc.test.ts` verifies the target docs mark broad profiles as split/narrowed compatibility surfaces, not target architecture. |
+| `AppProviderSet.modules`, `providerSet.profiles`, `providerSet.profile`, `providerSet.selectedProfileId` | None in protected runtime source. | `provider-registry-composition.test.ts` scans `packages/app/src` and expects no direct shape reads; `tools/boundary-check/provider-boundary.mjs` rejects retired tokens and direct reads. |
+| `defaultConfig`, `defaultServices`, `entrypointClientAssets`, `templateProbes` provider-set callbacks | None as provider-set callbacks in protected runtime source. | `provider-registry-composition.test.ts` scans runtime composition source and expects no provider-set callback access. |
+| Broad `ProviderSelectionProfile` / `ProviderProfileManifest` runtime selection | None as supported app/runtime input. | `provider-layer-refactor-contract-doc.test.ts` verifies broad profile terms are archived migration history only; `tools/boundary-check/provider-boundary.mjs` rejects the retired tokens in protected runtime source. |

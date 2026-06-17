@@ -139,8 +139,7 @@ Allowed inside runtime consumption:
 Not allowed inside runtime consumption:
 
 - write provider code, provider package manifests, contract tests, or skill/docs source;
-- write app deployment config, capsule template defaults, legacy provider-profile/provider-set composition, or rollback
-  snapshots;
+- write app deployment config, capsule template defaults, provider inventory, or rollback snapshots;
 - write WPM receipts, dependency binding evidence, daemon config, boot config, route config, or public-edge setup;
 - load executable provider code or register provider modules after daemon boot;
 - select or override `AuthProvider`, `ChannelAdapter`, or `SecretStore` through runtime session creation;

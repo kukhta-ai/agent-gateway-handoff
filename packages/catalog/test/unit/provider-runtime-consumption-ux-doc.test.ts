@@ -85,7 +85,7 @@ describe("provider runtime consumption UX documentation", () => {
     for (const requiredPhrase of [
       "write provider code",
       "write app deployment config",
-      "legacy provider-profile/provider-set composition",
+      "provider inventory",
       "write WPM receipts",
       "daemon config",
       "AuthProvider",

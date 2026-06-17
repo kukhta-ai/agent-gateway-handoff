@@ -41,12 +41,12 @@ Adding a capability is therefore adding a *package*, not changing core code. Dis
 
 So **"self-registration" means a package describes itself so the operator's install is turnkey** (drop it in → it manifests → it's usable) — *not* an open endpoint that anything pushes code to at runtime. This is the existing GLA↔`wpm` split: `wpm` (the agent-native installer) stands the dependency up on the operator's host and writes its `DependencyBinding`; GLA reads it. Extensibility is an operator power; the runtime agent only ever consumes what's already registered. This is the line that lets GLA be maximally extensible *and* keep providers trusted — which matters most for launchers, since they run code and own security-bearing configuration (§7).
 
-In the current migration implementation this line is enforced by a sealed `ProviderRegistry` backed by internal
-ProviderHost factory mechanics. Legacy provider-set/profile inputs are compatibility readers only: distribution code
-may still adapt them into registry boot data, `AppDeploymentConfig`, template defaults, explicit probes, and client
-asset evidence, but they are not target architecture nouns. Runtime requests may select among already-registered
-capsule provider ids where a template allows it, but they cannot register executable provider code or load a new
-provider package after daemon boot. See `architecture/provider-layer-refactor-contract.md`,
+In the current implementation this line is enforced by a sealed `ProviderRegistry` backed by internal ProviderHost
+factory mechanics. Runtime composition accepts registry boot data, `AppDeploymentConfig`, template defaults, explicit
+probes, and client asset evidence; legacy provider-set/profile inputs are archived migration history, not supported
+runtime inputs. Runtime requests may select among already-registered capsule provider ids where a template allows it,
+but they cannot register executable provider code or load a new provider package after daemon boot. See
+`architecture/provider-layer-refactor-contract.md`,
 `architecture/provider-host-extension-architecture.md`, `architecture/provider-author-workflow.md`, and
 `architecture/provider-graph-defaults-and-extension-plan.md`.
 
