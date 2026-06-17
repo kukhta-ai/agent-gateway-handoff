@@ -4,16 +4,16 @@
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
 
 phase: 5
-phase_name: "Autonomous build — provider-layer refactor GLA-110.14 done; parent GLA-110 ready"
-branch: feature/provider-refactor-task-GLA-110.14
+phase_name: "Autonomous build — provider-layer refactor GLA-110 complete"
+branch: feature/provider-graph
 epic: provider-refactor-110
 active_story: null
 review_cycle: 0
 provider_refactor_110_scope:
   tasks: "GLA-110..GLA-110.14"
-  current_branch: "feature/provider-refactor-task-GLA-110.14"
-  next_ready_sequence: "GLA-110.14 is Done on its story branch with pnpm run gate passing. Parent GLA-110 is the only remaining ready item and must be closed after the story branch merges into feature/provider-graph."
-  note: "2026-06-17: GLA-110.14 completed. Removed app provider-compat runtime adapter, provider-profile/profile/provider-set inputs, CLI deferred profile/provider-set nouns, public UX/API fallback docs, and boundary allowlists. Full pnpm run gate passed with required browser E2E."
+  current_branch: "feature/provider-graph"
+  next_ready_sequence: "GLA-110 parent and subtasks GLA-110.01 through GLA-110.14 are Done; backlog sequence list is empty for the provider-refactor scope."
+  note: "2026-06-17: GLA-110 completed. GLA-110.14 removed app provider-compat runtime adapter, provider-profile/profile/provider-set inputs, CLI deferred profile/provider-set nouns, public UX/API fallback docs, and boundary allowlists. Parent closure audit found all required subtasks Done with no unchecked AC/DoD rows. Full pnpm run gate passed with required browser E2E."
 follow_on_scope:
   tasks: "GLA-108..GLA-109"
   branch_base: "feature/provider-host"
@@ -150,4 +150,4 @@ tooling:
   wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
   tool_target: "codex"
 
-last_updated: "2026-06-17T00:02:49Z"
+last_updated: "2026-06-17T00:04:51Z"
