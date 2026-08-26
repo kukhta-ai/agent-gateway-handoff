@@ -282,7 +282,7 @@ describe("REAL noVNC handoff browser client (GLA-077)", () => {
             <html>
               <head><title>real-novnc-target</title></head>
               <body style="margin:0">
-                <input id="remote-secret-field" autofocus
+                <input id="remote-secret-field"
                   style="box-sizing:border-box;width:100vw;height:100vh;font-size:64px;padding:48px"
                   placeholder="type here" />
               </body>
