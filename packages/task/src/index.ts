@@ -91,6 +91,18 @@ export interface TaskTeardownDeps {
   teardownSession(sessionId: SessionId, disposition: "completed" | "revoked"): Promise<unknown>;
 }
 
+/** Restart-safe snapshot for the Task service's durable aggregate and held task-capability tokens. */
+export interface TaskServiceSnapshot {
+  tasks: Task[];
+  tokens: Array<[TaskId, OpaqueToken]>;
+}
+
+/** Store seam for task aggregates. Concrete storage is wired by `app`. */
+export interface TaskStateStore {
+  load(): TaskServiceSnapshot;
+  save(snapshot: TaskServiceSnapshot): void;
+}
+
 /** Options for {@link TaskService}. */
 export interface TaskServiceOptions {
   /** The kernel capability port that mints/attenuates (default: caller must inject; no signer named here). */
@@ -103,6 +115,8 @@ export interface TaskServiceOptions {
    * `state.conflict` (teardown is not wired — a bare task service from the early slices).
    */
   teardown?: TaskTeardownDeps;
+  /** Restart-safe task aggregate store. Defaults to process-local memory. */
+  store?: TaskStateStore;
 }
 
 let taskCounter = 0;
@@ -132,12 +146,23 @@ export class TaskService {
   private readonly tokens = new Map<TaskId, OpaqueToken>();
   /** The terminal-teardown wiring (Slice 7), or undefined on a bare task service. */
   private readonly teardown: TaskTeardownDeps | undefined;
+  private readonly store: TaskStateStore | undefined;
 
   constructor(opts: TaskServiceOptions) {
     this.port = opts.capability;
     this.clock = opts.clock ?? SYSTEM_CLOCK;
     this.newTaskId = opts.newTaskId ?? defaultTaskId;
     this.teardown = opts.teardown;
+    this.store = opts.store;
+    const snapshot = opts.store?.load();
+    if (snapshot !== undefined) {
+      for (const task of snapshot.tasks) {
+        this.tasks.set(task.id, structuredClone(task));
+      }
+      for (const [id, token] of snapshot.tokens) {
+        this.tokens.set(id, token);
+      }
+    }
   }
 
   /**
@@ -191,6 +216,7 @@ export class TaskService {
 
     this.tasks.set(id, task);
     this.tokens.set(id, minted.token);
+    this.persist();
     return { task, taskCapabilityToken: minted.token };
   }
 
@@ -253,6 +279,7 @@ export class TaskService {
     t.sessions.push(sessionId as any);
     t.stepCounters.opened += 1;
     t.updatedAt = this.clock.now();
+    this.persist();
     return t;
   }
 
@@ -261,6 +288,7 @@ export class TaskService {
     const t = this.get(id);
     t.state = taskTransition(t.state, to);
     t.updatedAt = this.clock.now();
+    this.persist();
     return t;
   }
 
@@ -346,6 +374,7 @@ export class TaskService {
       task.state = taskTransition(task.state, disposition);
       task.updatedAt = this.clock.now();
     }
+    this.persist();
     return task;
   }
 
@@ -371,6 +400,13 @@ export class TaskService {
       view.recipient = t.recipient;
     }
     return view;
+  }
+
+  private persist(): void {
+    this.store?.save({
+      tasks: [...this.tasks.values()].map((task) => structuredClone(task)),
+      tokens: [...this.tokens.entries()],
+    });
   }
 }
 

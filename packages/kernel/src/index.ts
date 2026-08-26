@@ -46,6 +46,7 @@ export type {
   Capability,
   CapabilityClass,
   CapabilityPort,
+  MutableRevocations,
   RevocationSnapshot,
   VerifyContext,
   VerifyResult,
@@ -98,24 +99,39 @@ export {
   decodeRuntimeHandle,
   encodeRuntimeHandle,
   getSpawnContext,
+  runtimeEndpoint,
   setSpawnContext,
 } from "./runtime-handle.js";
-export type { RuntimeDescriptor, SpawnContext, WorkspaceHandleRef } from "./runtime-handle.js";
+export type {
+  RuntimeClientDescriptor,
+  RuntimeDescriptor,
+  RuntimeEndpointDescriptor,
+  RuntimeEndpointFamily,
+  RuntimeEndpointTransport,
+  SpawnContext,
+  WorkspaceHandleRef,
+} from "./runtime-handle.js";
 
 // ── K7 · module ports + identity/enrollment types ─────────────────────────────
 export type {
   AgentConnector,
   AgentConnectorPort,
+  AuthAssuranceFact,
   AuthChallenge,
+  AuthProviderEnrollmentResult,
   AuthProviderPort,
+  AuthProviderVerificationResult,
   AuthStrength,
   CatalogEntity,
   CatalogPort,
   ChannelPort,
   CompletionDetectorPort,
   EnrollmentChallenge,
+  HumanEntrypointBinding,
+  HumanEntrypointClientBinding,
   HumanEntrypointPort,
   IdentityPort,
+  IdentityVerificationResult,
   InjectionTarget,
   LauncherPort,
   MountCapability,
@@ -123,6 +139,7 @@ export type {
   PolicyPort,
   RawCompletionSignal,
   RecipientBinding,
+  ReverseProxyTransportBinding,
   SecretStorePort,
   SecretValue,
   TemplateDescriptor,
@@ -130,6 +147,34 @@ export type {
   WorkspaceHandle,
   WorkspacePort,
 } from "./ports.js";
+
+// ── K7b · provider-neutral auth assurance policy ─────────────────────────────
+export {
+  AUTH_ASSURANCE_PROFILE_VALUES,
+  DEFAULT_AUTH_ASSURANCE_PROFILE,
+  assuranceFromAuthStrength,
+  assuranceLevelFromAuthStrength,
+  authAssurancePolicyFromProfile,
+  authAssurancePolicyFromRequiredAuthStrength,
+  authAssuranceSufficient,
+  isAuthAssuranceProfile,
+  parseAuthAssuranceProfile,
+} from "./auth-assurance.js";
+export type {
+  AuthAssuranceDiagnostic,
+  AuthAssuranceEvidence,
+  AuthAssuranceLevel,
+  AuthAssurancePolicy,
+  AuthAssuranceProfile,
+  AuthAssuranceProfileParseResult,
+} from "./auth-assurance.js";
+
+// ── K7c · operator redaction / placeholder guards ─────────────────────────────
+export {
+  isRedactionOrTemplatePlaceholder,
+  redactOperatorEgress,
+  redactOperatorText,
+} from "./redaction.js";
 
 // ── K8 · state-transition functions (pure reducers per lifecycle) ──────────────
 export {

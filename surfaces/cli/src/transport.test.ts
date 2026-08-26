@@ -9,8 +9,10 @@ import { glaError, isGlaError } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import type { BridgeLike, OperatorOps } from "./transport.js";
 import {
+  DaemonBridgeClient,
   type DaemonRequest,
   dispatchBridgeRequest,
+  endpointIsLocalBridgeEndpoint,
   endpointToConnectTarget,
   errorToWire,
   resolveClientEndpoint,
@@ -110,6 +112,30 @@ describe("transport — BridgeLike seam + wire dispatch (no socket)", () => {
     expect(endpointToConnectTarget("127.0.0.1:7423")).toEqual({ host: "127.0.0.1", port: 7423 });
     // A bare path with no port stays a path.
     expect(endpointToConnectTarget("/tmp/x/gla.sock")).toEqual({ path: "/tmp/x/gla.sock" });
+  });
+
+  it("endpointIsLocalBridgeEndpoint allows Unix sockets and loopback TCP, and refuses URLs/public hosts", () => {
+    expect(endpointIsLocalBridgeEndpoint("/run/gla.sock")).toBe(true);
+    expect(endpointIsLocalBridgeEndpoint("127.0.0.1:7423")).toBe(true);
+    expect(endpointIsLocalBridgeEndpoint("[::1]:7423")).toBe(true);
+    expect(endpointIsLocalBridgeEndpoint("localhost:7423")).toBe(true);
+    expect(endpointIsLocalBridgeEndpoint("0.0.0.0:7423")).toBe(false);
+    expect(endpointIsLocalBridgeEndpoint("10.0.0.8:7423")).toBe(false);
+    expect(endpointIsLocalBridgeEndpoint("https://gla.example/bridge")).toBe(false);
+  });
+
+  it("DaemonBridgeClient refuses non-local endpoints before connecting and redacts secret-shaped diagnostics", async () => {
+    const endpoint =
+      "https://gla.example/handoff/sess_1?grant=BRIDGE_GRANT_CANARY_090&secret=RAW_SECRET_CANARY_090";
+    await expect(DaemonBridgeClient.connect(endpoint)).rejects.toMatchObject({
+      code: "usage.bad_argument",
+    });
+    await expect(DaemonBridgeClient.connect(endpoint)).rejects.not.toThrow(
+      /BRIDGE_GRANT_CANARY_090|RAW_SECRET_CANARY_090/,
+    );
+    await expect(DaemonBridgeClient.connect("10.0.0.8:7423")).rejects.toMatchObject({
+      code: "usage.bad_argument",
+    });
   });
 
   it("resolveClientEndpoint reads GLA_ENDPOINT (set) else undefined", () => {

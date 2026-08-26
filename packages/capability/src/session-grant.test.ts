@@ -219,3 +219,47 @@ describe("CapabilityService.verifySessionGrant — stateless verify-at-edge; onl
     }
   });
 });
+
+describe("CapabilityService.proveStaleSessionGrantRoute — route proof for typed stale refusals", () => {
+  it("proves an expired token only for its own route scope", async () => {
+    const svc = new CapabilityService();
+    const { token, scopePath } = await svc.mintSessionGrant({
+      sessionId: SESS,
+      recipient,
+      notAfter: PAST,
+    });
+
+    expect(svc.verifySessionGrantToken(token, { scopePath })).toEqual({
+      ok: false,
+      reason: "auth.expired",
+    });
+    expect(svc.proveStaleSessionGrantRoute(token, { scopePath }).ok).toBe(true);
+    expect(svc.proveStaleSessionGrantRoute(token, { scopePath: "/handoff/other-session" })).toEqual(
+      {
+        ok: false,
+        reason: "auth.insufficient",
+      },
+    );
+  });
+
+  it("proves a revoked token only for its own route scope", async () => {
+    const svc = new CapabilityService();
+    const { capability, token, scopePath } = await svc.mintSessionGrant({
+      sessionId: SESS,
+      recipient,
+    });
+    await svc.revoke(capability.id);
+
+    expect(svc.verifySessionGrantToken(token, { scopePath })).toEqual({
+      ok: false,
+      reason: "auth.revoked",
+    });
+    expect(svc.proveStaleSessionGrantRoute(token, { scopePath }).ok).toBe(true);
+    expect(svc.proveStaleSessionGrantRoute(token, { scopePath: "/handoff/other-session" })).toEqual(
+      {
+        ok: false,
+        reason: "auth.insufficient",
+      },
+    );
+  });
+});

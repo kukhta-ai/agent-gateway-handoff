@@ -26,12 +26,13 @@
 // Spawns REAL browsers — generous timeouts; the capsule + broker + gateway are always reaped in a finally/afterAll.
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { type AddressInfo, createServer as createNet } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthWebauthnProvider } from "@gla/auth-webauthn";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { IdentityService } from "@gla/identity";
 import {
@@ -51,9 +52,12 @@ const KNOWN_CODE = "VERIFY-CODE-7Q2X-AGENTMUSTNOTSEE";
 const recipient = "tg:user:123" as RecipientRef;
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
@@ -325,6 +329,7 @@ describe("REAL two-handoff end-to-end (scenario-01 Phases 9–14; Slice 6 deltas
       };
 
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,
@@ -340,7 +345,16 @@ describe("REAL two-handoff end-to-end (scenario-01 Phases 9–14; Slice 6 deltas
           // The gateway proxies the human's WS upgrade to the stub noVNC upstream (real noVNC gated for hermes-1).
           entrypoint: {
             async open() {
-              return { internalEndpoint: upstream.endpoint };
+              return {
+                resourceId: "entrypoint:fake-view:two-handoff",
+                provider: "fake-view",
+                client: { kind: "provider-asset", ref: "fake-viewer" },
+                transport: {
+                  kind: "reverse-proxy" as const,
+                  protocol: "websocket",
+                  upstream: upstream.endpoint,
+                },
+              };
             },
           },
           completion: { pollMs: 100 }, // the REAL url-watcher reads the capsule's CDP /json active URL
@@ -368,7 +382,8 @@ describe("REAL two-handoff end-to-end (scenario-01 Phases 9–14; Slice 6 deltas
         if (invite === undefined) {
           throw new Error("enrollInvite not wired");
         }
-        const enrollLink = invite.link.replace("127.0.0.1", "localhost");
+        const deliveredInvite = JSON.parse(deliveredLinks.at(-1) ?? "{}") as { link?: string };
+        const enrollLink = (deliveredInvite.link ?? "").replace("127.0.0.1", "localhost");
         expect(await runEnrollment(hpageGw, enrollLink)).toMatch(/Enrolled/i);
         expect(stack.identity?.isEnrolled(recipient)).toBe(true);
 

@@ -1,25 +1,181 @@
 // The handoff step-up web page served by the Access Gateway on a valid recipient-bound grant (scenario-01 Phase 6/12).
-// A minimal, framework-free HTML+JS page (no build step) that runs the WebAuthn AUTHENTICATION (step-up) ceremony,
-// then opens the noVNC stream over the gateway's authorized WS upgrade:
-//   1. POST /handoff/auth/options (carrying the grant + the route path) → authentication options (a challenge),
-//      scoped to the recipient's registered credential (the one enrolled in Phase E)
-//   2. navigator.credentials.get(options) → the OS passkey UI → an assertion
-//   3. POST /handoff/auth/verify (grant + path + assertion) → the gateway verifies it against the enrolled credential
-//      and, on success, AUTHORIZES the grant so the WS upgrade is proxied to the capsule's noVNC stream
-//   4. open a WebSocket to the route path (carrying the grant) → the gateway proxies it to the noVNC endpoint
-// All TRUST decisions are server-side at the gateway (grant verify, assertion verify, required strength). The page
-// only runs the browser ceremony and POSTs results. base64url<->ArrayBuffer conversion is inline (no deps).
+// A minimal, framework-free HTML+JS page (no build step). The step-up's COMPLETION MECHANISM is chosen by the SHAPE
+// of the opaque options the gateway returns from /handoff/auth/options — a PROVIDER-AGNOSTIC discriminant, NOT any
+// provider knowledge (the gateway names no provider; there is no provider string anywhere in this file):
+//   • options.kind === "redirect"  → a delegated (e.g. OIDC) provider: top-level redirect to options.authorizeUrl;
+//     the provider's hosted login runs the ceremony and redirects back here with its return params (?code&state),
+//     which this page POSTs to the UNCHANGED /handoff/auth/verify as the opaque `assertion`.
+//   • else (no `kind`)             → the in-page WebAuthn ceremony, UNCHANGED:
+//       1. POST /handoff/auth/options → authentication options (a challenge) scoped to the enrolled credential
+//       2. navigator.credentials.get(options) → the OS passkey UI → an assertion
+//       3. POST /handoff/auth/verify (path + assertion) → the gateway resolves the bootstrap ticket + AUTHORIZES the grant
+//   In BOTH cases: 4. open a WebSocket to the route path; an HttpOnly stream ticket lets the gateway resolve the grant.
+// All TRUST decisions are server-side at the gateway (grant verify, assertion verify, assurance policy). The page
+// only starts the ceremony and POSTs results. base64url<->ArrayBuffer conversion is inline (no deps).
+//
+// REDIRECT-FLOW NOTES (the security-relevant choices; see docs/architecture, the dual-method-flow design §5):
+//   • redirect target integrity — the page navigates ONLY to `options.authorizeUrl`, a value the SERVER built from
+//     operator config + a fixed redirect_uri (adapters/.../oidc.ts buildAuthorizeUrl). NO request/URL parameter can
+//     influence it, so this is not an open redirect. (The return arm only POSTs to a fixed same-origin path.)
+//   • the GLA grant is NEVER handed to the provider — it is held server-side behind a same-origin HttpOnly bootstrap
+//     ticket across the redirect; sessionStorage keeps only non-secret route/client context. The provider only ever
+//     receives its own `?code&state`. The grant is re-verified server-side on the return POST like any other request.
+//   • the browser-side redirect/return path is exercised end-to-end by the GLA-076 E2E; the gateway tests drive the
+//     UNCHANGED verify route in-process.
+
+import { htmlText, jsonScriptData } from "./html-safety.js";
+
+export { jsonScriptData } from "./html-safety.js";
+
+/** Browser-client requirements declared by a human-entrypoint provider. */
+export interface HandoffEntrypointClient {
+  readonly kind: string;
+  readonly ref?: string;
+  readonly bootstrap?: Record<string, unknown>;
+}
+
+const DEFAULT_HANDOFF_CLIENT: HandoffEntrypointClient = { kind: "unconfigured" };
+const DEFAULT_CLIENT_ASSETS_PATH = "/handoff/client-assets";
+
+/** Same-origin public paths and client binding the handoff page calls back into. */
+export interface HandoffPagePaths {
+  /** Same-origin path for the step-up options request. */
+  readonly authOptions: string;
+  /** Same-origin path for the step-up completion request. */
+  readonly authVerify: string;
+  /** Same-origin path for the WebSocket upgrade route as seen by the recipient's browser. */
+  readonly stream: string;
+  /** Same-origin path prefix serving provider-owned browser-client assets. */
+  readonly clientAssets?: string;
+  /** Provider-declared browser-client binding for this entrypoint. */
+  readonly entrypointClient?: HandoffEntrypointClient;
+}
+
+const ROOT_HANDOFF_PATHS = (routePath: string): HandoffPagePaths => ({
+  authOptions: "/handoff/auth/options",
+  authVerify: "/handoff/auth/verify",
+  stream: routePath,
+  clientAssets: DEFAULT_CLIENT_ASSETS_PATH,
+});
+
+export function handoffClientStyles(): string {
+  return `
+  .shell { max-width: min(96vw, 82rem); margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  body { font-family: system-ui, sans-serif; margin: 0; color: #1f2328; background: #f7f4ed; }
+  button { font-size: 1rem; padding: 0.6rem 1.2rem; border-radius: 0.4rem; border: 1px solid #888; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { margin-top: 1rem; min-height: 1.5rem; }
+  .ok { color: #137333; } .err { color: #b3261e; }
+  #viewer {
+    margin-top: 1rem;
+    width: 100%;
+    height: min(70vh, 760px);
+    min-height: 360px;
+    border: 1px solid #b8b1a4;
+    border-radius: 0.65rem;
+    overflow: hidden;
+    background: #111;
+  }
+  #viewer:focus { outline: 3px solid #2f6fed; outline-offset: 2px; }
+  #viewer canvas { width: 100%; height: auto; display: block; }
+  #viewer[hidden] { display: none; }
+  `;
+}
+
+export function handoffClientScript(): string {
+  return `
+  const cleanSegment = (value) => String(value || "").replace(/[^a-zA-Z0-9._-]/g, "");
+  const cleanAssetPath = (value) => String(value || "")
+    .split("/")
+    .filter((segment) => segment && segment !== "." && segment !== "..")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const browserStreamUrl = (ctx) => {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const streamPath = ctx.streamPath || ctx.path;
+    return proto + "//" + location.host + streamPath;
+  };
+  const assetModuleUrl = (ctx, modulePath) => {
+    const client = ctx.client || {};
+    const ref = cleanSegment(client.ref || "novnc");
+    if (!ref) return undefined;
+    const base = String(ctx.clientAssets || cfg.paths.clientAssets || "${DEFAULT_CLIENT_ASSETS_PATH}").replace(/\\/+$/, "");
+    const mod = cleanAssetPath(modulePath || "core/rfb.js");
+    if (!mod) return undefined;
+    return base + "/" + encodeURIComponent(ref) + "/" + mod;
+  };
+  const openEntrypointClient = async (ctx) => {
+    const client = (ctx && ctx.client) || {};
+    if (client.kind !== "rfb-web-client") {
+      say("Verified, but no browser viewer is configured for this handoff.", "err");
+      return false;
+    }
+    const bootstrap = client.bootstrap || {};
+    const moduleUrl = assetModuleUrl(ctx, bootstrap.module || "core/rfb.js");
+    if (!moduleUrl) {
+      say("The live browser viewer is unavailable: client assets are not configured.", "err");
+      return false;
+    }
+    const viewer = document.getElementById("viewer");
+    viewer.hidden = false;
+    viewer.textContent = "";
+    viewer.tabIndex = 0;
+    say("✓ Verified. Opening the live browser viewer…", "ok");
+    try {
+      const mod = await import(moduleUrl);
+      const RFB = mod.default || mod.RFB;
+      if (typeof RFB !== "function") {
+        say("The live browser viewer is unavailable: client module is invalid.", "err");
+        return false;
+      }
+      const rfb = new RFB(viewer, browserStreamUrl(ctx), {
+        credentials: bootstrap.credentials || {},
+      });
+      rfb.scaleViewport = bootstrap.scaleViewport !== false;
+      rfb.resizeSession = bootstrap.resizeSession === true;
+      rfb.viewOnly = bootstrap.viewOnly === true;
+      if ("focusOnClick" in rfb) rfb.focusOnClick = true;
+      rfb.addEventListener("connect", () => {
+        try { viewer.focus(); } catch (e) {}
+        try { if (typeof rfb.focus === "function") rfb.focus(); } catch (e) {}
+        say("✓ Connected to the live browser.", "ok");
+      });
+      rfb.addEventListener("disconnect", (event) => {
+        const clean = Boolean(event && event.detail && event.detail.clean);
+        say(clean ? "The session was closed." : "The live browser viewer is unavailable.", clean ? "" : "err");
+      });
+      rfb.addEventListener("securityfailure", () => {
+        say("The live browser viewer refused the connection.", "err");
+      });
+      return true;
+    } catch (e) {
+      say("The live browser viewer is unavailable.", "err");
+      return false;
+    }
+  };
+`;
+}
 
 /**
- * Render the handoff step-up page HTML. The grant token + the route path are embedded so the page's fetches and the
- * WS upgrade carry them; both are still verified server-side on every request (the page cannot bypass the grant
- * check — GLA-035). `recipientLabel` is a display-only hint (the binding is the grant's recipient caveat the server
- * reads from the signed grant).
+ * Render the handoff step-up page HTML. The raw grant is not embedded; auth POSTs are bound by a same-origin
+ * HttpOnly bootstrap ticket and the browser stream uses a short-lived HttpOnly stream ticket. `paths.stream` is the
+ * PUBLIC same-origin route path the browser connects to. The gateway still verifies the grant server-side on every
+ * protected request (the page cannot bypass the grant check — GLA-035). `recipientLabel` is a display-only hint.
  */
-export function handoffPageHtml(grant: string, routePath: string, recipientLabel: string): string {
-  // JSON-encoded data island (safe: JSON.stringify escapes quotes; the values are a base64url token, an opaque
-  // path, and an opaque recipient ref — none containing `</script`).
-  const data = JSON.stringify({ grant, path: routePath, recipient: recipientLabel });
+export function handoffPageHtml(
+  _grant: string,
+  routePath: string,
+  recipientLabel: string,
+  paths: HandoffPagePaths = ROOT_HANDOFF_PATHS(routePath),
+): string {
+  // JSON-encoded data island. Escape HTML-significant bytes too: provider bootstrap metadata is not trusted.
+  const data = jsonScriptData({
+    path: routePath,
+    streamPath: paths.stream,
+    recipient: recipientLabel,
+    paths,
+    client: paths.entrypointClient ?? DEFAULT_HANDOFF_CLIENT,
+  });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -27,27 +183,26 @@ export function handoffPageHtml(grant: string, routePath: string, recipientLabel
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Verify to continue — GLA</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
-  button { font-size: 1rem; padding: 0.6rem 1.2rem; border-radius: 0.4rem; border: 1px solid #888; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  #status { margin-top: 1rem; min-height: 1.5rem; }
-  .ok { color: #137333; } .err { color: #b3261e; }
-  #screen { margin-top: 1rem; width: 100%; }
+${handoffClientStyles()}
 </style>
 </head>
 <body>
+<main class="shell">
 <h1>Verify to continue</h1>
 <p>Confirm it's you with your passkey to open the secure session that was shared with you.</p>
 <button id="go">Verify with passkey</button>
 <div id="status" role="status" aria-live="polite"></div>
-<canvas id="screen" width="1024" height="768" hidden></canvas>
+<div id="viewer" aria-label="Live secure browser viewport" hidden></div>
+</main>
 <script id="handoff-data" type="application/json">${data}</script>
 <script>
 (() => {
   const cfg = JSON.parse(document.getElementById("handoff-data").textContent);
+  try { if (new URLSearchParams(location.search).has("grant")) history.replaceState(null, "", location.pathname); } catch (e) {}
   const btn = document.getElementById("go");
   const status = document.getElementById("status");
   const say = (msg, cls) => { status.textContent = msg; status.className = cls || ""; };
+${handoffClientScript()}
 
   // ── base64url <-> ArrayBuffer (no dependency) ──
   const b64urlToBuf = (s) => {
@@ -91,51 +246,81 @@ export function handoffPageHtml(grant: string, routePath: string, recipientLabel
     },
   });
 
-  // Open the noVNC stream over the gateway's authorized WS upgrade (the gateway proxies it to the capsule).
-  const openStream = () => {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = proto + "//" + location.host + cfg.path + "?grant=" + encodeURIComponent(cfg.grant);
-    try {
-      const ws = new WebSocket(url);
-      ws.binaryType = "arraybuffer";
-      ws.onopen = () => say("✓ Connected. The secure session is now open.", "ok");
-      ws.onclose = () => say("The session was closed.", "err");
-    } catch (e) {
-      say("Could not open the session.", "err");
+  // POST an opaque assertion to the UNCHANGED /handoff/auth/verify and, on success, open the stream. Shared by the
+  // in-page ceremony (a WebAuthn assertion) and the redirect-return arm (the provider's {code,state} return params).
+  // ctx supplies non-secret path/client context: cfg for the in-page ceremony, or sessionStorage-restored values on return.
+  const submitAssertion = async (assertion, ctx) => {
+    const c = ctx || cfg;
+    say("Verifying…");
+    const verRes = await fetch(cfg.paths.authVerify, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: c.path, assertion: assertion }),
+    });
+    const ver = await verRes.json().catch(() => ({}));
+    if (verRes.ok && ver.authorized) {
+      // The provider-declared browser client opens against the restored same-origin route, regardless of
+      // which arm completed. The page never treats a raw WebSocket open as a visible live browser.
+      await openEntrypointClient(c);
+      return true;
     }
+    say("Verification was not completed — try again.", "err");
+    return false;
   };
+
+  // ── Redirect-return arm: if this load carries a delegated provider's return params (?code&state), the ceremony
+  //    happened at the provider and we are back. Restore only non-secret path/client context from SAME-ORIGIN
+  //    sessionStorage and re-POST {code,state} to the UNCHANGED verify route as the opaque assertion. The server
+  //    resolves the HttpOnly bootstrap ticket, re-verifies the grant, and gates by strength.
+  const params = new URLSearchParams(location.search);
+  const retCode = params.get("code");
+  const retState = params.get("state");
+  if (retCode && retState) {
+    btn.disabled = true;
+    let ctx = null;
+    try { ctx = JSON.parse(sessionStorage.getItem("gla.handoff") || "null"); } catch (e) {}
+    try { sessionStorage.removeItem("gla.handoff"); } catch (e) {}
+    // Clean the return params out of the address bar so a reload doesn't replay them (the server burns state anyway).
+    try { history.replaceState(null, "", location.pathname); } catch (e) {}
+    if (ctx && ctx.path) {
+      submitAssertion({ code: retCode, state: retState }, ctx).then((ok) => { if (!ok) btn.disabled = false; });
+    } else {
+      // No preserved context (e.g. a fresh tab) — cannot complete; show the generic retry.
+      say("Verification was not completed — try again.", "err");
+      btn.disabled = false;
+    }
+  }
 
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     say("Requesting a verification challenge…");
     try {
-      const optRes = await fetch("/handoff/auth/options", {
+      const optRes = await fetch(cfg.paths.authOptions, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ grant: cfg.grant, path: cfg.path }),
+        body: JSON.stringify({ path: cfg.path }),
       });
       if (!optRes.ok) {
         say("This link is invalid, has expired, or you are not the intended recipient.", "err");
         return;
       }
       const options = await optRes.json();
+      // PROVIDER-AGNOSTIC completion branch on the opaque options' SHAPE (a generic kind discriminant — no provider
+      // name, endpoint, or method here). A delegated provider returns {kind:"redirect", authorizeUrl}; WebAuthn options
+      // have no kind and fall through to the UNCHANGED in-page ceremony below.
+      if (options && options.kind === "redirect") {
+        // Preserve non-secret path/client context SAME-ORIGIN across the top-level redirect.
+        try { sessionStorage.setItem("gla.handoff", JSON.stringify({ path: cfg.path, streamPath: cfg.streamPath, client: cfg.client, clientAssets: cfg.paths.clientAssets })); } catch (e) {}
+        say("Redirecting you to sign in…");
+        // Navigate ONLY to the server-built authorizeUrl (operator config + fixed redirect_uri) — no request input.
+        location.assign(options.authorizeUrl);
+        return;
+      }
       say("Follow your device's prompt to verify…");
       const cred = await navigator.credentials.get({ publicKey: toGetOptions(options) });
       if (!cred) { say("Verification was not completed — try again.", "err"); btn.disabled = false; return; }
-      say("Verifying…");
-      const verRes = await fetch("/handoff/auth/verify", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ grant: cfg.grant, path: cfg.path, assertion: credToJson(cred) }),
-      });
-      const ver = await verRes.json().catch(() => ({}));
-      if (verRes.ok && ver.authorized) {
-        say("✓ Verified. Opening the secure session…", "ok");
-        openStream();
-      } else {
-        say("Verification was not completed — try again.", "err");
-        btn.disabled = false;
-      }
+      const ok = await submitAssertion(credToJson(cred));
+      if (!ok) btn.disabled = false;
     } catch (err) {
       // A cancelled/failed ceremony lands here — nothing was authorized server-side; let the user retry.
       say("Verification was not completed — try again.", "err");
@@ -150,17 +335,25 @@ export function handoffPageHtml(grant: string, routePath: string, recipientLabel
 
 /**
  * Render the handoff REUSED-AUTH page (scenario-01 Phase 12, GLA-050/051): the recipient's prior step-up is still
- * valid, so there is NO WebAuthn ceremony — the page opens the noVNC stream over the gateway's authorized WS upgrade
- * DIRECTLY (the gateway already authorized this grant by reuse). It is the second window with "auth still valid, no
- * re-prompt." The grant + path are embedded for the WS upgrade (still verified server-side). The recipient sees no
- * prompt — the session opens straight away.
+ * valid, so there is NO WebAuthn ceremony — the page opens the entrypoint stream over the gateway's authorized WS
+ * upgrade DIRECTLY (the gateway already authorized this grant by reuse and issued an HttpOnly stream ticket). It is
+ * the second window with "auth still valid, no re-prompt." The recipient sees no prompt — the session opens straight away.
  */
 export function handoffReusedPageHtml(
-  grant: string,
+  _grant: string,
   routePath: string,
   recipientLabel: string,
+  streamPath: string = routePath,
+  entrypointClient: HandoffEntrypointClient = DEFAULT_HANDOFF_CLIENT,
+  clientAssets: string = DEFAULT_CLIENT_ASSETS_PATH,
 ): string {
-  const data = JSON.stringify({ grant, path: routePath, recipient: recipientLabel });
+  const data = jsonScriptData({
+    path: routePath,
+    streamPath,
+    recipient: recipientLabel,
+    client: entrypointClient,
+    clientAssets,
+  });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -169,33 +362,26 @@ export function handoffReusedPageHtml(
 <title>Opening your secure session — GLA</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
-  #status { margin-top: 1rem; min-height: 1.5rem; }
-  .ok { color: #137333; } .err { color: #b3261e; }
-  #screen { margin-top: 1rem; width: 100%; }
+${handoffClientStyles()}
 </style>
 </head>
 <body>
+<main class="shell">
 <h1>Opening your secure session</h1>
 <p>You're already verified — opening the session that was shared with you. No need to confirm again.</p>
 <div id="status" role="status" aria-live="polite">Connecting…</div>
-<canvas id="screen" width="1024" height="768" hidden></canvas>
+<div id="viewer" aria-label="Live secure browser viewport" hidden></div>
+</main>
 <script id="handoff-data" type="application/json">${data}</script>
 <script>
 (() => {
   const cfg = JSON.parse(document.getElementById("handoff-data").textContent);
+  try { if (new URLSearchParams(location.search).has("grant")) history.replaceState(null, "", location.pathname); } catch (e) {}
   const status = document.getElementById("status");
   const say = (msg, cls) => { status.textContent = msg; status.className = cls || ""; };
-  // No ceremony — auth was reused. Open the noVNC stream over the gateway's already-authorized WS upgrade directly.
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = proto + "//" + location.host + cfg.path + "?grant=" + encodeURIComponent(cfg.grant);
-  try {
-    const ws = new WebSocket(url);
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => say("✓ Connected. The secure session is now open.", "ok");
-    ws.onclose = () => say("The session was closed.", "err");
-  } catch (e) {
-    say("Could not open the session.", "err");
-  }
+${handoffClientScript()}
+  // No ceremony — auth was reused. Open the provider-declared browser client over the already-authorized route.
+  void openEntrypointClient(cfg);
 })();
 </script>
 </body>
@@ -206,12 +392,14 @@ export function handoffReusedPageHtml(
 export function handoffRefusalHtml(reason: string, message?: string): string {
   const msg =
     message ?? "This link is invalid, has expired, or you are not the intended recipient.";
+  const safeMsg = htmlText(msg);
+  const safeReason = htmlText(reason);
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Link unavailable — GLA</title>
 <style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5}.err{color:#b3261e}</style>
 </head><body>
 <h1>This link is unavailable</h1>
-<p class="err">${msg}</p>
-<p style="color:#888;font-size:.85rem">(${reason})</p>
+<p class="err">${safeMsg}</p>
+<p style="color:#888;font-size:.85rem">(${safeReason})</p>
 </body></html>`;
 }

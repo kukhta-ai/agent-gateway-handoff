@@ -139,8 +139,8 @@ verifies the grant cryptographically and requires the bound identity before forw
 On a handoff link request (`GET /handoff/<id>?grant=…`) and on a WS upgrade, the gateway: (1) **verifies the grant
 statelessly** — signature, `recipient` caveat, `ttl`, `scope` vs the route path, and the revocation snapshot for self
 **and every ancestor** — no DB round-trip in the common path (`kernel-contracts.md §2.3`); (2) **requires the bound
-identity** — if the recipient's `auth_strength` is insufficient, it triggers **WebAuthn step-up**. Only after both
-pass does it forward (`§reach`). **No public path bypasses grant verification** (the no-bypass invariant Slice 4a
+identity** — if the recipient's provider-neutral auth assurance is insufficient for the selected deployment policy,
+it triggers step-up through the configured Auth Provider. Only after both pass does it forward (`§reach`). **No public path bypasses grant verification** (the no-bypass invariant Slice 4a
 established for enrollment, generalized to handoff).
 
 ### Identity+Auth verification against the enrolled credential; auth-strength; delegated to the provider
@@ -148,10 +148,11 @@ established for enrollment, generalized to handoff).
 Step-up reuses Slice 4a's `authenticationOptions` + `verifyAuthentication` against the **credential the recipient
 enrolled in Phase E** (`identity-and-auth.md`, `slice-4a-enrollment.md §2`). The gateway triggers it; **Identity+Auth
 runs the ceremony** through the `AuthProviderPort` (in-tree WebAuthn by default) and reports **facts** — `{ ok,
-auth_strength }`, never an allow/deny. The gateway holds the **decision**: it requires `auth_strength = webauthn` (the
-configured threshold); a verified assertion that reaches it **authorizes the grant** (a small per-grant marker —
-the one piece of mutable edge state the step-up needs, consulted like the revocation cache), so the next WS upgrade
-for that grant is forwarded.
+auth_strength }` plus common assurance evidence, never an allow/deny. The gateway holds the **decision**: the
+default `phishing-resistant` policy demands passkey-grade assurance, while `password-permitted` explicitly admits
+password-grade evidence; a verified assertion that satisfies the selected policy **authorizes the grant** (a small
+per-grant marker — the one piece of mutable edge state the step-up needs, consulted like the revocation cache), so
+the next WS upgrade for that grant is forwarded.
 
 ### Stateless edge verify — only the bound recipient passes
 

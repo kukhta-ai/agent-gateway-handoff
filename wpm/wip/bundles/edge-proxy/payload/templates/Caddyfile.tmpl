@@ -1,0 +1,94 @@
+# Caddyfile — front the GLA gateway with Caddy: terminate public TLS and reverse-proxy to GLA on :3000.
+#
+# This is a TEMPLATE (the lower-trust payload tier): the executing agent fills the ⟨…⟩ placeholders for THIS
+# host, then either drops it in as the host's Caddyfile or merges this site block into an existing one
+# (reload, don't replace — see the edge-proxy setup task). The receipt records the checksum of what was
+# actually written and the inverse op (remove this block / restore the prior Caddyfile, reload Caddy).
+#
+# What it does (docs/01 §2 "Access Gateway", docs/03 §3): Caddy is the SOLE public entry. It serves the
+# operator's public URL over TLS and proxies every request — including the WebSocket upgrade the live-view
+# session and the gateway's verified upgrades depend on — to the address that reaches GLA's gateway on :3000.
+# GLA's own GLA_PUBLIC_BASE_URL (gla-core's env) MUST equal the public URL served here, because handoff and
+# enrollment links are built against it and must resolve, through this proxy, back to the same daemon.
+#
+# Supported public-base shapes:
+#   • dedicated root:  GLA_PUBLIC_BASE_URL=https://gla.example/
+#   • subpath mount:   GLA_PUBLIC_BASE_URL=https://gla.example/team-a/
+# The Access Gateway remains the authorization membrane in both cases. Caddy terminates TLS and routes bytes
+# (including WebSocket upgrades); GLA still verifies grants, recipients, auth strength, and mounted route scope.
+# Optional authentik proxy/forward-auth can be added as defense-in-depth before this reverse_proxy, but it is not
+# GLA's AuthProvider wiring and it must not be documented or operated as a grant bypass. A valid authentik outpost
+# session/cookie/header is still not a GLA grant; `/enroll`, `/auth/callback`, `/handoff/auth/*`, and
+# `/handoff/<id>` must continue to land on the GLA gateway.
+#
+# ── The upstream: point at whatever actually reaches GLA's :3000 on THIS topology ──────────────────────────
+#   • Caddy and GLA on the SAME host (or same container)        → reverse_proxy 127.0.0.1:3000
+#   • Caddy on the HOST, GLA in a CONTAINER (the hermes-1 case) → reverse_proxy to the host-side forward, NOT
+#     the container address. hermes-1 runs an LXD forkproxy mapping host:13000 → container:3000, so the
+#     upstream is 127.0.0.1:13000. Set ⟨gla-upstream⟩ to that forward's host:port.
+#
+# ── TLS: Caddy auto-provisions a Let's Encrypt cert for a real domain. For a bare-IP deploy (no domain), an
+#    automatic public cert is not issuable — use Caddy's internal CA or a provided cert, and accept that
+#    WebAuthn/passkeys need a trusted https origin (see the identity-provider bundle). ──────────────────────
+
+# The public site address Caddy serves — the host in GLA_PUBLIC_BASE_URL.
+#   domain example:   gla.example.com
+#   hermes-1 (IP):    203.0.113.10        (bare IP → pair with `tls internal` or a supplied cert below)
+⟨gla.example.com⟩ {
+	# Reverse-proxy everything to GLA's gateway. Caddy v2 proxies WebSocket upgrades transparently — the
+	# Upgrade/Connection handshake is forwarded as-is, so the live-view (noVNC) and verified-upgrade paths work.
+	reverse_proxy ⟨127.0.0.1:13000⟩
+
+	# Bare-IP / no public domain: uncomment to let Caddy serve its own (locally-trusted) certificate instead
+	# of attempting a public ACME cert it cannot get for an IP literal. For a real domain, delete this line and
+	# Caddy obtains a Let's Encrypt cert automatically.
+	# tls internal
+
+	# Access logs are intentionally not enabled by this template: recipient links can carry short-lived bearer grants
+	# during bootstrap, and browser WebSocket upgrades use an HttpOnly same-origin stream-ticket cookie after
+	# verification. If the operator enables Caddy access logging elsewhere, query strings plus Cookie and
+	# Sec-WebSocket-Protocol header values must be omitted or redacted before the log leaves the host.
+}
+
+# ── Subpath / custom-base variant ────────────────────────────────────────────────────────────────────────
+# Use this shape when GLA is mounted under an existing site prefix (example: https://gla.example/team-a/).
+# Set gla-core's env to:
+#   GLA_PUBLIC_BASE_URL=https://gla.example/team-a/
+#
+# `handle_path` strips /team-a before proxying to GLA's root-shaped internal routes (/enroll,
+# /handoff/auth/*, /handoff/<id>). `X-Forwarded-Prefix` records the stripped public prefix so GLA can verify
+# the request belongs to the configured public base. Because this header is trusted by GLA only when explicitly
+# enabled, gla-core must also set GLA_TRUST_FORWARDED_PREFIX=true and this edge must overwrite/sanitize any
+# client-supplied X-Forwarded-Prefix before proxying. WebSocket upgrades through /team-a/handoff/<id> are still
+# proxied by Caddy and authorized by GLA, not by Caddy.
+#
+# ⟨gla.example.com⟩ {
+# 	handle_path /team-a/* {
+# 		header_up X-Forwarded-Prefix /team-a
+# 		reverse_proxy ⟨127.0.0.1:13000⟩
+# 	}
+# 	# Access logs intentionally omitted; see the root variant note above.
+# }
+#
+# Existing/custom reverse proxies that preserve the prefix instead of stripping it are also supported by GLA
+# when GLA_PUBLIC_BASE_URL contains that same prefix; they should forward /team-a/enroll and /team-a/handoff/*
+# unchanged to the gateway and do not need GLA_TRUST_FORWARDED_PREFIX.
+
+# ── Optional authentik forward-auth wrapper (defense-in-depth only) ──────────────────────────────────────
+# Use this ONLY if the operator already wants authentik proxy/forward-auth as an outer browser-session guard.
+# It does not replace `GLA_AUTH_PROVIDER=authentik` or the `GLA_AUTHENTIK_*` OIDC config needed for delegated
+# GLA handoff step-up. Keep the outpost path public because authentik's outpost uses it; keep GLA's bridge,
+# noVNC/websockify, CDP, and host/container internal forwards private.
+#
+# ⟨gla.example.com⟩ {
+# 	handle /outpost.goauthentik.io/* {
+# 		reverse_proxy ⟨authentik-outpost:9000⟩
+# 	}
+#
+# 	forward_auth ⟨authentik-outpost:9000⟩ {
+# 		uri /outpost.goauthentik.io/auth/caddy
+# 		copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
+# 	}
+#
+# 	reverse_proxy ⟨127.0.0.1:13000⟩
+# }

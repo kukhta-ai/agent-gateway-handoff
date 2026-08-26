@@ -160,6 +160,46 @@ export type SessionGrantVerifyResult =
 
 /** The short default TTL for a handoff grant (kernel-contracts §2.1: a recipient-bound window is short-lived). */
 const DEFAULT_HANDOFF_GRANT_TTL_MS = 15 * 60 * 1000;
+const EMPTY_STALE_ROUTE_PROOF_REVOCATIONS: RevocationSnapshot = {
+  has: () => false,
+  version: "stale-route-proof",
+};
+
+/** Mutable string-set seam for small security caches such as spent enrollment nonces. */
+export interface StringSetStore {
+  has(value: string): boolean;
+  add(value: string): void;
+  delete(value: string): void;
+}
+
+/** Process-local default for {@link StringSetStore}. */
+export class InMemoryStringSetStore implements StringSetStore {
+  private readonly values = new Set<string>();
+
+  constructor(initial?: Iterable<string>) {
+    if (initial !== undefined) {
+      for (const value of initial) {
+        this.values.add(value);
+      }
+    }
+  }
+
+  has(value: string): boolean {
+    return this.values.has(value);
+  }
+
+  add(value: string): void {
+    this.values.add(value);
+  }
+
+  delete(value: string): void {
+    this.values.delete(value);
+  }
+
+  snapshot(): string[] {
+    return [...this.values].sort();
+  }
+}
 
 /**
  * Pull the single caveat of a kind out of a verified capability's caveat set, or undefined.
@@ -188,11 +228,15 @@ export class CapabilityService {
    * that service. A consumed nonce lands here after a successful enrollment; `verifyEnrollmentGrant` rejects any
    * grant whose nonce is already present. In-memory (process-local), mirroring the revocation cache's shape.
    */
-  private readonly spentNonces = new Set<string>();
+  private readonly spentNonces: StringSetStore;
 
   /** @param port The kernel capability port; defaults to the reference HMAC signer. */
-  constructor(port: CapabilityPort = new HmacCapabilitySigner()) {
+  constructor(
+    port: CapabilityPort = new HmacCapabilitySigner(),
+    opts: { spentNonces?: StringSetStore } = {},
+  ) {
     this.port = port;
+    this.spentNonces = opts.spentNonces ?? new InMemoryStringSetStore();
   }
 
   /**
@@ -368,6 +412,27 @@ export class CapabilityService {
     return this.verifySessionGrantWith(token, ctx);
   }
 
+  /**
+   * Prove a stale handoff token belongs to a route without authorizing it. This intentionally ignores TTL and
+   * revocation, but still authenticates the token, checks the route `scope`, asserts class=`session`, and reads the
+   * bound recipient from the signed grant. The gateway uses this only to classify an already-refused stale link, never
+   * to admit a request or WebSocket.
+   */
+  proveStaleSessionGrantRoute(
+    token: OpaqueToken,
+    args: { scopePath: string; now?: string },
+  ): SessionGrantVerifyResult {
+    const ctx: VerifyContext = {
+      now: "0000-01-01T00:00:00.000Z" as Iso8601,
+      scopePath: args.scopePath,
+      // Authenticate the recipient caveat by signature, then READ it from the grant (no presenter to compare).
+      bindRecipientFromCapability: true,
+      // Route proof is not authorization: ignore revocation so a revoked but route-bound token can be classified.
+      revocations: EMPTY_STALE_ROUTE_PROOF_REVOCATIONS,
+    };
+    return this.verifySessionGrantWith(token, ctx);
+  }
+
   /** The single verify-and-assert core for a handoff grant: ONE `port.verify`, then the class + recipient read. */
   private verifySessionGrantWith(token: OpaqueToken, ctx: VerifyContext): SessionGrantVerifyResult {
     const result = this.port.verify(token, ctx);
@@ -538,6 +603,25 @@ export class CapabilityService {
   }
 
   /**
+   * Verify a signed enrollment grant whose single-use nonce is already spent. Delegated browser redirects use this
+   * after `/enroll/options` has consumed the GLA grant before leaving the GLA origin; the gateway still separately
+   * tracks which consumed nonce is pending a provider callback, so an old successful grant is not accepted here.
+   */
+  verifyConsumedEnrollmentGrantToken(
+    token: OpaqueToken,
+    now: string = new Date().toISOString(),
+  ): EnrollmentGrantVerifyResult {
+    const verified = this.verifyEnrollmentGrantInner(token, undefined, now, "ignore-spent");
+    if (!verified.ok) {
+      return verified;
+    }
+    if (!this.spentNonces.has(verified.nonce)) {
+      return { ok: false, reason: "auth.revoked" };
+    }
+    return verified;
+  }
+
+  /**
    * Roll back an optimistic consume (un-spend a nonce) when the WebAuthn ceremony that followed
    * {@link tryConsumeEnrollmentGrantToken} failed — so a genuine ceremony failure leaves the grant retryable.
    * Idempotent; a no-op if the nonce was never spent.
@@ -571,6 +655,7 @@ export class CapabilityService {
     token: OpaqueToken,
     presenter: RecipientRef | undefined,
     now: string,
+    spentMode: "reject-spent" | "ignore-spent" = "reject-spent",
   ): EnrollmentGrantVerifyResult {
     const ctx: VerifyContext = {
       now: now as Iso8601,
@@ -604,7 +689,7 @@ export class CapabilityService {
       // A well-formed enrollment grant always carries a single-use nonce; its absence is a malformed grant.
       return { ok: false, reason: "auth.malformed" };
     }
-    if (this.spentNonces.has(nonce)) {
+    if (spentMode === "reject-spent" && this.spentNonces.has(nonce)) {
       // SINGLE-USE: this grant was already consumed by a prior successful enrollment — refuse the reuse.
       return { ok: false, reason: "auth.revoked" };
     }

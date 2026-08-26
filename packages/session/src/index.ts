@@ -26,6 +26,7 @@ import {
   type HandoffId,
   type HandoffState,
   type HandoffWindow,
+  type HumanEntrypointBinding,
   type Iso8601,
   type OpaqueToken,
   type RawCompletionSignal,
@@ -120,10 +121,10 @@ export interface CapsuleWorkerPort {
  */
 export interface SessionConnectorPort {
   attach(runtime: RuntimeHandle): Promise<AgentConnector>;
-  /** Bind a freshly-minted `secret_ref` to a capsule (by its CDP url) so `attach` stamps it. */
-  bindSecretRef(cdpUrl: string, secretRef: Ref<"secret-ref">): void;
+  /** Bind a freshly-minted `secret_ref` to a connector resource so `attach` stamps it. */
+  bindSecretRef(resourceId: string, secretRef: Ref<"secret-ref">): void;
   /** Drop a capsule's bound `secret_ref` (on teardown). Idempotent. */
-  unbindSecretRef(cdpUrl: string): void;
+  unbindSecretRef(resourceId: string): void;
 }
 
 /** The capsule descriptor in the provision view (docs/05 §4: `capsule:{id, template}`). */
@@ -137,7 +138,7 @@ export interface ProvisionResult {
   session_id: SessionId;
   state: SessionState;
   capsule: CapsuleView;
-  /** The agent's connector: `{type, cdp_url|path, secret_ref}` (agent-blind; GLA-024/025). */
+  /** The agent's connector DTO (adapter-owned public payload plus provider-neutral resource identity). */
   connector: AgentConnector;
 }
 
@@ -205,7 +206,7 @@ export interface HandoffRoutePort {
   program(
     window: Pick<HandoffWindow, "id" | "sessionId">,
     grantId: CapabilityId,
-    capsuleEntrypoint: string,
+    entrypoint: HumanEntrypointBinding,
     path?: string,
   ): Promise<Route>;
   /** Unmount a window's route (force-closing any live WS bound to it). Idempotent. */
@@ -214,11 +215,11 @@ export interface HandoffRoutePort {
 
 /**
  * The human-entrypoint seam the saga needs (a subset of the kernel HumanEntrypointPort): resolve the capsule's
- * internal human-entrypoint address (the noVNC endpoint) the route proxies to. Injected.
+ * provider-owned entrypoint binding. Injected.
  */
 export interface HandoffEntrypointPort {
-  /** Resolve the capsule's internal human-entrypoint address for a live runtime (the gateway proxies to it). */
-  open(runtime: RuntimeHandle): Promise<{ internalEndpoint: string }>;
+  /** Resolve the capsule's provider-neutral human-entrypoint binding for a live runtime. */
+  open(runtime: RuntimeHandle): Promise<HumanEntrypointBinding>;
 }
 
 /**
@@ -280,16 +281,12 @@ export interface CompletionPort {
 }
 
 /**
- * The agent-connector SUSPEND/RESUME seam (the S-2 agent-blind enforcement — GLA-040/041). The agent's CDP is
- * tunnelled through a GLA-side broker (`adapters/connector-cdp`), so `suspend` **truly SEVERS the agent's
- * already-open socket** the instant a recipient-bound window opens (it does NOT merely refuse a fresh attach) — the
- * agent has NO live channel onto the capsule while the human enters a secret (the agent is *waiting* — scenario-01
- * Phase 7). `resume` re-allows connections; the agent re-attaches onto the SAME brokered url and drives again (Phase
- * 8/9, the agent learns the step completed and itself resumes). Injected — the session names no connector adapter.
- * Both are idempotent + best-effort (a suspend/resume failure must not break the saga).
+ * The agent-connector SUSPEND/RESUME seam (the S-2 agent-blind enforcement — GLA-040/041). The connector provider
+ * owns how a live agent channel is severed; session only decides when the human window makes that channel forbidden.
+ * Both operations are idempotent + best-effort (a suspend/resume failure must not break the saga).
  */
 export interface ConnectorControlPort {
-  /** SEVER the agent connector for a session's live capsule (destroy its live socket — no channel while a window is open). */
+  /** SEVER the agent connector for a session's live capsule (no channel while a window is open). */
   suspend(sessionId: SessionId): void;
   /** RESUME the agent connector for a session's live capsule (the window closed; the agent re-attaches). */
   resume(sessionId: SessionId): void;
@@ -362,6 +359,27 @@ export interface SessionTeardownDeps {
   reconcile(sessionId: SessionId): Promise<void>;
 }
 
+export type ProvisionedSessionRecord = {
+  capsuleId: string;
+  connectorCapId: CapabilityId;
+  connectorResourceId: string;
+  connectorParentRef?: CapabilityId;
+};
+
+/** Restart-safe snapshot of durable session-owned state. Timers/watchers/live sockets are intentionally excluded. */
+export interface SessionServiceSnapshot {
+  sessions: Session[];
+  provisioned: Array<[SessionId, ProvisionedSessionRecord]>;
+  handoffs: HandoffWindow[];
+  completions: Array<[HandoffId, CompletionEnvelope]>;
+}
+
+/** Store seam for session aggregates and handoff windows. Concrete storage is wired by `app`. */
+export interface SessionStateStore {
+  load(): SessionServiceSnapshot;
+  save(snapshot: SessionServiceSnapshot): void;
+}
+
 /** Options for {@link SessionService}. */
 export interface SessionServiceOptions {
   clock?: SessionClock;
@@ -377,6 +395,13 @@ export interface SessionServiceOptions {
    * and transitions the session terminal, but reaps no capsule (a bare bridge has no worker).
    */
   teardown?: SessionTeardownDeps;
+  /** Restart-safe session aggregate store. Defaults to process-local memory. */
+  store?: SessionStateStore;
+  /**
+   * Recovery behavior for persisted open handoff windows. Default `"safe-close"` because routes/live sockets cannot
+   * be trusted after process restart unless a caller explicitly restores them.
+   */
+  recoverOpenHandoffs?: "safe-close" | "preserve";
 }
 
 /** The public handoff view the Bridge/CLI emit on `handoff open` (docs/05 §4 shape). */
@@ -444,17 +469,8 @@ export class SessionService {
   private readonly sessions = new Map<SessionId, Session>();
   private readonly provisionDeps: ProvisionDeps | undefined;
   private readonly handoffDeps: HandoffDeps | undefined;
-  /** Per-session provision bookkeeping the saga + re-emit + teardown need (capsule id, connector cap, cdp url). */
-  private readonly provisioned = new Map<
-    SessionId,
-    {
-      capsuleId: string;
-      connectorCapId: CapabilityId;
-      cdpUrl: string;
-      /** The connector cap's lineage parent (the task cap id), if minted as a child (Finding #1). */
-      connectorParentRef?: CapabilityId;
-    }
-  >();
+  /** Per-session provision bookkeeping the saga + re-emit + teardown need. */
+  private readonly provisioned = new Map<SessionId, ProvisionedSessionRecord>();
   /** The handoff windows, by id (the recipient-bound views onto sessions). The session aggregate stays the truth. */
   private readonly handoffs = new Map<HandoffId, HandoffWindow>();
   /** Per-window TTL timer + bound grant id (so close/cancel/expiry can clear the timer + revoke the grant). */
@@ -470,6 +486,8 @@ export class SessionService {
   private readonly completions = new Map<HandoffId, CompletionEnvelope>();
   /** Per-window detector-watch abort flag, so a window close stops its in-flight `watchForCompletion` cleanly. */
   private readonly watchAborts = new Map<HandoffId, { aborted: boolean }>();
+  private readonly store: SessionStateStore | undefined;
+  private readonly recovery: Promise<void>;
 
   constructor(opts: SessionServiceOptions = {}) {
     this.clock = opts.clock ?? SYSTEM_CLOCK;
@@ -478,6 +496,33 @@ export class SessionService {
     this.handoffDeps = opts.handoff;
     this.completionDeps = opts.completion;
     this.teardownDeps = opts.teardown;
+    this.store = opts.store;
+    const snapshot = opts.store?.load();
+    if (snapshot !== undefined) {
+      for (const session of snapshot.sessions) {
+        this.sessions.set(session.id, structuredClone(session));
+      }
+      for (const [id, record] of snapshot.provisioned) {
+        this.provisioned.set(id, structuredClone(record));
+      }
+      for (const window of snapshot.handoffs) {
+        this.handoffs.set(window.id, structuredClone(window));
+      }
+      for (const [id, completion] of snapshot.completions) {
+        this.completions.set(id, structuredClone(completion));
+      }
+      this.recovery =
+        (opts.recoverOpenHandoffs ?? "safe-close") === "safe-close"
+          ? this.safeCloseRecoveredOpenHandoffs()
+          : Promise.resolve();
+    } else {
+      this.recovery = Promise.resolve();
+    }
+  }
+
+  /** Resolves after restart reconciliation has converged, or rejects so the app can fail closed before binding public traffic. */
+  recoveryComplete(): Promise<void> {
+    return this.recovery;
   }
 
   /**
@@ -504,6 +549,7 @@ export class SessionService {
       session.recipient = recipient;
     }
     this.sessions.set(id, session);
+    this.persist();
     return session;
   }
 
@@ -538,7 +584,7 @@ export class SessionService {
    * Steps (each with its compensation, run in reverse of what succeeded):
    *   1. mint the agent-connector capability      → revoke it
    *   2. spawn the capsule via the worker          → teardown (stop + reap)
-   *   3. attach the connector (read CDP + stamp ref)→ (no external effect)
+   *   3. attach the connector (resolve resource + stamp ref)→ (no external effect)
    *   4. advance `issued → active`, pin the runtime → (terminal-on-success)
    *
    * @throws GlaErrorException — provisioning not wired (no ProvisionDeps), or a typed step failure
@@ -566,7 +612,7 @@ export class SessionService {
     // Track which compensations are owed as each forward step succeeds.
     let connectorCapId: CapabilityId | undefined;
     let spawned: SpawnedCapsuleHandles | undefined;
-    let boundCdpUrl: string | undefined;
+    let boundConnectorResourceId: string | undefined;
     try {
       // ── Step 1 — mint the agent-connector capability (agent-blind secret-ref ref; GLA-024/025).
       //    It DESCENDS from the session's task capability (parentRef) so revoking the task cascades to
@@ -581,13 +627,20 @@ export class SessionService {
       //    partial capsule down); we still compensate the connector cap below.
       spawned = await deps.worker.spawn(id, session.spec);
 
-      // ── Step 3 — attach the connector: read the CDP url, bind the agent-blind secret_ref, attach.
+      // ── Step 3 — attach the connector: resolve the provider resource, bind the agent-blind secret_ref, attach.
       const probe = await deps.connector.attach(spawned.runtime);
-      const cdpUrl = probe.cdp_url ?? "";
-      if (cdpUrl.length > 0) {
-        deps.connector.bindSecretRef(cdpUrl, minted.secretRef);
-        boundCdpUrl = cdpUrl;
+      const connectorResourceId = probe.resourceId;
+      if (connectorResourceId.length === 0) {
+        throw glaError(
+          "dependency.unavailable",
+          "connector provider returned no resource identity",
+          {
+            detail: { sessionId: id, connectorType: probe.type },
+          },
+        );
       }
+      deps.connector.bindSecretRef(connectorResourceId, minted.secretRef);
+      boundConnectorResourceId = connectorResourceId;
       // Re-attach now that the secret_ref is bound, so the returned connector carries it (agent-blind).
       const connector = await deps.connector.attach(spawned.runtime);
 
@@ -600,13 +653,14 @@ export class SessionService {
       const rec: {
         capsuleId: string;
         connectorCapId: CapabilityId;
-        cdpUrl: string;
+        connectorResourceId: string;
         connectorParentRef?: CapabilityId;
-      } = { capsuleId, connectorCapId, cdpUrl };
+      } = { capsuleId, connectorCapId, connectorResourceId };
       if (minted.parentRef !== undefined) {
         rec.connectorParentRef = minted.parentRef;
       }
       this.provisioned.set(id, rec);
+      this.persist();
 
       return {
         session_id: id,
@@ -622,9 +676,9 @@ export class SessionService {
       }
       // (b) unbind + revoke the connector capability if it was minted. (Capture into locals so the
       // narrowing survives into the compensation closures.)
-      const cdpToUnbind = boundCdpUrl;
-      if (cdpToUnbind !== undefined) {
-        safeSync(() => deps.connector.unbindSecretRef(cdpToUnbind));
+      const resourceToUnbind = boundConnectorResourceId;
+      if (resourceToUnbind !== undefined) {
+        safeSync(() => deps.connector.unbindSecretRef(resourceToUnbind));
       }
       const capToRevoke = connectorCapId;
       if (capToRevoke !== undefined) {
@@ -633,13 +687,14 @@ export class SessionService {
       // (c) set the session `failed` (the saga is contained to this step — session-service.md).
       session.state = sessionTransition(session.state, "failed");
       session.updatedAt = this.clock.now();
+      this.persist();
       throw asGlaError(e);
     }
   }
 
   /**
    * Re-emit the agent-connector for a LIVE capsule (docs/05 `session connector`, GLA-025) — so a crashed
-   * agent re-attaches its CDP client. Prints a `secret_ref`, never a raw secret. A session with **no
+   * agent re-attaches its connector. Prints a `secret_ref`, never a raw secret. A session with **no
    * live capsule** is a catchable **`state.conflict` (exit 7)**, NOT a crash (GLA-025 AC#4).
    *
    * @throws GlaErrorException `state.not_found` (unknown id → exit 5) or `state.conflict` (no live
@@ -780,7 +835,7 @@ export class SessionService {
       const route = await deps.route.program(
         { id: handoffId, sessionId },
         grant.grantId,
-        entry.internalEndpoint,
+        entry,
         grant.scopePath,
       );
       routeProgrammed = true;
@@ -808,6 +863,7 @@ export class SessionService {
       session.route = route;
       session.state = sessionTransition(session.state, "opened");
       session.updatedAt = this.clock.now();
+      this.persist();
 
       // ── Arm the TTL timer: on expiry, expire the window (revoke grant, force-close WS, unmount route).
       const timer = newTimer(ttlMs, () => {
@@ -816,9 +872,9 @@ export class SessionService {
       this.handoffTimers.set(handoffId, { clear: timer.clear, grantId: grant.grantId });
 
       // ── S-2 agent-blind (GLA-040/041): SEVER the agent connector now this recipient-bound window is open — the
-      //    agent's CDP is brokered through GLA, so this DESTROYS its already-open socket (not merely refuses a fresh
-      //    attach), leaving NO agent-readable channel while the human enters a secret (keystrokes reach the site,
-      //    never the agent). The connector RESUMES on close (the close path). Best-effort + idempotent.
+      //    the connector provider severs any already-open agent channel, leaving NO agent-readable path while the
+      //    human enters a secret (keystrokes reach the site, never the agent). The connector RESUMES on close.
+      //    Best-effort + idempotent.
       this.completionDeps?.connectorControl?.suspend(sessionId);
 
       // ── Slice 5 completion: start WATCHING the declared detector (the url-watcher) for this window. A matched,
@@ -910,7 +966,9 @@ export class SessionService {
       const session = w !== undefined ? this.sessions.get(w.sessionId) : undefined;
       if (session !== undefined) {
         session.completion = envelope;
+        session.updatedAt = this.clock.now();
       }
+      this.persist();
     }
     return this.closeHandoff(windowId, "completed");
   }
@@ -1106,6 +1164,7 @@ export class SessionService {
     // ── S-2 agent-blind: RESUME the agent connector now the window is closed (the agent itself resumes —
     //    scenario-01 Phase 8/9). Best-effort + idempotent; the capsule is still running for the agent to drive.
     this.completionDeps?.connectorControl?.resume(w.sessionId);
+    this.persist();
     return SessionService.handoffToView(w, this.completions.get(windowId));
   }
 
@@ -1184,6 +1243,7 @@ export class SessionService {
       }
       session.updatedAt = this.clock.now();
     }
+    this.persist();
     return session.state;
   }
 
@@ -1218,19 +1278,22 @@ export class SessionService {
 
   /**
    * The connector-teardown facts for a provisioned session — the connector capability id (to revoke)
-   * and the capsule's CDP url (to unbind its agent-blind `secret_ref`) — or `undefined` if the session
-   * was never provisioned (or is already torn down). The terminal cleanup path (the Cleanup Reconciler,
-   * wired at `app`) reads this so a normally-reaped session revokes its connector cap AND drops its
-   * `secret_ref→cdpUrl` binding (no residual) — symmetric with the saga's failure compensation.
+   * and the provider-owned connector resource id (to unbind its agent-blind `secret_ref`) — or `undefined`
+   * if the session was never provisioned (or is already torn down). The terminal cleanup path (the Cleanup
+   * Reconciler, wired at `app`) reads this so a normally-reaped session revokes its connector cap AND drops
+   * its resource binding (no residual) — symmetric with the saga's failure compensation.
    */
   connectorTeardownInfo(
     id: SessionId,
-  ): { connectorCapId: CapabilityId; cdpUrl: string } | undefined {
+  ): { connectorCapId: CapabilityId; connectorResourceId: string } | undefined {
     const rec = this.provisioned.get(id);
     if (rec === undefined) {
       return undefined;
     }
-    return { connectorCapId: rec.connectorCapId, cdpUrl: rec.cdpUrl };
+    return {
+      connectorCapId: rec.connectorCapId,
+      connectorResourceId: rec.connectorResourceId,
+    };
   }
 
   /**
@@ -1240,6 +1303,7 @@ export class SessionService {
    */
   clearProvisioned(id: SessionId): void {
     this.provisioned.delete(id);
+    this.persist();
   }
 
   /**
@@ -1268,6 +1332,66 @@ export class SessionService {
       template: s.spec.spec.template,
     };
   }
+
+  private async safeCloseRecoveredOpenHandoffs(): Promise<void> {
+    let changed = false;
+    const failed: HandoffId[] = [];
+    for (const w of this.handoffs.values()) {
+      if (w.state !== "open") {
+        continue;
+      }
+      const deps = this.handoffDeps;
+      if (deps !== undefined) {
+        const grantId = w.grantRef as unknown as CapabilityId;
+        const forceClosed = safeSyncResult(() => deps.capability.forceCloseGrant(grantId));
+        const revoked = await safeResult(() => deps.capability.revoke(grantId));
+        const unmounted = await safeResult(() => deps.route.unmount(w.id));
+        if (!forceClosed || !revoked || !unmounted) {
+          failed.push(w.id);
+          continue;
+        }
+      }
+      w.state = handoffTransition(w.state, "expired");
+      const session = this.sessions.get(w.sessionId);
+      if (session !== undefined && session.state === "opened") {
+        session.state = sessionTransition(session.state, "active");
+        if (session.grantTokenRef !== undefined) {
+          // biome-ignore lint/performance/noDelete: clearing an optional field under exactOptionalPropertyTypes
+          delete session.grantTokenRef;
+        }
+        if (session.route !== undefined) {
+          // biome-ignore lint/performance/noDelete: clearing an optional field under exactOptionalPropertyTypes
+          delete session.route;
+        }
+        session.updatedAt = this.clock.now();
+      }
+      changed = true;
+    }
+    if (changed) {
+      this.persist();
+    }
+    if (failed.length > 0) {
+      throw glaError("state.conflict", "recovered open handoffs could not be safely closed", {
+        detail: { handoffIds: failed },
+        retryable: true,
+      });
+    }
+  }
+
+  private persist(): void {
+    this.store?.save({
+      sessions: [...this.sessions.values()].map((session) => structuredClone(session)),
+      provisioned: [...this.provisioned.entries()].map(([id, record]) => [
+        id,
+        structuredClone(record),
+      ]),
+      handoffs: [...this.handoffs.values()].map((window) => structuredClone(window)),
+      completions: [...this.completions.entries()].map(([id, completion]) => [
+        id,
+        structuredClone(completion),
+      ]),
+    });
+  }
 }
 
 /** Run an async compensation step, swallowing errors (compensation must converge — GLA-023 AC#3). */
@@ -1279,12 +1403,32 @@ async function safe(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/** Run an async recovery step and report convergence without exposing secrets in thrown adapter errors. */
+async function safeResult(fn: () => Promise<void>): Promise<boolean> {
+  try {
+    await fn();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Run a sync compensation step, swallowing errors. */
 function safeSync(fn: () => void): void {
   try {
     fn();
   } catch {
     // see safe()
+  }
+}
+
+/** Run a sync recovery step and report convergence without exposing secrets in thrown adapter errors. */
+function safeSyncResult(fn: () => void): boolean {
+  try {
+    fn();
+    return true;
+  } catch {
+    return false;
   }
 }
 

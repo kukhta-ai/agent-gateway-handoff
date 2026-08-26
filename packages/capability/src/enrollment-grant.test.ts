@@ -137,6 +137,23 @@ describe("CapabilityService.tryConsumeEnrollmentGrantToken — atomic single-use
     if (!reuse.ok) expect(reuse.reason).toBe("auth.revoked");
   });
 
+  it("verifyConsumedEnrollmentGrantToken accepts only an already-spent signed enrollment grant", async () => {
+    const svc = new CapabilityService();
+    const { token, nonce } = await svc.mintEnrollmentGrant(recipient, FUTURE as Iso8601);
+
+    const fresh = svc.verifyConsumedEnrollmentGrantToken(token);
+    expect(fresh.ok).toBe(false);
+    if (!fresh.ok) expect(fresh.reason).toBe("auth.revoked");
+
+    expect(svc.tryConsumeEnrollmentGrantToken(token).ok).toBe(true);
+    const consumed = svc.verifyConsumedEnrollmentGrantToken(token);
+    expect(consumed.ok).toBe(true);
+    if (consumed.ok) {
+      expect(consumed.recipient).toBe(recipient);
+      expect(consumed.nonce).toBe(nonce);
+    }
+  });
+
   it("unspend ROLLS BACK a consume (a failed ceremony stays retryable with the same grant)", async () => {
     const svc = new CapabilityService();
     const { token, nonce } = await svc.mintEnrollmentGrant(recipient, FUTURE as Iso8601);

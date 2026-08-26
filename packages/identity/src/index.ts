@@ -22,11 +22,15 @@
 // here (GLA-013 AC#5; the import-boundary lint proves it).
 
 import {
+  type AuthAssuranceEvidence,
   type AuthChallenge,
+  type AuthProviderEnrollmentResult,
   type AuthProviderPort,
+  type AuthProviderVerificationResult,
   type AuthStrength,
   type EnrollmentChallenge,
   type IdentityPort,
+  type IdentityVerificationResult,
   type OpaqueToken,
   type RecipientBinding,
   type RecipientRef,
@@ -50,8 +54,46 @@ export interface EnrollmentRecord {
   credentialId: string;
   /** The strength established at enrollment (webauthn for a passkey). */
   authStrength: AuthStrength;
+  /** Provider-neutral assurance established at enrollment, when the provider reported it. */
+  authAssurance?: AuthAssuranceEvidence;
   /** ISO-8601 instant enrollment completed (for audit/observability). */
   enrolledAt: string;
+}
+
+/** Minimal enrollment-fact store seam. The app can supply a restart-safe implementation. */
+export interface EnrollmentStore {
+  get(userId: UserIdentity["id"]): EnrollmentRecord | undefined;
+  set(userId: UserIdentity["id"], record: EnrollmentRecord): void;
+  delete(userId: UserIdentity["id"]): void;
+}
+
+/** Process-local default for {@link EnrollmentStore}. */
+export class InMemoryEnrollmentStore implements EnrollmentStore {
+  private readonly records = new Map<UserIdentity["id"], EnrollmentRecord>();
+
+  constructor(initial?: Iterable<readonly [UserIdentity["id"], EnrollmentRecord]>) {
+    if (initial !== undefined) {
+      for (const [userId, record] of initial) {
+        this.records.set(userId, record);
+      }
+    }
+  }
+
+  get(userId: UserIdentity["id"]): EnrollmentRecord | undefined {
+    return this.records.get(userId);
+  }
+
+  set(userId: UserIdentity["id"], record: EnrollmentRecord): void {
+    this.records.set(userId, record);
+  }
+
+  delete(userId: UserIdentity["id"]): void {
+    this.records.delete(userId);
+  }
+
+  entries(): Array<[UserIdentity["id"], EnrollmentRecord]> {
+    return [...this.records.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }
 }
 
 /**
@@ -82,6 +124,8 @@ export interface IdentityServiceOptions {
    * clear `dependency.unavailable` rather than pretending.
    */
   authProvider?: AuthProviderPort;
+  /** Restart-safe store for identity-level enrollment facts. Defaults to process-local memory. */
+  enrollments?: EnrollmentStore;
 }
 
 /**
@@ -97,12 +141,13 @@ export class IdentityService implements IdentityPort {
    * ONLY after the provider returns a verified credential, so a failed ceremony leaves no half-bound identity:
    * GLA-013 AC#4). The provider holds the WebAuthn credential material; this holds the identity fact.
    */
-  private readonly enrollments = new Map<UserIdentity["id"], EnrollmentRecord>();
+  private readonly enrollments: EnrollmentStore;
 
   constructor(opts: IdentityServiceOptions = {}) {
     if (opts.authProvider !== undefined) {
       this.authProvider = opts.authProvider;
     }
+    this.enrollments = opts.enrollments ?? new InMemoryEnrollmentStore();
   }
 
   /**
@@ -168,7 +213,7 @@ export class IdentityService implements IdentityPort {
   async enrollComplete(recipient: RecipientRef, attestation: unknown): Promise<EnrollmentRecord> {
     const provider = this.requireProvider();
     const userId = deriveUserId(recipient);
-    let finished: { credentialId: string; authStrength: AuthStrength };
+    let finished: AuthProviderEnrollmentResult;
     try {
       finished = await provider.finishEnrollment(userId, attestation);
     } catch (e) {
@@ -182,6 +227,7 @@ export class IdentityService implements IdentityPort {
       userId,
       credentialId: finished.credentialId,
       authStrength: finished.authStrength,
+      ...(finished.assurance !== undefined ? { authAssurance: finished.assurance } : {}),
       enrolledAt: new Date().toISOString(),
     };
     // Commit the identity-level fact only now (after a verified ceremony). Idempotent re-enrollment REPLACES the
@@ -192,7 +238,7 @@ export class IdentityService implements IdentityPort {
 
   /** Is this recipient enrolled? (The outside-observable enrolled-vs-not fact; GLA-012 AC#6, GLA-013 AC#3.) */
   isEnrolled(recipient: RecipientRef): boolean {
-    return this.enrollments.has(deriveUserId(recipient));
+    return this.enrollments.get(deriveUserId(recipient)) !== undefined;
   }
 
   /** The recorded enrollment for a recipient (or undefined). For a later verify / audit; never a raw credential. */
@@ -231,15 +277,23 @@ export class IdentityService implements IdentityPort {
   async verifyAuthentication(
     recipient: RecipientRef,
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }> {
+  ): Promise<IdentityVerificationResult> {
     const userId = deriveUserId(recipient);
     if (!this.isEnrolled(recipient)) {
       // UN-ENROLLED ⇒ DENY: there is no credential to verify (identity-and-auth.md failure mode).
       return { ok: false, authStrength: "none", userId };
     }
     const provider = this.requireProvider();
-    const result = await provider.verifyAssertion(userId, assertion);
-    return { ok: result.ok, authStrength: result.authStrength, userId };
+    const result: AuthProviderVerificationResult = await provider.verifyAssertion(
+      userId,
+      assertion,
+    );
+    return {
+      ok: result.ok,
+      authStrength: result.authStrength,
+      userId,
+      ...(result.assurance !== undefined ? { assurance: result.assurance } : {}),
+    };
   }
 
   // ── Kernel IdentityPort `enroll`/`verify` (the formal port shape) ───────────────────────────────────
@@ -266,10 +320,7 @@ export class IdentityService implements IdentityPort {
    * Kernel {@link IdentityPort.verify}: verify a recipient at the edge — delegates to {@link verifyAuthentication}
    * (FACTS, not a decision). An un-enrolled recipient denies.
    */
-  async verify(
-    recipient: RecipientRef,
-    assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }> {
+  async verify(recipient: RecipientRef, assertion: unknown): Promise<IdentityVerificationResult> {
     return this.verifyAuthentication(recipient, assertion);
   }
 

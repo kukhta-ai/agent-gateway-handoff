@@ -25,6 +25,7 @@ import {
   type RuntimeHandle,
   decodeRuntimeHandle,
   glaError,
+  runtimeEndpoint,
 } from "@gla/kernel";
 import { CdpBroker } from "./cdp-broker.js";
 
@@ -35,16 +36,16 @@ export const CONNECTOR_CDP_RING = "adapter" as const;
 
 /**
  * A resolver the session saga supplies so `attach` can stamp the **agent-blind `secret_ref`** the
- * CapabilityService minted for this capsule (keyed by the capsule's *brokered* CDP url — the `cdp_url` the agent
- * holds and the session binds against). When no ref is registered, `attach` still returns the brokered url with the
+ * CapabilityService minted for this capsule (keyed by the provider-neutral connector resource id). When no ref is
+ * registered, `attach` still returns the brokered url with the
  * `secret_ref` omitted (the agent can drive; the ref is added once minted) — but the normal provision path registers
  * one first.
  */
-export type SecretRefResolver = (cdpUrl: string) => Ref<"secret-ref"> | undefined;
+export type SecretRefResolver = (resourceId: string) => Ref<"secret-ref"> | undefined;
 
 /** Options for {@link ConnectorCdpAdapter}. */
 export interface ConnectorCdpOptions {
-  /** Resolve the agent-blind `secret_ref` for a capsule by its brokered CDP url (set by the session saga). */
+  /** Resolve the agent-blind `secret_ref` for a capsule by its connector resource id (set by the session saga). */
   secretRefFor?: SecretRefResolver;
   /** The GLA-side CDP broker to tunnel through (defaults to a fresh broker started lazily on first `attach`). */
   broker?: CdpBroker;
@@ -66,9 +67,11 @@ export class ConnectorCdpAdapter implements AgentConnectorPort {
   private readonly broker: CdpBroker;
   /** Whether the broker has been started (lazily on first `attach`). */
   private brokerStarted = false;
-  /** A registry so the session saga can bind a freshly-minted secret_ref to a capsule's BROKERED CDP url. */
+  /** A registry so the session saga can bind a freshly-minted secret_ref to a connector resource id. */
   private readonly bound = new Map<string, Ref<"secret-ref">>();
-  /** Map a capsule's BROKERED CDP url → its broker capsule key (the real CDP url), so suspend/resume resolve it. */
+  /** Map a connector resource id → its broker capsule key, so suspend/resume resolve it. */
+  private readonly resourceToKey = new Map<string, string>();
+  /** Adapter-local compatibility map for callers that still probe by the brokered public url. */
   private readonly brokeredToKey = new Map<string, string>();
 
   constructor(opts: ConnectorCdpOptions = {}) {
@@ -92,9 +95,21 @@ export class ConnectorCdpAdapter implements AgentConnectorPort {
     this.broker.suspend(key);
   }
 
+  /** SUSPEND by provider-neutral connector resource id. */
+  suspendByResourceId(resourceId: string): void {
+    const key = this.resourceToKey.get(resourceId) ?? resourceId;
+    this.broker.suspend(key);
+  }
+
   /** RESUME the agent connector by its brokered CDP url — the window closed; the agent re-attaches onto the SAME url. */
   resumeByCdpUrl(cdpUrl: string): void {
     const key = this.brokeredToKey.get(cdpUrl) ?? cdpUrl;
+    this.broker.resume(key);
+  }
+
+  /** RESUME by provider-neutral connector resource id. */
+  resumeByResourceId(resourceId: string): void {
+    const key = this.resourceToKey.get(resourceId) ?? resourceId;
     this.broker.resume(key);
   }
 
@@ -111,27 +126,32 @@ export class ConnectorCdpAdapter implements AgentConnectorPort {
   }
 
   /**
-   * Bind a minted agent-blind `secret_ref` to a capsule (by its BROKERED CDP url), so the next `attach` stamps it on
+   * Bind a minted agent-blind `secret_ref` to a capsule (by connector resource id), so the next `attach` stamps it on
    * the connector JSON. Called by the session saga right after `mintConnector`. The ref is a capability reference,
    * never raw signing material.
    */
-  bindSecretRef(cdpUrl: string, secretRef: Ref<"secret-ref">): void {
-    this.bound.set(cdpUrl, secretRef);
+  bindSecretRef(resourceId: string, secretRef: Ref<"secret-ref">): void {
+    this.bound.set(resourceId, secretRef);
   }
 
   /** Drop a capsule's bound secret_ref (on teardown). Idempotent. Also unregisters it from the broker. */
-  unbindSecretRef(cdpUrl: string): void {
-    this.bound.delete(cdpUrl);
-    const key = this.brokeredToKey.get(cdpUrl);
+  unbindSecretRef(resourceId: string): void {
+    this.bound.delete(resourceId);
+    const key = this.resourceToKey.get(resourceId);
     if (key !== undefined) {
       this.broker.unregister(key);
-      this.brokeredToKey.delete(cdpUrl);
+      this.resourceToKey.delete(resourceId);
+      for (const [url, mappedKey] of [...this.brokeredToKey.entries()]) {
+        if (mappedKey === key) {
+          this.brokeredToKey.delete(url);
+        }
+      }
     }
   }
 
-  /** Is a secret_ref currently bound for this capsule's brokered CDP url? (For teardown-residual assertions.) */
-  hasBinding(cdpUrl: string): boolean {
-    return this.bound.has(cdpUrl);
+  /** Is a secret_ref currently bound for this connector resource? (For teardown-residual assertions.) */
+  hasBinding(resourceId: string): boolean {
+    return this.bound.has(resourceId);
   }
 
   /** Stop the broker (idempotent) — severs every live socket + closes the broker server. For shutdown/teardown. */
@@ -153,18 +173,30 @@ export class ConnectorCdpAdapter implements AgentConnectorPort {
    */
   async attach(handle: RuntimeHandle): Promise<AgentConnector> {
     const runtime = decodeRuntimeHandle(handle);
-    const realCdpUrl = typeof runtime?.cdpWebSocketUrl === "string" ? runtime.cdpWebSocketUrl : "";
-    if (realCdpUrl.length === 0) {
+    const endpoint = runtimeEndpoint(runtime, {
+      family: "agent-connector",
+      provider: "cdp",
+      transport: "websocket",
+    });
+    const realCdpUrl = typeof endpoint?.address === "string" ? endpoint.address : "";
+    if (endpoint === undefined || realCdpUrl.length === 0) {
       throw glaError("state.no_live_capsule", "no live capsule with a CDP endpoint to attach", {});
     }
     await this.ensureBroker();
     // Register the capsule with the broker (keyed by its real CDP url — stable + unique) and get the brokered url the
     // agent connects to. Idempotent: a re-attach of the same capsule returns the same brokered url.
-    const brokered = this.broker.register(realCdpUrl, realCdpUrl);
-    this.brokeredToKey.set(brokered.brokeredCdpUrl, realCdpUrl);
+    const resourceId = endpoint.resourceId;
+    const brokered = this.broker.register(resourceId, realCdpUrl);
+    this.resourceToKey.set(resourceId, resourceId);
+    this.brokeredToKey.set(brokered.brokeredCdpUrl, resourceId);
 
-    const connector: AgentConnector = { type: "cdp", cdp_url: brokered.brokeredCdpUrl };
-    const secretRef = this.secretRefFor(brokered.brokeredCdpUrl);
+    const connector: AgentConnector = {
+      type: "cdp",
+      resourceId,
+      provider: "cdp",
+      cdp_url: brokered.brokeredCdpUrl,
+    };
+    const secretRef = this.secretRefFor(resourceId);
     if (secretRef !== undefined) {
       // The agent-blind reference — a capability ref, NEVER a raw secret/signing key.
       connector.secret_ref = secretRef;

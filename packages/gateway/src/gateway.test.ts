@@ -13,6 +13,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AccessGateway, type EnrollmentGrantVerifyResult, type GatewayOptions } from "./index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
+const OUTER_PROXY_HEADERS = {
+  "x-outer-proxy-user": "recipient@example.com",
+  "x-outer-proxy-groups": "gla-users",
+  cookie: "outer_proxy_session=outer-session",
+};
 
 /** A fake verified operator-discharge capability (only the fields the gateway reads). */
 const fakeCap: Capability = {
@@ -35,12 +40,21 @@ class StubGrants {
   /** The reason an invalid token fails with (default malformed). */
   invalidReason: ErrorCode = "auth.malformed";
 
-  private verify(token: string): EnrollmentGrantVerifyResult {
+  private verify(
+    token: string,
+    spentMode: "reject-spent" | "require-spent" = "reject-spent",
+  ): EnrollmentGrantVerifyResult {
     const nonce = this.validTokens.get(token);
-    if (nonce === undefined || this.spent.includes(nonce)) {
+    if (nonce === undefined) {
       // A spent nonce mimics the reused-grant refusal (auth.revoked); an unknown token uses invalidReason.
-      const reason: ErrorCode = nonce !== undefined ? "auth.revoked" : this.invalidReason;
-      return { ok: false, reason };
+      return { ok: false, reason: this.invalidReason };
+    }
+    const isSpent = this.spent.includes(nonce);
+    if (spentMode === "reject-spent" && isSpent) {
+      return { ok: false, reason: "auth.revoked" };
+    }
+    if (spentMode === "require-spent" && !isSpent) {
+      return { ok: false, reason: "auth.revoked" };
     }
     return { ok: true, capability: fakeCap, recipient, nonce };
   }
@@ -56,6 +70,10 @@ class StubGrants {
     }
     return r;
   }
+  /** Verify a signed token whose nonce has already been spent by the delegated options step. */
+  verifyConsumedEnrollmentGrantToken(token: OpaqueToken): EnrollmentGrantVerifyResult {
+    return this.verify(token, "require-spent");
+  }
   /** Roll back an optimistic consume (un-spend) — called on a ceremony failure. */
   unspend(nonce: string): void {
     this.spent = this.spent.filter((n) => n !== nonce);
@@ -70,8 +88,17 @@ class StubIdentity {
   failComplete = false;
   /** An async delay inside enrollComplete (ms), so two requests are genuinely in-flight in the concurrency test. */
   completeDelayMs = 0;
+  /** An async delay inside enrollmentOptions (ms), so concurrent delegated begins can overlap. */
+  optionsDelayMs = 0;
+  redirectOptions = false;
   async enrollmentOptions(_recipient: RecipientRef, _discharge: OpaqueToken): Promise<unknown> {
     this.optionsCalls++;
+    if (this.optionsDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, this.optionsDelayMs));
+    }
+    if (this.redirectOptions) {
+      return { kind: "redirect", authorizeUrl: "https://idp.example/authorize?state=state-1" };
+    }
     return { challenge: "opts-challenge", rp: { id: "localhost" } };
   }
   async enrollComplete(_recipient: RecipientRef, _attestation: unknown): Promise<unknown> {
@@ -83,7 +110,9 @@ class StubIdentity {
       const err = Object.assign(new Error("attestation rejected"), { code: "auth.insufficient" });
       throw err;
     }
-    return { credentialId: "cred-1" };
+    // Return a faithful EnrollmentRecord shape (the real IdentityService always includes authStrength) so the
+    // /enroll/verify response echoes the recorded fact, not the fail-closed default.
+    return { credentialId: "cred-1", authStrength: "webauthn" };
   }
 }
 
@@ -91,8 +120,9 @@ class StubIdentity {
 async function bootGateway(
   grants: StubGrants,
   identity: StubIdentity,
+  extra: Partial<GatewayOptions> = {},
 ): Promise<{ base: string; close: () => Promise<void>; gateway: AccessGateway }> {
-  const opts: GatewayOptions = { grants, identity, host: "127.0.0.1", port: 0 };
+  const opts: GatewayOptions = { grants, identity, host: "127.0.0.1", port: 0, ...extra };
   const gateway = new AccessGateway(opts);
   const { host, port } = await gateway.listen();
   return { base: `http://${host}:${port}`, close: () => gateway.close(), gateway };
@@ -106,6 +136,16 @@ afterEach(async () => {
   }
 });
 
+function headerText(headers: Headers): string {
+  const lines: string[] = [];
+  headers.forEach((value, key) => lines.push(`${key}: ${value}`));
+  return lines.join("\n");
+}
+
+function cookiePair(setCookie: string, name: string): string {
+  return setCookie.match(new RegExp(`${name}=[^;,]+`))?.[0] ?? "";
+}
+
 describe("Access Gateway — GET /enroll grant enforcement (GLA-012 AC#2)", () => {
   it("serves the enrollment page on a VALID grant (HTML + the WebAuthn ceremony)", async () => {
     const { base, close } = await bootGateway(new StubGrants(), new StubIdentity());
@@ -113,9 +153,51 @@ describe("Access Gateway — GET /enroll grant enforcement (GLA-012 AC#2)", () =
     const res = await fetch(`${base}/enroll?grant=valid`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     const html = await res.text();
-    expect(html).toMatch(/Register your passkey/);
+    expect(html).toMatch(/Complete enrollment/);
+    expect(html).toMatch(/Start enrollment/);
     expect(html).toMatch(/navigator\.credentials\.create/);
+    expect(html).toContain('new URLSearchParams(location.search).has("grant")');
+    expect(html).toContain('history.replaceState(null, "", location.pathname)');
+  });
+
+  it("keeps the raw enrollment grant out of public HTML and response headers after bootstrap", async () => {
+    const canary = "enroll-grant-canary-089";
+    const grants = new StubGrants();
+    grants.validTokens.set(canary, "nonce-canary-089");
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const page = await fetch(`${base}/enroll?grant=${encodeURIComponent(canary)}`);
+    expect(page.status).toBe(200);
+    const pageHeaders = headerText(page.headers);
+    const html = await page.text();
+    expect(pageHeaders).not.toContain(canary);
+    expect(html).not.toContain(canary);
+    const bootstrapCookie = cookiePair(page.headers.get("set-cookie") ?? "", "gla_enroll_boot");
+    expect(bootstrapCookie).toMatch(/^gla_enroll_boot=/);
+
+    const options = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: bootstrapCookie },
+      body: JSON.stringify({}),
+    });
+    expect(options.status).toBe(200);
+    expect(headerText(options.headers)).not.toContain(canary);
+    expect(await options.text()).not.toContain(canary);
+
+    const verify = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: bootstrapCookie },
+      body: JSON.stringify({ attestation: { fake: true } }),
+    });
+    expect(verify.status).toBe(200);
+    expect(headerText(verify.headers)).not.toContain(canary);
+    expect(await verify.text()).not.toContain(canary);
   });
 
   it("ABSENT grant → 400, the refusal page, no enrollment work", async () => {
@@ -155,6 +237,73 @@ describe("Access Gateway — GET /enroll grant enforcement (GLA-012 AC#2)", () =
     const res = await fetch(`${base}/enroll?grant=wrongrecipient`);
     expect(res.status).toBe(403);
   });
+
+  it("serves enrollment under a configured public base path and does not publish an unprefixed alias", async () => {
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(new StubGrants(), identity, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+
+    const prefixed = await fetch(`${base}/gla/enroll?grant=valid`);
+    expect(prefixed.status).toBe(200);
+    const html = await prefixed.text();
+    expect(html).toContain('"options":"/gla/enroll/options"');
+    expect(html).toContain('"verify":"/gla/enroll/verify"');
+
+    const unprefixed = await fetch(`${base}/enroll?grant=valid`);
+    expect(unprefixed.status).toBe(404);
+  });
+
+  it("does not trust spoofed X-Forwarded-Prefix unless strip-prefix mode is explicitly enabled", async () => {
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(new StubGrants(), identity, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+
+    const spoofed = await fetch(`${base}/enroll?grant=valid`, {
+      headers: { "x-forwarded-prefix": "/gla" },
+    });
+    expect(spoofed.status).toBe(404);
+  });
+
+  it("accepts strip-prefix proxies only when explicitly trusted and X-Forwarded-Prefix matches", async () => {
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(new StubGrants(), identity, {
+      publicBaseUrl: "https://gla.example/gla/",
+      trustForwardedPrefix: true,
+    });
+    closers.push(close);
+
+    const stripped = await fetch(`${base}/enroll?grant=valid`, {
+      headers: { "x-forwarded-prefix": "/gla" },
+    });
+    expect(stripped.status).toBe(200);
+
+    const wrongPrefix = await fetch(`${base}/enroll?grant=valid`, {
+      headers: { "x-forwarded-prefix": "/other" },
+    });
+    expect(wrongPrefix.status).toBe(404);
+  });
+
+  it("serves the delegated-auth callback landing page under the configured public base path", async () => {
+    const { base, close } = await bootGateway(new StubGrants(), new StubIdentity(), {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+
+    const res = await fetch(`${base}/gla/auth/callback?code=c&state=s`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("Completing sign-in");
+    expect(html).toContain('"enrollVerify":"/gla/enroll/verify"');
+    expect(html).toContain('"handoffVerify":"/gla/handoff/auth/verify"');
+    expect(html).not.toContain("grant=secret");
+
+    const rootAlias = await fetch(`${base}/auth/callback?code=c&state=s`);
+    expect(rootAlias.status).toBe(404);
+  });
 });
 
 describe("Access Gateway — POST /enroll/options + /enroll/verify grant enforcement", () => {
@@ -187,9 +336,172 @@ describe("Access Gateway — POST /enroll/options + /enroll/verify grant enforce
     expect(body.challenge).toBe("opts-challenge");
     expect(identity.optionsCalls).toBe(1);
   });
+
+  it("delegated redirect options consume the GLA grant before the browser leaves this origin", async () => {
+    const identity = new StubIdentity();
+    identity.redirectOptions = true;
+    identity.optionsDelayMs = 50;
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const res = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { kind?: string; authorizeUrl?: string };
+    expect(body.kind).toBe("redirect");
+    expect(body.authorizeUrl).toMatch(/^https:\/\/idp\.example\//);
+    expect(grants.spent).toContain("nonce-1");
+
+    const abandonedReuse = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(abandonedReuse.status).toBe(403);
+    expect(identity.completeCalls).toBe(0);
+  });
+
+  it("concurrent delegated options calls return at most one provider redirect URL", async () => {
+    const identity = new StubIdentity();
+    identity.redirectOptions = true;
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const post = () =>
+      fetch(`${base}/enroll/options`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grant: "valid" }),
+      });
+    const [a, b] = await Promise.all([post(), post()]);
+    const responses = await Promise.all(
+      [a, b].map(async (r) => ({ status: r.status, text: await r.text() })),
+    );
+    const ok = responses.filter((r) => r.status === 200);
+    const refused = responses.filter((r) => r.status === 403);
+    expect(ok.length).toBe(1);
+    expect(refused.length).toBe(1);
+    expect(JSON.parse(ok[0]?.text ?? "{}").authorizeUrl).toMatch(/^https:\/\/idp\.example\//);
+    expect(refused[0]?.text).not.toContain("idp.example");
+    expect(grants.spent).toEqual(["nonce-1"]);
+  });
+
+  it("delegated callback can complete only once against the pending consumed grant", async () => {
+    const identity = new StubIdentity();
+    identity.redirectOptions = true;
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const options = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(options.status).toBe(200);
+
+    const verify = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", attestation: { code: "code-1", state: "state-1" } }),
+    });
+    expect(verify.status).toBe(200);
+    expect(identity.completeCalls).toBe(1);
+
+    const replay = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", attestation: { code: "code-1", state: "state-1" } }),
+    });
+    expect(replay.status).toBe(403);
+    expect(identity.completeCalls).toBe(1);
+  });
+
+  it("failed delegated callback leaves the GLA grant spent and unreusable", async () => {
+    const identity = new StubIdentity();
+    identity.redirectOptions = true;
+    identity.failComplete = true;
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity);
+    closers.push(close);
+
+    const options = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(options.status).toBe(200);
+
+    const verify = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", attestation: { code: "bad-code", state: "state-1" } }),
+    });
+    expect(verify.status).toBe(403);
+    expect(grants.spent).toContain("nonce-1");
+
+    identity.failComplete = false;
+    const retryOptions = await fetch(`${base}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(retryOptions.status).toBe(403);
+  });
+
+  it("POST /enroll/options and /enroll/verify work through a configured public base path", async () => {
+    const identity = new StubIdentity();
+    const grants = new StubGrants();
+    const { base, close } = await bootGateway(grants, identity, {
+      publicBaseUrl: "https://gla.example/gla/",
+    });
+    closers.push(close);
+
+    const options = await fetch(`${base}/gla/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid" }),
+    });
+    expect(options.status).toBe(200);
+
+    const verify = await fetch(`${base}/gla/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant: "valid", attestation: { fake: "attestation" } }),
+    });
+    expect(verify.status).toBe(200);
+    expect(identity.optionsCalls).toBe(1);
+    expect(identity.completeCalls).toBe(1);
+    expect(grants.spent).toContain("nonce-1");
+  });
 });
 
 describe("Access Gateway — NO BYPASS of grant verification (GLA-012 AC#2)", () => {
+  it("outer proxy headers/cookies do not replace the GLA enrollment grant", async () => {
+    const identity = new StubIdentity();
+    const { base, close } = await bootGateway(new StubGrants(), identity);
+    closers.push(close);
+
+    const page = await fetch(`${base}/enroll`, {
+      headers: OUTER_PROXY_HEADERS,
+    });
+    expect(page.status).toBe(400);
+
+    const verify = await fetch(`${base}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...OUTER_PROXY_HEADERS },
+      body: JSON.stringify({ attestation: { fake: "attestation" } }),
+    });
+    expect(verify.status).toBe(401);
+    expect(identity.optionsCalls).toBe(0);
+    expect(identity.completeCalls).toBe(0);
+  });
+
   it("a direct POST /enroll/verify WITHOUT a grant is refused (401), stores nothing", async () => {
     const identity = new StubIdentity();
     const { base, close } = await bootGateway(new StubGrants(), identity);

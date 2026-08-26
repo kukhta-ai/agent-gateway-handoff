@@ -14,10 +14,22 @@
 
 // Concrete adapters (the outward side) — importable ONLY from this composition root:
 import { AdmissionService } from "@gla/admission";
-import { AUTH_WEBAUTHN_MODULE, AuthWebauthnProvider } from "@gla/auth-webauthn";
+import {
+  AUTH_AUTHENTIK_MODULE,
+  type AuthAuthentikOptions,
+  AuthAuthentikProvider,
+  type BoundSubject,
+  type PendingAttempt,
+} from "@gla/auth-authentik";
+import {
+  AUTH_WEBAUTHN_MODULE,
+  AuthWebauthnProvider,
+  type PendingChallenge,
+  type StoredCredential,
+} from "@gla/auth-webauthn";
 import { AgentBridge } from "@gla/bridge";
 import { CapabilityService } from "@gla/capability";
-import { CatalogService, toAdmissionCatalog } from "@gla/catalog";
+import { CatalogService, type DependencyBinding, toAdmissionCatalog } from "@gla/catalog";
 import {
   CHANNEL_CLI_MODULE,
   ChannelCli,
@@ -27,30 +39,43 @@ import {
 import { CompletionService, type DetectorContract } from "@gla/completion";
 import { CONNECTOR_CDP_MODULE, ConnectorCdpAdapter } from "@gla/connector-cdp";
 import { DETECTOR_URL_MODULE, DETECTOR_URL_NAME, DetectorUrlAdapter } from "@gla/detector-url";
-import { EntrypointNovncAdapter } from "@gla/entrypoint-novnc";
+import { EntrypointNovncAdapter, novncClientAssetMounts } from "@gla/entrypoint-novnc";
 import { AccessGateway } from "@gla/gateway";
-import { IdentityService } from "@gla/identity";
+import { type EnrollmentRecord, IdentityService } from "@gla/identity";
 // Core / core-adjacent ports (the inward side of the seam):
 import {
+  type AuthAssuranceProfile,
+  type AuthProviderPort,
   type CapabilityId,
   HmacCapabilitySigner,
   KERNEL_MODULE,
   type OpaqueToken,
   type RecipientRef,
+  authAssurancePolicyFromProfile,
+  authAssurancePolicyFromRequiredAuthStrength,
+  redactOperatorText,
 } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
 import { CedarPolicyAdapter, MVP_POLICY_SET, POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
 import { RouteController } from "@gla/route";
-import { type CompletionDeps, type HandoffDeps, SessionService } from "@gla/session";
-import { TaskService } from "@gla/task";
+import {
+  type CompletionDeps,
+  type HandoffDeps,
+  SessionService,
+  type SessionServiceOptions,
+  type SessionServiceSnapshot,
+} from "@gla/session";
+import { TaskService, type TaskServiceSnapshot } from "@gla/task";
 import {
   CapsuleLifecycleManager,
+  type CapsuleRecord,
   CleanupReconciler,
   SpawnerRegistry,
   WorkspaceManager,
   attachConnector,
 } from "@gla/worker";
 import { WORKSPACE_PROFILE_MODULE, WorkspaceProfileAdapter } from "@gla/workspace-profile";
+import { DaemonStateRoot } from "./daemon-state.js";
 import { type DaemonHandle, runServe, serve } from "./daemon.js";
 
 /** The MVP default wiring (baseline §5): which adapter is bound to each kernel port. */
@@ -97,10 +122,152 @@ export function createApp(): App {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth-provider SELECTION (authentik-integration.md §1/§7, GLA-068 AC#1/#6)
+//
+// The default IdP is the in-tree WebAuthn provider; authentik is an OPT-IN alternative behind the SAME
+// kernel `AuthProviderPort`. Selecting it changes NO gateway/core code — only THIS composition root picks
+// a different adapter. Both implement `AuthProviderPort`, so the `new IdentityService({ authProvider })`
+// line downstream is identical (§1). `app` is the only package the boundary lint lets import either adapter.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Which auth provider to wire behind the kernel `AuthProviderPort`. Default `"webauthn"` (the in-tree default). */
+export type AuthProviderKind = "webauthn" | "authentik";
+
+/**
+ * The authentik OIDC config (read ONLY when the provider is `"authentik"`; doc §7). Sourced from the
+ * `DependencyBinding.connection` GLA-074 writes and/or env (`GLA_AUTHENTIK_*`). The `clientSecret` is
+ * `sensitive` — never logged. `rpID`/`expectedOrigin` (the WebAuthn-path config) are unused under authentik
+ * (the ceremony runs AT authentik), so they are not part of this shape.
+ */
+export interface AuthentikConfig {
+  /** The authentik OIDC issuer (e.g. `https://idp.example/application/o/gla/`) — discovers /authorize, /token, JWKS. */
+  issuerUrl: string;
+  /** The OIDC client/application id (the id_token audience). */
+  clientId: string;
+  /** The confidential-client secret for the token exchange (`sensitive` — never logged). */
+  clientSecret: string;
+  /** The adapter callback URL (the OIDC `redirect_uri`), fronted by the same host Caddy. */
+  redirectUri: string;
+  /** Optional OIDC scopes (space-separated). Default `"openid profile"`. */
+  scopes?: string;
+}
+
+/**
+ * The provider-selection inputs shared by the provisioning + enrollment composition (doc §7). When
+ * `authProvider` is unset or `"webauthn"`, the WebAuthn path is taken byte-for-byte as before; when
+ * `"authentik"`, the {@link AuthentikConfig} is required and the delegated adapter is wired instead.
+ */
+export interface AuthProviderSelection {
+  /** The selected provider. Default `"webauthn"`. */
+  authProvider?: AuthProviderKind;
+  /** The authentik OIDC config — REQUIRED when `authProvider === "authentik"`, else ignored. */
+  authentik?: AuthentikConfig;
+}
+
+interface AuthProviderStateStores {
+  webauthnCredentials?: {
+    get(key: string): StoredCredential | undefined;
+    set(key: string, value: StoredCredential): void;
+    delete(key: string): void;
+  };
+  webauthnChallenges?: {
+    get(key: string): PendingChallenge | undefined;
+    set(key: string, value: PendingChallenge): void;
+    delete(key: string): void;
+  };
+  authentikSubjects?: {
+    get(key: string): BoundSubject | undefined;
+    set(key: string, value: BoundSubject): void;
+    delete(key: string): void;
+  };
+  authentikAttempts?: {
+    get(key: string): PendingAttempt | undefined;
+    set(key: string, value: PendingAttempt): void;
+    delete(key: string): void;
+  };
+}
+
+/**
+ * Build the chosen {@link AuthProviderPort} adapter (the single provider-selection seam, doc §1/§7).
+ * `"webauthn"`/unset → today's `new AuthWebauthnProvider(...)` (UNCHANGED); `"authentik"` → a
+ * `new AuthAuthentikProvider(...)` from the OIDC config. Returns the port + the module marker for the
+ * wiring record (`AUTH_WEBAUTHN_MODULE` vs `AUTH_AUTHENTIK_MODULE`). Both satisfy `AuthProviderPort`, so
+ * the caller injects the result into `IdentityService` identically regardless of the choice.
+ *
+ * @throws Error if `authentik` is selected without its OIDC config (fail loud, not a silent default).
+ */
+function buildAuthProvider(
+  selection: AuthProviderSelection,
+  webauthn: { rpID: string; rpName: string; expectedOrigin: string | string[] },
+  stores: AuthProviderStateStores = {},
+): { provider: AuthProviderPort; module: string } {
+  if (selection.authProvider === "authentik") {
+    if (selection.authentik === undefined) {
+      throw new Error(
+        "GLA_AUTH_PROVIDER=authentik requires the authentik OIDC config (issuer/client id/secret/redirect uri)",
+      );
+    }
+    const cfg = selection.authentik;
+    const opts: AuthAuthentikOptions = {
+      issuerUrl: cfg.issuerUrl,
+      clientId: cfg.clientId,
+      clientSecret: cfg.clientSecret,
+      redirectUri: cfg.redirectUri,
+      ...(cfg.scopes !== undefined ? { scopes: cfg.scopes } : {}),
+      ...(stores.authentikSubjects !== undefined ? { subjects: stores.authentikSubjects } : {}),
+      ...(stores.authentikAttempts !== undefined ? { attempts: stores.authentikAttempts } : {}),
+    };
+    return { provider: new AuthAuthentikProvider(opts), module: AUTH_AUTHENTIK_MODULE };
+  }
+  // Default / "webauthn": the in-tree provider — constructed EXACTLY as before (the unchanged default path).
+  return {
+    provider: new AuthWebauthnProvider({
+      rpID: webauthn.rpID,
+      rpName: webauthn.rpName,
+      expectedOrigin: webauthn.expectedOrigin,
+      ...(stores.webauthnCredentials !== undefined
+        ? { credentials: stores.webauthnCredentials }
+        : {}),
+      ...(stores.webauthnChallenges !== undefined ? { challenges: stores.webauthnChallenges } : {}),
+    }),
+    module: AUTH_WEBAUTHN_MODULE,
+  };
+}
+
+function providerStores(state: DaemonStateRoot | undefined): AuthProviderStateStores {
+  if (state === undefined) {
+    return {};
+  }
+  return {
+    webauthnCredentials: state.kv<StoredCredential>("auth.webauthn.credentials"),
+    webauthnChallenges: state.kv<PendingChallenge>("auth.webauthn.challenges"),
+    authentikSubjects: state.kv<BoundSubject>("auth.authentik.subjects"),
+    authentikAttempts: state.kv<PendingAttempt>("auth.authentik.attempts"),
+  };
+}
+
+function stateSlot<T>(
+  state: DaemonStateRoot | undefined,
+  kind: string,
+  fallback: T,
+): { load(): T; save(snapshot: T): void } | undefined {
+  if (state === undefined) {
+    return undefined;
+  }
+  const file = state.file<T>(kind, fallback);
+  return {
+    load: () => file.read(),
+    save: (snapshot) => file.write(snapshot),
+  };
+}
+
 /** Options for {@link createBridge}: an override Cedar policy set (defaults to the MVP set). */
 export interface CreateBridgeOptions {
   /** The Cedar policy set source (defaults to {@link MVP_POLICY_SET}). */
   policySet?: string;
+  /** Structured WPM dependency binding receipts. Absent means host-touching catalog providers are unavailable. */
+  dependencyBindings?: DependencyBinding[];
 }
 
 /**
@@ -109,7 +276,9 @@ export interface CreateBridgeOptions {
  * `session create` dispatches a Session in `issued` — NO spawn (provisioning is `createProvisioningBridge`).
  */
 export function createBridge(opts: CreateBridgeOptions = {}): AgentBridge {
-  const catalog = new CatalogService();
+  const catalog = new CatalogService(
+    opts.dependencyBindings !== undefined ? { dependencyBindings: opts.dependencyBindings } : {},
+  );
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );
@@ -126,6 +295,11 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
   launcherMode?: "auto" | "full" | "headless";
   /** Override the workspace root (tests pass a scratch dir under which profile dirs are created). */
   workspaceRoot?: string;
+  /**
+   * Restart-safe daemon state root. When set, security-critical daemon facts are encrypted, authenticated, and
+   * stored here with 0700/0600 permissions before the public gateway is bound.
+   */
+  stateRoot?: string;
   /** Override the Chromium executable path (default: the cached browser via playwright-core). */
   chromiumPath?: string;
   /** Override the CDP start timeout, ms. */
@@ -137,14 +311,27 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
    * gateway runs the step-up against the enrolled credential).
    */
   handoff?: {
-    /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `"localhost"`. */
+    /**
+     * The auth provider to wire behind the kernel `AuthProviderPort` (doc §1/§7). Default `"webauthn"` (the
+     * in-tree default — the line below is UNCHANGED). `"authentik"` selects the delegated OIDC adapter and
+     * requires {@link AuthProviderSelection.authentik}. The `IdentityService` injection is identical either way.
+     */
+    authProvider?: AuthProviderKind;
+    /** The authentik OIDC config — REQUIRED when `authProvider === "authentik"`, else ignored (doc §7). */
+    authentik?: AuthentikConfig;
+    /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `"localhost"`. WebAuthn-path config. */
     rpID?: string;
-    /** The human-visible RP name. Default `"GLA"`. */
+    /** The human-visible RP name. Default `"GLA"`. WebAuthn-path config. */
     rpName?: string;
-    /** The expected page ORIGIN(s) the step-up ceremony runs on (scheme+host+port). */
+    /** The expected page ORIGIN(s) the step-up ceremony runs on (scheme+host+port). WebAuthn-path config. */
     expectedOrigin: string | string[];
     /** The public base URL handoff links are built against, e.g. `http://localhost:3000`. */
     publicBaseUrl: string;
+    /**
+     * Trust `X-Forwarded-Prefix` for strip-prefix reverse proxies. Enable only behind an edge that sanitizes that
+     * header; prefix-preserving proxying does not need it.
+     */
+    trustForwardedPrefix?: boolean;
     /** Gateway bind host. Default `0.0.0.0` (hermes-1); tests pass `127.0.0.1`. */
     host?: string;
     /** Gateway bind port. Default `3000`; tests pass `0` for an ephemeral port. */
@@ -157,18 +344,28 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
      * Defaults to the gateway default (≈15m, the window TTL). Set 0 to disable reuse (always re-prompt).
      */
     authReuseTtlMs?: number;
+    /**
+     * Provider-neutral assurance policy profile for handoff step-up. Default `"phishing-resistant"` requires
+     * passkey-grade evidence; `"password-permitted"` explicitly admits password-grade evidence.
+     */
+    authAssuranceProfile?: AuthAssuranceProfile;
+    /**
+     * Deprecated compatibility input. Prefer {@link authAssuranceProfile}. `"password"` maps to
+     * `"password-permitted"`; `"webauthn"` maps to `"phishing-resistant"`.
+     */
+    requiredAuthStrength?: "password" | "webauthn";
     /** Where the channel writes the recipient-bound handoff link (defaults to stdout). */
     deliverySink?: DeliverySink;
     /** A shared identity service (so enrollment + handoff use the SAME enrolled credential store). */
     identity?: IdentityService;
     /**
-     * Override the human-entrypoint resolver the open-window saga proxies to (the capsule's noVNC address). Defaults
-     * to the real noVNC adapter (full mode only — headless dev has no X stack). Tests inject a stub returning a stub
-     * WS upstream so the handoff path runs end-to-end in headless dev (the same posture as the Slice-4b test); the
-     * REAL noVNC proxy is gated for hermes-1.
+     * Override the human-entrypoint resolver the open-window saga exposes. Tests inject stubs with different
+     * provider/client/transport bindings; the real adapter supplies the current live-view transport in full mode.
      */
     entrypoint?: {
-      open(handle: import("@gla/kernel").RuntimeHandle): Promise<{ internalEndpoint: string }>;
+      open(
+        handle: import("@gla/kernel").RuntimeHandle,
+      ): Promise<import("@gla/kernel").HumanEntrypointBinding>;
     };
     /**
      * Wire the Slice-5 COMPLETION-CLOSE pipeline (so a validated done-signal RETURNS to `handoff wait` and CLOSES
@@ -201,6 +398,10 @@ export interface CreateProvisioningBridgeOptions extends CreateBridgeOptions {
 
 /** A provisioning bridge plus the worker handles a caller can use to reconcile/teardown (tests, shutdown). */
 export interface ProvisioningStack {
+  /** Resolves after restart recovery has converged; public listeners must not bind before this is settled. */
+  ready: Promise<void>;
+  /** Idempotently closes runtime handles owned by this stack, including the daemon state-root lock. */
+  close(): Promise<void>;
   bridge: AgentBridge;
   /** The capsule lifecycle manager (spawn/health/stop tracking). */
   lifecycle: CapsuleLifecycleManager;
@@ -208,7 +409,7 @@ export interface ProvisioningStack {
   reconciler: CleanupReconciler;
   /** The spawner registry (so a test can register a second launcher — the pluggability proof). */
   registry: SpawnerRegistry;
-  /** The noVNC human-entrypoint adapter (full mode: a ws endpoint; headless: reports unavailable). */
+  /** The default human-entrypoint adapter. */
   entrypoint: EntrypointNovncAdapter;
   /** The SHARED capability service (one signer for the anchor + task + connector caps). */
   capability: CapabilityService;
@@ -216,7 +417,7 @@ export interface ProvisioningStack {
   task: TaskService;
   /** The provision-capable session service (so a caller can observe connector lineage / teardown). */
   session: SessionService;
-  /** The CDP connector adapter (so a caller can observe its secret_ref→cdpUrl binding map). */
+  /** The default agent connector adapter. */
   connector: ConnectorCdpAdapter;
   /** The Access Gateway (Slice 4b: the sole public entry; serves the handoff step-up + proxies the WS). Present only when handoff is wired. */
   gateway?: AccessGateway;
@@ -225,10 +426,16 @@ export interface ProvisioningStack {
   /** The identity service (Slice 4b: enrolled-credential store the gateway steps up against). Present only when handoff is wired. */
   identity?: IdentityService;
   /**
+   * The auth module actually wired behind the kernel `AuthProviderPort` (the wiring record, doc §7):
+   * `AUTH_WEBAUTHN_MODULE` (the in-tree default) or `AUTH_AUTHENTIK_MODULE` (the opt-in delegated provider).
+   * Lets a caller/test observe WHICH provider was selected without reaching into the identity service.
+   */
+  authModule: string;
+  /**
    * The OPERATOR enrollment action (Phase E; present only when handoff is wired, since the gateway then fronts
    * enrollment too). Mint a single-use operator-discharge grant bound to the recipient + deliver the enrollment
-   * invite link. Lets a caller/test enroll the recipient (the precondition for any handoff) on the SAME gateway +
-   * credential store the step-up verifies against — so a full two-handoff scenario runs end to end.
+   * invite link. Returns an operator-safe read model; the usable grant-bearing link is delivered only through the
+   * recipient channel.
    */
   enrollInvite?: (
     recipient: RecipientRef,
@@ -255,7 +462,16 @@ export interface ProvisioningStack {
 export function createProvisioningBridge(
   opts: CreateProvisioningBridgeOptions = {},
 ): ProvisioningStack {
-  const catalog = new CatalogService();
+  const state =
+    opts.stateRoot !== undefined
+      ? DaemonStateRoot.open({
+          root: opts.stateRoot,
+          unsafeRoots: opts.workspaceRoot !== undefined ? [opts.workspaceRoot] : [],
+        })
+      : undefined;
+  const catalog = new CatalogService(
+    opts.dependencyBindings !== undefined ? { dependencyBindings: opts.dependencyBindings } : {},
+  );
   const policy = new CedarPolicyAdapter(
     opts.policySet !== undefined ? { policySet: opts.policySet } : { policySet: MVP_POLICY_SET },
   );
@@ -274,14 +490,27 @@ export function createProvisioningBridge(
     opts.workspaceRoot !== undefined ? { root: opts.workspaceRoot } : {},
   );
   const workspace = new WorkspaceManager(workspaceAdapter);
-  const lifecycle = new CapsuleLifecycleManager({ registry, workspace });
+  const lifecycleStore = stateSlot<CapsuleRecord[]>(state, "worker.lifecycle", []);
+  const lifecycle = new CapsuleLifecycleManager({
+    registry,
+    workspace,
+    ...(lifecycleStore !== undefined ? { store: lifecycleStore } : {}),
+  });
 
   // ── ONE shared capability signer underpins the agent-authority anchor, the TASK capability, AND the
   //    agent-connector capability — so the connector genuinely DESCENDS from the task cap (same key) and
   //    a revocation of the task cap CASCADES to the connector by lineage (capability-service.md). Using
   //    separate signers would break both the lineage tag and the shared revocation snapshot.
-  const signer = new HmacCapabilitySigner();
-  const capability = new CapabilityService(signer);
+  const signer = new HmacCapabilitySigner(
+    state?.secretBytes("capability.signing-key", 32),
+    state?.revocations("capability.revocations"),
+  );
+  const capability = new CapabilityService(
+    signer,
+    state !== undefined
+      ? { spentNonces: state.stringSet("capability.spent-enrollment-nonces") }
+      : {},
+  );
   const connector = new ConnectorCdpAdapter();
   // A holder so the Task service's TEARDOWN dep (Slice 7) can call the SessionService's terminal
   // `teardownSession` — the SessionService is constructed later (it needs the handoff/completion deps),
@@ -292,13 +521,21 @@ export function createProvisioningBridge(
   //    task capability (which, by lineage, stops every descendant cap — the session grants + the connector —
   //    verifying; kernel-contracts.md §2). The session teardown is delegated; the cap revoke is the Task
   //    service's own job via the shared signer it already holds.
-  const task = new TaskService({
+  const taskStore = stateSlot<TaskServiceSnapshot>(state, "task.state", {
+    tasks: [],
+    tokens: [],
+  });
+  const taskOptions: ConstructorParameters<typeof TaskService>[0] = {
     capability: signer,
     teardown: {
       teardownSession: (sessionId, disposition) =>
         sessionRef.svc?.teardownSession(sessionId, disposition) ?? Promise.resolve(),
     },
-  });
+  };
+  if (taskStore !== undefined) {
+    taskOptions.store = taskStore;
+  }
+  const task = new TaskService(taskOptions);
 
   // The noVNC human entrypoint (full mode: the ws endpoint the gateway proxies in Slice 4b; headless: reports
   // unavailable). Stood up here so the full-mode test can read it AND so the handoff saga can resolve it.
@@ -314,6 +551,8 @@ export function createProvisioningBridge(
   let identity: IdentityService | undefined;
   let handoffDeps: HandoffDeps | undefined;
   let completionDeps: CompletionDeps | undefined;
+  /** The auth module actually wired behind the AuthProviderPort (doc §7 wiring record). Default the in-tree WebAuthn. */
+  let authModule: string = AUTH_WEBAUTHN_MODULE;
   /** The operator enrollment action (wired when handoff is, since the same gateway then fronts enrollment). */
   let enrollInvite:
     | ((recipient: RecipientRef) => Promise<{ link: string; grant: OpaqueToken; nonce: string }>)
@@ -323,13 +562,32 @@ export function createProvisioningBridge(
   //  resolved only when a window opens/closes read the SessionService back from `.svc` once it is built.)
   if (opts.handoff !== undefined) {
     const h = opts.handoff;
-    const authProvider = new AuthWebauthnProvider({
-      rpID: h.rpID ?? "localhost",
-      rpName: h.rpName ?? "GLA",
-      expectedOrigin: h.expectedOrigin,
-    });
-    identity = h.identity ?? new IdentityService({ authProvider });
+    // Provider selection (doc §1/§7): default → the in-tree WebAuthn provider (unchanged); `authentik` → the
+    // delegated OIDC adapter. Both implement `AuthProviderPort`, so the IdentityService injection is identical.
+    const selected = buildAuthProvider(
+      {
+        ...(h.authProvider !== undefined ? { authProvider: h.authProvider } : {}),
+        ...(h.authentik !== undefined ? { authentik: h.authentik } : {}),
+      },
+      { rpID: h.rpID ?? "localhost", rpName: h.rpName ?? "GLA", expectedOrigin: h.expectedOrigin },
+      providerStores(state),
+    );
+    authModule = selected.module;
+    identity =
+      h.identity ??
+      new IdentityService({
+        authProvider: selected.provider,
+        ...(state !== undefined
+          ? { enrollments: state.kv<EnrollmentRecord>("identity.enrollments") }
+          : {}),
+      });
     const channel = new ChannelCli({ identity, sink: h.deliverySink ?? deliveryToStdout });
+    const authAssurancePolicy =
+      h.authAssuranceProfile !== undefined
+        ? authAssurancePolicyFromProfile(h.authAssuranceProfile)
+        : h.requiredAuthStrength !== undefined
+          ? authAssurancePolicyFromRequiredAuthStrength(h.requiredAuthStrength)
+          : undefined;
     // The gateway is the Route controller's abstract edge AND the public step-up/WS-proxy entry. It verifies the
     // recipient-bound grant statelessly + requires the bound identity (step-up) before forwarding to the capsule.
     gateway = new AccessGateway({
@@ -343,9 +601,19 @@ export function createProvisioningBridge(
       stepUp: identity,
       host: h.host ?? "0.0.0.0",
       port: h.port ?? 3000,
+      publicBaseUrl: h.publicBaseUrl,
+      ...(h.trustForwardedPrefix !== undefined
+        ? { trustForwardedPrefix: h.trustForwardedPrefix }
+        : {}),
       // The auth-reuse TTL (GLA-050/051): a recipient's step-up stays valid for a later window for THIS recipient,
       // so scenario-01 Phase 12's second window opens with no re-prompt. Defaults to the gateway default (~15m).
       ...(h.authReuseTtlMs !== undefined ? { authReuseTtlMs: h.authReuseTtlMs } : {}),
+      // Provider-neutral assurance profile (default phishing-resistant): app translates deployment policy to the
+      // gateway's common contract; gateway code never names provider method claims.
+      ...(authAssurancePolicy !== undefined ? { authAssurancePolicy } : {}),
+      // The noVNC provider owns its browser client assets; the gateway only serves them through a generic static
+      // mount so session/capability/auth/core never learn noVNC details.
+      entrypointClientAssets: novncClientAssetMounts(),
     });
     route = new RouteController({ gateway });
     handoffDeps = {
@@ -361,11 +629,11 @@ export function createProvisioningBridge(
         forceCloseGrant: (grantId) => gateway?.forceCloseGrant(grantId),
       },
       route: {
-        program: (window, grantId, endpoint, path) => {
+        program: (window, grantId, entrypointBinding, path) => {
           if (route === undefined) {
             throw new Error("route controller not wired");
           }
-          return route.program(window, grantId, endpoint, path);
+          return route.program(window, grantId, entrypointBinding, path);
         },
         unmount: (windowId) => (route ? route.unmount(windowId) : Promise.resolve()),
       },
@@ -388,7 +656,7 @@ export function createProvisioningBridge(
       const minted = await capability.mintEnrollmentGrant(recipient);
       const link = AccessGateway.enrollLink(h.publicBaseUrl, minted.token);
       await channel.deliver(recipient, link, minted.token);
-      return { link, grant: minted.token, nonce: minted.nonce };
+      return redactedEnrollmentInvite(link, minted.token, minted.nonce);
     };
 
     // ── Slice 5 — the COMPLETION-CLOSE pipeline (the Completion service + the url-watcher detector + the
@@ -421,20 +689,21 @@ export function createProvisioningBridge(
         detector: urlDetector,
         // The params the url-watcher watches with — the session's declared `complete_on`/`intermediate`.
         detectorParamsFor: (sessionId) => urlWatcherParams(sessionRef.svc, sessionId),
-        // S-2 agent-blind: SEVER/resume the agent connector by the session's brokered capsule CDP url. `suspend`
-        // destroys the agent's live socket at the broker (not a flag — its existing CDP connection is cut), so the
-        // agent has NO channel onto the capsule while a recipient-bound window is open; `resume` re-allows it.
+        // S-2 agent-blind: SEVER/resume the agent connector by the session's connector resource id. The provider
+        // adapter owns how that id maps to live sockets, so session/app do not key lifecycle to a transport URL.
         connectorControl: {
           suspend: (sessionId) => {
-            const url = sessionRef.svc?.connectorTeardownInfo(sessionId)?.cdpUrl;
-            if (url !== undefined && url.length > 0) {
-              connector.suspendByCdpUrl(url);
+            const resourceId =
+              sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
+            if (resourceId !== undefined && resourceId.length > 0) {
+              connector.suspendByResourceId(resourceId);
             }
           },
           resume: (sessionId) => {
-            const url = sessionRef.svc?.connectorTeardownInfo(sessionId)?.cdpUrl;
-            if (url !== undefined && url.length > 0) {
-              connector.resumeByCdpUrl(url);
+            const resourceId =
+              sessionRef.svc?.connectorTeardownInfo(sessionId)?.connectorResourceId;
+            if (resourceId !== undefined && resourceId.length > 0) {
+              connector.resumeByResourceId(resourceId);
             }
           },
         },
@@ -445,7 +714,13 @@ export function createProvisioningBridge(
   // ── The provision-capable SessionService: inject the worker/capability/connector seams (+ handoff when wired).
   //    `parentCapabilityRefFor` threads the session's TASK capability id down as the connector's parent
   //    (Finding #1) — so `mintConnector` produces a CHILD of the task cap, not a fresh root.
-  const sessionOpts: ConstructorParameters<typeof SessionService>[0] = {
+  const sessionStore = stateSlot<SessionServiceSnapshot>(state, "session.state", {
+    sessions: [],
+    provisioned: [],
+    handoffs: [],
+    completions: [],
+  });
+  const sessionOpts: SessionServiceOptions = {
     provision: {
       worker: lifecycle,
       capability: {
@@ -467,6 +742,9 @@ export function createProvisioningBridge(
       },
     },
   };
+  if (sessionStore !== undefined) {
+    sessionOpts.store = sessionStore;
+  }
   if (handoffDeps !== undefined) {
     sessionOpts.handoff = handoffDeps;
   }
@@ -497,8 +775,8 @@ export function createProvisioningBridge(
       if (info === undefined) {
         return; // never provisioned / already cleaned — idempotent no-op.
       }
-      // Drop the agent-blind secret_ref→cdpUrl binding (no residual) and revoke the connector cap.
-      connector.unbindSecretRef(info.cdpUrl);
+      // Drop the agent-blind resource binding (no residual) and revoke the connector cap.
+      connector.unbindSecretRef(info.connectorResourceId);
       await capability.revoke(info.connectorCapId);
       // Forget the provision bookkeeping so a second teardown is a clean no-op (idempotent).
       session.clearProvisioned(sessionId as never);
@@ -523,7 +801,25 @@ export function createProvisioningBridge(
   // `attachConnector` is the worker's connector helper; the session uses the connector port directly,
   // but exposing the reference keeps the wired surface explicit (and tree-shake-safe).
   void attachConnector;
+  let stackClosed = false;
+  const close = async (): Promise<void> => {
+    if (stackClosed) {
+      return;
+    }
+    stackClosed = true;
+    try {
+      for (const sessionId of lifecycle.liveSessions()) {
+        await reconciler.reconcile(sessionId).catch(() => {});
+      }
+      await connector.close().catch(() => {});
+      await gateway?.close().catch(() => {});
+    } finally {
+      state?.close();
+    }
+  };
   const stack: ProvisioningStack = {
+    ready: session.recoveryComplete(),
+    close,
     bridge,
     lifecycle,
     reconciler,
@@ -533,6 +829,7 @@ export function createProvisioningBridge(
     task,
     session,
     connector,
+    authModule,
   };
   // Slice 4b: expose the handoff pipeline handles when wired (so a test/caller can drive the gateway/route/identity).
   if (gateway !== undefined) {
@@ -560,8 +857,16 @@ export function createProvisioningBridge(
 /** Options for {@link createEnrollmentStack}. */
 export interface CreateEnrollmentStackOptions {
   /**
+   * The auth provider to wire behind the kernel `AuthProviderPort` (doc §1/§7). Default `"webauthn"` (the
+   * in-tree default — the construction below is UNCHANGED). `"authentik"` selects the delegated OIDC adapter
+   * and requires {@link AuthProviderSelection.authentik}. The `IdentityService` injection is identical either way.
+   */
+  authProvider?: AuthProviderKind;
+  /** The authentik OIDC config — REQUIRED when `authProvider === "authentik"`, else ignored (doc §7). */
+  authentik?: AuthentikConfig;
+  /**
    * The Relying-Party ID — the registrable host the passkey is bound to (no scheme/port). hermes-1: the gateway's
-   * host; the loopback test: `"localhost"`. MUST match the page origin host. Default `"localhost"`.
+   * host; the loopback test: `"localhost"`. MUST match the page origin host. Default `"localhost"`. WebAuthn-path config.
    */
   rpID?: string;
   /** The human-visible RP name in the OS passkey UI. Default `"GLA"`. */
@@ -573,12 +878,30 @@ export interface CreateEnrollmentStackOptions {
   expectedOrigin: string | string[];
   /** The public base URL enrollment invite links are built against, e.g. `http://localhost:3000`. */
   publicBaseUrl: string;
+  /**
+   * Trust `X-Forwarded-Prefix` for strip-prefix reverse proxies. Enable only behind an edge that sanitizes that
+   * header; prefix-preserving proxying does not need it.
+   */
+  trustForwardedPrefix?: boolean;
   /** Gateway bind host. Default `0.0.0.0` (hermes-1); tests pass `127.0.0.1`. */
   host?: string;
   /** Gateway bind port. Default `3000`; tests pass `0` for an ephemeral port. */
   port?: number;
   /** Where the channel writes the enrollment invite link (defaults to stdout). */
   deliverySink?: DeliverySink;
+  /**
+   * A PRE-BUILT auth provider to inject behind the kernel `AuthProviderPort`, bypassing {@link buildAuthProvider}
+   * (GLA-070). This is a composition seam — it lets a caller supply an {@link AuthAuthentikProvider} constructed
+   * with SHARED stores and (for deterministic enrollment E2E) the `fake-authentik` `fetch`/`jwks`/`randomness`
+   * seams, so the delegated enrollment service path is provable end-to-end through the real gateway with NO real
+   * network. When set, it wins over `authProvider`/`authentik`; `authModule` is taken from {@link authModuleOverride}
+   * (or, when that is absent, the resolved provider kind). Mirrors `createProvisioningBridge`'s `handoff.identity`
+   * injection. (The PRODUCTION browser-redirect/callback path that feeds `{code,state}` to `enrollComplete` is
+   * GLA-072's shared deliverable, see authentik-integration.md §2 / authentik-enrollment.md §8.1.)
+   */
+  authProviderOverride?: AuthProviderPort;
+  /** The module marker recorded in {@link EnrollmentStack.authModule} when {@link authProviderOverride} is set. */
+  authModuleOverride?: string;
 }
 
 /**
@@ -590,16 +913,26 @@ export interface EnrollmentStack {
   gateway: AccessGateway;
   /** The capability service (mints the operator-discharge grant; owns the single-use spent-set). */
   capability: CapabilityService;
-  /** The identity service (owns the enrollment fact + auth_strength; wired with the WebAuthn provider). */
+  /** The identity service (owns the enrollment fact + auth_strength; wired with the selected provider). */
   identity: IdentityService;
-  /** The in-tree WebAuthn auth provider (the AuthProviderPort; only `app` imports it). */
-  authProvider: AuthWebauthnProvider;
+  /**
+   * The auth provider injected behind the kernel `AuthProviderPort` (only `app` imports the concrete adapter).
+   * Typed as the PORT because it is the in-tree WebAuthn provider by default, or the delegated authentik adapter
+   * when selected (doc §7) — both satisfy `AuthProviderPort`.
+   */
+  authProvider: AuthProviderPort;
+  /**
+   * The auth module actually wired (the wiring record, doc §7): `AUTH_WEBAUTHN_MODULE` (default) or
+   * `AUTH_AUTHENTIK_MODULE` (the opt-in delegated provider).
+   */
+  authModule: string;
   /** The channel adapter the invite is delivered through (recipient-bound). */
   channel: ChannelCli;
   /**
    * The OPERATOR enrollment action (docs/05 §3: NOT on the agent surface). Mint a single-use operator-discharge
    * grant bound to the recipient, then deliver the enrollment invite link (carrying the grant) to exactly that
-   * recipient via the channel. Returns the invite link + the grant token + its nonce (for observation/teardown).
+   * recipient via the channel. Returns only an operator-safe redacted read model; tests or channels that need the
+   * usable link must observe recipient delivery.
    */
   enrollInvite(
     recipient: RecipientRef,
@@ -620,11 +953,33 @@ export interface EnrollmentStack {
  *   - ChannelCli ← delivers the recipient-bound invite link
  */
 export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): EnrollmentStack {
-  const authProvider = new AuthWebauthnProvider({
-    rpID: opts.rpID ?? "localhost",
-    rpName: opts.rpName ?? "GLA",
-    expectedOrigin: opts.expectedOrigin,
-  });
+  // Provider selection (doc §1/§7): default → the in-tree WebAuthn provider (constructed exactly as before);
+  // `authentik` → the delegated OIDC adapter. Both implement `AuthProviderPort` (the IdentityService injection
+  // is identical), so swapping the provider is this one `buildAuthProvider` call — no downstream change. A
+  // pre-built `authProviderOverride` (GLA-070 — e.g. an AuthAuthentikProvider with shared stores + fake-authentik
+  // seams) wins, so the delegated enrollment path is testable end-to-end with no real network.
+  let authProvider: AuthProviderPort;
+  let authModule: string;
+  if (opts.authProviderOverride !== undefined) {
+    authProvider = opts.authProviderOverride;
+    authModule =
+      opts.authModuleOverride ??
+      (opts.authProvider === "authentik" ? AUTH_AUTHENTIK_MODULE : AUTH_WEBAUTHN_MODULE);
+  } else {
+    const built = buildAuthProvider(
+      {
+        ...(opts.authProvider !== undefined ? { authProvider: opts.authProvider } : {}),
+        ...(opts.authentik !== undefined ? { authentik: opts.authentik } : {}),
+      },
+      {
+        rpID: opts.rpID ?? "localhost",
+        rpName: opts.rpName ?? "GLA",
+        expectedOrigin: opts.expectedOrigin,
+      },
+    );
+    authProvider = built.provider;
+    authModule = built.module;
+  }
   const identity = new IdentityService({ authProvider });
   const capability = new CapabilityService();
   const channel = new ChannelCli({
@@ -636,6 +991,10 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
     identity,
     host: opts.host ?? "0.0.0.0",
     port: opts.port ?? 3000,
+    publicBaseUrl: opts.publicBaseUrl,
+    ...(opts.trustForwardedPrefix !== undefined
+      ? { trustForwardedPrefix: opts.trustForwardedPrefix }
+      : {}),
   });
 
   return {
@@ -643,6 +1002,7 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
     capability,
     identity,
     authProvider,
+    authModule,
     channel,
     async enrollInvite(recipient) {
       // 1) Mint the single-use operator-discharge grant bound to this recipient (distinct from a handoff grant).
@@ -651,8 +1011,22 @@ export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): Enrol
       const link = AccessGateway.enrollLink(opts.publicBaseUrl, minted.token);
       // The channel-delegation token would gate a richer channel; the CLI fallback records it but does not enforce.
       await channel.deliver(recipient, link, minted.token);
-      return { link, grant: minted.token, nonce: minted.nonce };
+      return redactedEnrollmentInvite(link, minted.token, minted.nonce);
     },
+  };
+}
+
+function redactedEnrollmentInvite(
+  link: string,
+  grant: OpaqueToken,
+  nonce: string,
+): { link: string; grant: OpaqueToken; nonce: string } {
+  void grant;
+  void nonce;
+  return {
+    link: redactOperatorText(link),
+    grant: "<redacted>" as OpaqueToken,
+    nonce: "<redacted>",
   };
 }
 

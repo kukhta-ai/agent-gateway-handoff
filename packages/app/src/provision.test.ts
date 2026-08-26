@@ -12,6 +12,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
@@ -61,9 +62,12 @@ afterAll(() => {
 });
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && existsSync(p);
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
@@ -76,6 +80,7 @@ describe("provisioning composition root — real `session create` + `session con
     async () => {
       const path = specFile(OK_ASSEMBLY);
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,
@@ -136,7 +141,10 @@ describe("provisioning composition root — real `session create` + `session con
     // the no-live-capsule conflict (exit 7) without spawning, we create a session via a dry-run-then-…:
     // simplest is to assert the unknown-id path (exit 5) and the conflict path is covered by the unit
     // tests + the real-CDP test above. Here we assert the CLI maps an unknown id cleanly (not a crash).
-    const stack = createProvisioningBridge({ launcherMode: "headless" });
+    const stack = createProvisioningBridge({
+      dependencyBindings: referenceWpmDependencyBindings(),
+      launcherMode: "headless",
+    });
     const c = capture();
     const code = await run(["session", "connector", "sess_never"], c.out, { bridge: stack.bridge });
     expect(code).toBe(5); // unknown session id → state.not_found → exit 5 (a clean error, not a crash)
@@ -148,6 +156,7 @@ describe("provisioning composition root — real `session create` + `session con
     "#1 WIRING: the connector cap is a CHILD of the session's TASK cap (shared signer; cascade domain)",
     async () => {
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,
@@ -216,6 +225,7 @@ describe("provisioning composition root — real `session create` + `session con
     "#2 WIRING: terminal teardown REVOKES the connector cap AND drops its secret_ref binding (no residual)",
     async () => {
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,
@@ -232,24 +242,28 @@ describe("provisioning composition root — real `session create` + `session con
       const connectorCapId = stack.session.connectorLineage(sid as never)?.connectorCapId as
         | string
         | undefined;
-      const cdpUrl = (created as { connector: { cdp_url: string } }).connector.cdp_url;
+      const connector = (
+        created as unknown as { connector: { cdp_url: string; resourceId: string } }
+      ).connector;
+      expect(connector.cdp_url).toMatch(/^ws:\/\/127\.0\.0\.1:/);
+      const connectorResourceId = connector.resourceId;
       expect(connectorCapId).toBeDefined();
 
       // BEFORE teardown: the connector cap is LIVE (not revoked) and its secret_ref is bound.
       expect(stack.capability.revocationSnapshot().has(connectorCapId as never)).toBe(false);
-      expect(stack.connector.hasBinding(cdpUrl)).toBe(true);
+      expect(stack.connector.hasBinding(connectorResourceId)).toBe(true);
 
       // TERMINAL teardown via the Cleanup Reconciler (the normal reap path — session revoke/complete).
       await stack.reconciler.reconcile(sid);
 
-      // AFTER teardown: the connector cap is REVOKED and the secret_ref→cdpUrl binding is GONE (no
+      // AFTER teardown: the connector cap is REVOKED and the secret_ref resource binding is GONE (no
       // residual) — Finding #2's fix. (Previously the reconciler had no revokeConnector callback.)
       expect(stack.capability.revocationSnapshot().has(connectorCapId as never)).toBe(true);
-      expect(stack.connector.hasBinding(cdpUrl)).toBe(false);
+      expect(stack.connector.hasBinding(connectorResourceId)).toBe(false);
 
       // IDEMPOTENT: a second terminal teardown is a clean no-op (the provision info was cleared).
       await expect(stack.reconciler.reconcile(sid)).resolves.toBeUndefined();
-      expect(stack.connector.hasBinding(cdpUrl)).toBe(false);
+      expect(stack.connector.hasBinding(connectorResourceId)).toBe(false);
     },
     120_000,
   );

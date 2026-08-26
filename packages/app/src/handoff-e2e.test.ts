@@ -16,6 +16,7 @@
 // lib needed at compile time).
 
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { type IncomingMessage, type Server, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { AuthWebauthnProvider } from "@gla/auth-webauthn";
@@ -23,16 +24,25 @@ import { CapabilityService } from "@gla/capability";
 import { ChannelCli, type DeliverySink } from "@gla/channel-cli";
 import { AccessGateway } from "@gla/gateway";
 import { IdentityService } from "@gla/identity";
-import type { RecipientRef, RuntimeHandle, SessionId, TaskId } from "@gla/kernel";
+import type {
+  HumanEntrypointBinding,
+  RecipientRef,
+  RuntimeHandle,
+  SessionId,
+  TaskId,
+} from "@gla/kernel";
 import { RouteController } from "@gla/route";
 import { type HandoffDeps, SessionService } from "@gla/session";
 import { type Browser, type CDPSession, type Page, chromium } from "playwright-core";
 import { afterAll, describe, expect, it } from "vitest";
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
@@ -194,8 +204,17 @@ async function startHandoffStack(upstreamEndpoint: string): Promise<{
   const route = new RouteController({ gateway });
   // A stub entrypoint returning the stub WS upstream (real noVNC is gated for hermes-1).
   const stubEntrypoint = {
-    async open(_runtime: RuntimeHandle): Promise<{ internalEndpoint: string }> {
-      return { internalEndpoint: upstreamEndpoint };
+    async open(_runtime: RuntimeHandle): Promise<HumanEntrypointBinding> {
+      return {
+        resourceId: "entrypoint:fake-view:handoff-e2e",
+        provider: "fake-view",
+        client: { kind: "provider-asset", ref: "fake-viewer" },
+        transport: {
+          kind: "reverse-proxy",
+          protocol: "websocket",
+          upstream: upstreamEndpoint,
+        },
+      };
     },
   };
   const handoff: HandoffDeps = {

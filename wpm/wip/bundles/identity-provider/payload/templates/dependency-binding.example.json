@@ -1,0 +1,277 @@
+{
+  "//": "EXAMPLE DependencyBinding records for the identity-provider dependency, authentik branch (GLA-074/084/085).",
+  "//1": "wpm writes one rendered binding into the verify task receipt; GLA reads it and re-probes it. Dynamic",
+  "//2": "receipt evidence is separate from deterministic bundle metadata. Secrets are never literals here.",
+  "//3": "The client secret is represented only by a secret-ref pointer resolved by the secret seam.",
+  "//4": "loginMethodProofs under lastProbe.detail are WPM receipt detail. Do not copy receipt-only fields such as loginChoiceVisible, observedClaims, assuranceOutcome, or eligiblePolicies into GLA_AUTH_ENROLLMENT_POLICY_JSON; the daemon descriptor accepts method, kind, label, stage, source, status, authStrength, assuranceLevel, observedAt, subjectStable, evidence, and diagnostics.",
+
+  "example_local_external_adopted": {
+    "dependency": "identity-provider",
+    "source": "wpm-receipt",
+    "ownershipMode": "local-external",
+    "state": "adopted",
+    "bundle": {
+      "id": "identity-provider",
+      "version": "0.1.0",
+      "declaredRequires": {
+        "gla-core": "^0.1.0"
+      },
+      "templateRefs": ["payload/templates/dependency-binding.example.json"]
+    },
+    "receipt": {
+      "taskId": "identity-provider-6",
+      "status": "Done",
+      "recordedAt": "2026-06-13T00:00:00.000Z",
+      "refs": [
+        "wpm/wip/bundles/identity-provider/install-backlog/tasks/identity-provider-6 - Verify-authentik-end-to-end-and-record-the-dependency-binding.md"
+      ],
+      "checksums": {
+        "dependency-binding.json": "sha256:example"
+      }
+    },
+    "connection": {
+      "refs": {
+        "issuer": { "kind": "uri-ref", "ref": "https://idp.example/application/o/gla/" },
+        "clientId": { "kind": "literal", "ref": "gla" },
+        "redirectUri": { "kind": "uri-ref", "ref": "https://203.0.113.10/auth/callback" },
+        "scopes": { "kind": "literal", "ref": "openid profile" },
+        "enrollmentPolicy": {
+          "kind": "literal",
+          "ref": "authentik:gla-invitation-enrollment; credentials=password,webauthn-passkey; sources=oauth:github; choices=primary-credential[password|webauthn-passkey|oauth:github]"
+        },
+        "clientSecret": { "kind": "secret-ref", "ref": "secret://gla/authentik/client-secret" }
+      }
+    },
+    "lastProbe": {
+      "at": "2026-06-13T00:00:00.000Z",
+      "result": "available",
+      "detail": {
+        "checks": [
+          "discovery 200",
+          "jwks 2 keys",
+          "authorize accepts gla redirect",
+          "enrollment policy descriptor visible in gla auth diagnostics",
+          "enroll and re-auth keep same subject"
+        ],
+        "loginMethodProofs": [
+          {
+            "method": "password",
+            "kind": "password",
+            "status": "verified",
+            "loginChoiceVisible": true,
+            "stage": "gla-password-prompt",
+            "authStrength": "password",
+            "assuranceLevel": "password",
+            "evidence": { "amr": ["pwd"], "gla_uv": false },
+            "eligiblePolicies": ["password-permitted"],
+            "evidenceHandling": "claims-only; no id_token, access token, password, code, verifier, or grant recorded"
+          },
+          {
+            "method": "webauthn-passkey",
+            "kind": "webauthn-passkey",
+            "status": "verified",
+            "loginChoiceVisible": true,
+            "stage": "gla-webauthn-validation",
+            "recipientRequirement": "enrolled compatible authenticator",
+            "authStrength": "webauthn",
+            "assuranceLevel": "phishing-resistant",
+            "evidence": {
+              "amr": ["swk"],
+              "gla_uv": true,
+              "recipientBound": true,
+              "replayResistant": true
+            },
+            "eligiblePolicies": ["phishing-resistant", "password-permitted"],
+            "evidenceHandling": "claims-only; user verification is recorded as a boolean proof, never passkey material"
+          },
+          {
+            "method": "oauth:github",
+            "kind": "external-source",
+            "status": "verified",
+            "loginChoiceVisible": true,
+            "source": "github-oauth",
+            "subjectStable": true,
+            "authStrength": "password",
+            "assuranceLevel": "password",
+            "evidence": {
+              "source": "github-oauth",
+              "subjectMode": "stable"
+            },
+            "eligiblePolicies": [
+              "password-permitted when policy explicitly accepts this mapped source evidence"
+            ],
+            "evidenceHandling": "source id/name and stable-subject status only; no source token or profile payload recorded"
+          }
+        ],
+        "redaction": "secret-ref-only for client secret; provider tokens, OIDC codes, code verifiers, grants, invitations, passwords, and passkey material omitted"
+      }
+    },
+    "decisionNotes": [
+      {
+        "note": "Adopted existing authentik instance; GLA owns only its client registration and local connection binding.",
+        "rationale": "Operator chose local-external ownership, so no inverse operation is recorded."
+      }
+    ]
+  },
+
+  "example_managed_installed": {
+    "dependency": "identity-provider",
+    "source": "wpm-receipt",
+    "ownershipMode": "managed",
+    "state": "installed",
+    "bundle": {
+      "id": "identity-provider",
+      "version": "0.1.0",
+      "declaredRequires": {
+        "gla-core": "^0.1.0"
+      },
+      "templateRefs": ["payload/templates/dependency-binding.example.json"],
+      "scriptRefs": ["payload/scripts/verify-authentik.mjs"]
+    },
+    "receipt": {
+      "taskId": "identity-provider-6",
+      "status": "Done",
+      "recordedAt": "2026-06-13T00:00:00.000Z",
+      "refs": [
+        "wpm/wip/bundles/identity-provider/install-backlog/tasks/identity-provider-6 - Verify-authentik-end-to-end-and-record-the-dependency-binding.md"
+      ],
+      "checksums": {
+        "dependency-binding.json": "sha256:example"
+      }
+    },
+    "connection": {
+      "refs": {
+        "issuer": { "kind": "uri-ref", "ref": "https://idp.example/application/o/gla/" },
+        "clientId": { "kind": "literal", "ref": "gla" },
+        "redirectUri": { "kind": "uri-ref", "ref": "https://203.0.113.10/auth/callback" },
+        "scopes": { "kind": "literal", "ref": "openid profile" },
+        "enrollmentPolicy": {
+          "kind": "literal",
+          "ref": "authentik:gla-invitation-enrollment; credentials=password,webauthn-passkey; sources=oauth:github; choices=primary-credential[password|webauthn-passkey|oauth:github]"
+        },
+        "clientSecret": { "kind": "secret-ref", "ref": "secret://gla/authentik/client-secret" }
+      }
+    },
+    "lastProbe": {
+      "at": "2026-06-13T00:00:00.000Z",
+      "result": "available",
+      "detail": {
+        "checks": [
+          "managed authentik stack is reachable",
+          "discovery 200",
+          "jwks returns signing keys",
+          "authorize accepts gla redirect",
+          "password and passkey login-method proofs verified",
+          "enrollment policy diagnostics passed",
+          "subject stability probes passed"
+        ],
+        "loginMethodProofs": [
+          {
+            "method": "password",
+            "kind": "password",
+            "status": "verified",
+            "loginChoiceVisible": true,
+            "authStrength": "password",
+            "assuranceLevel": "password",
+            "evidence": { "amr": ["pwd"], "gla_uv": false },
+            "eligiblePolicies": ["password-permitted"]
+          },
+          {
+            "method": "webauthn-passkey",
+            "kind": "webauthn-passkey",
+            "status": "verified",
+            "loginChoiceVisible": true,
+            "authStrength": "webauthn",
+            "assuranceLevel": "phishing-resistant",
+            "evidence": {
+              "amr": ["swk"],
+              "gla_uv": true,
+              "recipientBound": true,
+              "replayResistant": true
+            },
+            "eligiblePolicies": ["phishing-resistant", "password-permitted"]
+          }
+        ],
+        "redaction": "secret-ref-only; no literal secrets or grant-bearing URLs"
+      }
+    },
+    "inverseOp": {
+      "description": "Remove only the authentik stack and client registration installed by this bundle.",
+      "command": "identity-provider/teardown-authentik-managed",
+      "condition": "Only valid when receipt ownershipMode is managed and this bundle created the stack."
+    },
+    "decisionNotes": [
+      {
+        "note": "Managed install owns server, worker, database, and client registration lifecycle.",
+        "rationale": "Use inverseOp for repair or uninstall rather than ad hoc host commands."
+      }
+    ]
+  },
+
+  "example_unavailable": {
+    "dependency": "identity-provider",
+    "source": "wpm-receipt",
+    "ownershipMode": "remote-external",
+    "state": "remote",
+    "bundle": {
+      "id": "identity-provider",
+      "version": "0.1.0",
+      "declaredRequires": {
+        "gla-core": "^0.1.0"
+      }
+    },
+    "receipt": {
+      "taskId": "identity-provider-6",
+      "status": "Done",
+      "recordedAt": "2026-06-13T00:00:00.000Z",
+      "refs": [
+        "wpm/wip/bundles/identity-provider/install-backlog/tasks/identity-provider-6 - Verify-authentik-end-to-end-and-record-the-dependency-binding.md"
+      ]
+    },
+    "connection": {
+      "refs": {
+        "issuer": { "kind": "uri-ref", "ref": "https://idp.example/application/o/gla/" },
+        "clientId": { "kind": "literal", "ref": "gla" },
+        "redirectUri": { "kind": "uri-ref", "ref": "https://203.0.113.10/auth/callback" },
+        "enrollmentPolicy": {
+          "kind": "literal",
+          "ref": "authentik:gla-invitation-enrollment; diagnostics unavailable until provider answers"
+        },
+        "clientSecret": { "kind": "secret-ref", "ref": "secret://gla/authentik/client-secret" }
+      }
+    },
+    "lastProbe": {
+      "at": "2026-06-13T00:05:00.000Z",
+      "result": "unavailable",
+      "detail": {
+        "checks": [
+          "OIDC discovery did not answer from the GLA host",
+          "provider down or unreachable from the GLA runtime"
+        ],
+        "loginMethodProofs": [
+          {
+            "method": "password",
+            "status": "unavailable",
+            "loginChoiceVisible": false,
+            "authStrength": "none",
+            "assuranceLevel": "none"
+          },
+          {
+            "method": "webauthn-passkey",
+            "status": "unavailable",
+            "loginChoiceVisible": false,
+            "authStrength": "none",
+            "assuranceLevel": "none"
+          }
+        ],
+        "redaction": "no provider tokens, OIDC codes, code verifiers, grants, invitations, passwords, passkey material, or client secret literals recorded"
+      }
+    },
+    "decisionNotes": [
+      {
+        "note": "Remote provider was recorded but is currently unavailable.",
+        "rationale": "Admission and step-up must fail closed until the probe is available."
+      }
+    ]
+  }
+}

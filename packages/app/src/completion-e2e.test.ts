@@ -20,11 +20,12 @@
 // unit/contract tests (adapters/connector-cdp's live-socket sever, packages/completion, packages/session) regardless.
 // Spawns a REAL browser — generous timeouts; the capsule + broker are always reaped in a finally.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import { type SessionId, decodeRuntimeHandle } from "@gla/kernel";
 import { chromium } from "playwright-core";
@@ -63,9 +64,12 @@ afterAll(async () => {
 });
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
@@ -153,6 +157,7 @@ describe("REAL completion + close-window + agent-blind end-to-end (scenario-01 P
       // saga needs the channel + grant mint), but the close is driven by COMPLETION, not by a real WS step-up — so
       // we point the detector's URL reader at the REAL capsule CDP (the default) and let the human drive the page.
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: workspaceRoot(),
         startTimeoutMs: 40_000,
@@ -167,7 +172,16 @@ describe("REAL completion + close-window + agent-blind end-to-end (scenario-01 P
           // connection (standing in for the noVNC human path).
           entrypoint: {
             async open() {
-              return { internalEndpoint: "ws://127.0.0.1:1/" };
+              return {
+                resourceId: "entrypoint:fake-view:completion-e2e",
+                provider: "fake-view",
+                client: { kind: "provider-asset", ref: "fake-viewer" },
+                transport: {
+                  kind: "reverse-proxy" as const,
+                  protocol: "websocket",
+                  upstream: "ws://127.0.0.1:1/",
+                },
+              };
             },
           },
           completion: { pollMs: 100 }, // the REAL url-watcher reads the capsule's CDP /json
@@ -219,8 +233,12 @@ describe("REAL completion + close-window + agent-blind end-to-end (scenario-01 P
         expect(handoffView.state).toBe("open");
         // S-2 (the REAL threat): the agent's ALREADY-OPEN brokered socket is DESTROYED this instant.
         expect(stack.connector.isSuspended(cdpUrl)).toBe(true);
-        await new Promise((r) => setTimeout(r, 300)); // let the sever propagate
-        expect(stack.connector.liveSocketCount(cdpUrl)).toBe(0); // the agent's live socket is GONE
+        await expect
+          .poll(() => stack.connector.liveSocketCount(cdpUrl), {
+            message: "window-open severance must close the agent's live CDP socket",
+            timeout: 5_000,
+          })
+          .toBe(0); // the agent's live socket is GONE
         // A read over the agent's SAME pre-existing CDP connection now FAILS (the socket was severed) — the agent
         // CANNOT read the password field over CDP through Phases 7-8.
         let agentReadFailed = false;
@@ -241,13 +259,19 @@ describe("REAL completion + close-window + agent-blind end-to-end (scenario-01 P
         // ── The HUMAN (over the non-brokered interface) submits the SECRET to the site (the human path works) and
         //    drives /verify. The secret reaches the SITE, never the agent. ──
         await hpage.goto(`${site.base}/submit?password=${encodeURIComponent(KNOWN_SECRET)}`);
+        await expect
+          .poll(() => site.submitted().includes(KNOWN_SECRET), {
+            message:
+              "site must receive the human-submitted secret before completion checks continue",
+            timeout: 5_000,
+          })
+          .toBe(true);
 
         // ── `gla handoff wait` blocks until completion; the human reaches /verify → the url-watcher fires the
         //    INTERMEDIATE → the Completion service normalizes → wait RETURNS the envelope. This is scenario-01
         //    Phase 8 EXACTLY: the FIRST handoff window closes on the `/verify` intermediate with status "submitted"
         //    + next "email-verification" (the human's form-submit step is done; the agent reads the code next). ──
         const waitPromise = stack.bridge.handoffWait(handoffView.handoff_id, 25_000);
-        await new Promise((r) => setTimeout(r, 400));
         await hpage.goto(`${site.base}/verify`);
         const envelope = await waitPromise;
 

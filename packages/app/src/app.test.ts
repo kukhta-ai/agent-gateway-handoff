@@ -6,11 +6,16 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { run } from "@gla/cli";
 import { Output, type OutputStreams } from "@gla/cli";
 import { MVP_POLICY_SET, denyTemplatePolicy } from "@gla/policy-cedar";
 import { describe, expect, it } from "vitest";
 import { createBridge } from "./index.js";
+
+function readyBridge(opts: Parameters<typeof createBridge>[0] = {}) {
+  return createBridge({ dependencyBindings: referenceWpmDependencyBindings(), ...opts });
+}
 
 function capture(): { out: Output; stdout: () => string; stderr: () => string } {
   const o: string[] = [];
@@ -47,7 +52,7 @@ describe("composition root — real Cedar admission through the CLI (Slice 2)", 
   it("ACCEPTS a valid browser-handoff proposal under the MVP Cedar policy (exit 0)", async () => {
     const { path, cleanup } = specFile(OK_ASSEMBLY);
     try {
-      const bridge = createBridge(); // real CedarPolicyAdapter + MVP_POLICY_SET
+      const bridge = readyBridge(); // real CedarPolicyAdapter + MVP_POLICY_SET
       const c = capture();
       const code = await run(["session", "create", "-f", path, "--dry-run"], c.out, { bridge });
       expect(code).toBe(0);
@@ -64,7 +69,7 @@ describe("composition root — real Cedar admission through the CLI (Slice 2)", 
       const c = capture();
       expect(
         await run(["session", "create", "-f", ok.path, "--dry-run"], c.out, {
-          bridge: createBridge(),
+          bridge: readyBridge(),
         }),
       ).toBe(0);
       expect(JSON.parse(c.stdout()).decision).toBe("accept");
@@ -84,7 +89,7 @@ describe("composition root — real Cedar admission through the CLI (Slice 2)", 
     try {
       const c = capture();
       const code = await run(["session", "create", "-f", old.path, "--dry-run"], c.out, {
-        bridge: createBridge(),
+        bridge: readyBridge(),
       });
       expect(code).toBe(3);
       expect(JSON.parse(c.stderr()).error.code).toBe("policy.denied");
@@ -99,7 +104,7 @@ describe("composition root — real Cedar admission through the CLI (Slice 2)", 
       // A registered template (browser-handoff) that the policy FORBIDS — proves real Cedar
       // forbid-wins drives the CLI's exit code (3), end-to-end.
       const policySet = `${MVP_POLICY_SET}\n${denyTemplatePolicy("browser-handoff")}`;
-      const bridge = createBridge({ policySet });
+      const bridge = readyBridge({ policySet });
       const c = capture();
       const code = await run(["session", "create", "-f", path, "--dry-run"], c.out, { bridge });
       expect(code).toBe(3);
@@ -112,7 +117,7 @@ describe("composition root — real Cedar admission through the CLI (Slice 2)", 
   it("real run dispatches a Session in `issued` under real Cedar (no spawn — Slice 3)", async () => {
     const { path, cleanup } = specFile(OK_ASSEMBLY);
     try {
-      const bridge = createBridge();
+      const bridge = readyBridge();
       const c = capture();
       const code = await run(["session", "create", "-f", path], c.out, { bridge });
       expect(code).toBe(0);

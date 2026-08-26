@@ -23,6 +23,7 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { Output, type OutputStreams, run } from "@gla/cli";
 import {
   type CapabilityId,
@@ -64,9 +65,12 @@ afterAll(async () => {
 });
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
@@ -174,6 +178,7 @@ async function provisionAndOpen(stack: ProvisioningStack): Promise<{
 function buildStack(): ProvisioningStack {
   const wsRoot = workspaceRoot();
   const stack = createProvisioningBridge({
+    dependencyBindings: referenceWpmDependencyBindings(),
     launcherMode: "headless",
     workspaceRoot: wsRoot,
     startTimeoutMs: 40_000,
@@ -187,7 +192,16 @@ function buildStack(): ProvisioningStack {
       // A stub human entrypoint (headless dev has no X/noVNC stack; the REAL noVNC proxy is gated for hermes-1).
       entrypoint: {
         async open() {
-          return { internalEndpoint: "ws://127.0.0.1:1/" };
+          return {
+            resourceId: "entrypoint:fake-view:teardown-e2e",
+            provider: "fake-view",
+            client: { kind: "provider-asset", ref: "fake-viewer" },
+            transport: {
+              kind: "reverse-proxy" as const,
+              protocol: "websocket",
+              upstream: "ws://127.0.0.1:1/",
+            },
+          };
         },
       },
     },

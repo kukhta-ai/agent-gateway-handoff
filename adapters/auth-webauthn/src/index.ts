@@ -4,8 +4,8 @@
 //   beginEnrollment(userId, discharge)  → generateRegistrationOptions (a registration challenge), bound to the user
 //   finishEnrollment(userId, assertion) → verifyRegistrationResponse → an ATOMICALLY-stored credential (pubkey, counter)
 //   challenge(userId)                   → generateAuthenticationOptions (an authn challenge), scoped to the user's credential
-//   verifyAssertion(userId, assertion)  → verifyAuthenticationResponse → { ok, authStrength } (counter bumped on success)
-// It reports FACTS (ok + auth_strength), never an access decision (the port's guarantee). It is the in-tree
+//   verifyAssertion(userId, assertion)  → verifyAuthenticationResponse → facts (counter bumped on success)
+// It reports FACTS (ok + auth_strength + assurance evidence), never an access decision. It is the in-tree
 // default IdP; a different provider (authentik/OIDC) is a DIFFERENT adapter behind the SAME port — only `app`
 // imports either (the swap-IdP property, GLA-013 AC#5; baseline §6).
 //
@@ -19,10 +19,12 @@
 // The WebAuthn credential material is provider-specific, so it lives in THIS adapter (an authentik adapter would
 // hold nothing locally); the identity service owns the identity-level enrollment FACT (auth_strength) on top.
 
+import { assuranceFromAuthStrength } from "@gla/kernel";
 import type {
   AuthChallenge,
+  AuthProviderEnrollmentResult,
   AuthProviderPort,
-  AuthStrength,
+  AuthProviderVerificationResult,
   EnrollmentChallenge,
   OpaqueToken,
   UserIdentity,
@@ -36,6 +38,9 @@ import {
   verifyAuthenticationResponse,
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
+
+type VerifyRegistration = typeof verifyRegistrationResponse;
+type VerifyAuthentication = typeof verifyAuthenticationResponse;
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
 export const AUTH_WEBAUTHN_MODULE = "@gla/auth-webauthn" as const;
@@ -61,7 +66,7 @@ export interface StoredCredential {
 }
 
 /** The transient pending challenge for an in-flight ceremony, keyed by userId. */
-interface PendingChallenge {
+export interface PendingChallenge {
   /** The base64url challenge the options carried (re-checked on verify). */
   challenge: string;
   /** Whether it is a registration or authentication challenge (defensive: don't cross-use). */
@@ -107,6 +112,13 @@ export interface AuthWebauthnOptions {
   credentials?: KvStore<StoredCredential>;
   /** The transient challenge store (keyed by userId). Defaults to in-memory. */
   challenges?: KvStore<PendingChallenge>;
+  /** Verification seams for deterministic adapter tests; production uses `@simplewebauthn/server`. */
+  verification?: {
+    /** Optional registration verifier override. */
+    registration?: VerifyRegistration;
+    /** Optional authentication verifier override. */
+    authentication?: VerifyAuthentication;
+  };
 }
 
 /** Base64url-encode raw bytes (for storing the COSE public key). */
@@ -134,6 +146,8 @@ export class AuthWebauthnProvider implements AuthProviderPort {
   private readonly expectedOrigin: string | string[];
   private readonly credentials: KvStore<StoredCredential>;
   private readonly challenges: KvStore<PendingChallenge>;
+  private readonly verifyRegistration: VerifyRegistration;
+  private readonly verifyAuthentication: VerifyAuthentication;
 
   constructor(opts: AuthWebauthnOptions) {
     this.rpID = opts.rpID;
@@ -141,6 +155,8 @@ export class AuthWebauthnProvider implements AuthProviderPort {
     this.expectedOrigin = opts.expectedOrigin;
     this.credentials = opts.credentials ?? new InMemoryKv<StoredCredential>();
     this.challenges = opts.challenges ?? new InMemoryKv<PendingChallenge>();
+    this.verifyRegistration = opts.verification?.registration ?? verifyRegistrationResponse;
+    this.verifyAuthentication = opts.verification?.authentication ?? verifyAuthenticationResponse;
   }
 
   /**
@@ -162,8 +178,8 @@ export class AuthWebauthnProvider implements AuthProviderPort {
       userName: userId,
       // Bind the credential to this exact identity (the user handle the authenticator stores).
       userID: Uint8Array.from(Buffer.from(userId, "utf8")),
-      // A resident key (discoverable passkey) verified by user presence — the reference passkey shape.
-      authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
+      // A resident key (discoverable passkey) with user verification — the reference passkey shape.
+      authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
       // Exclude any already-registered credential so the same authenticator can't double-register.
       excludeCredentials:
         existing !== undefined
@@ -183,26 +199,27 @@ export class AuthWebauthnProvider implements AuthProviderPort {
    * pending challenge and store the credential. **Atomic from the adapter's view:** the credential is written to the
    * store ONLY when `verifyRegistrationResponse` reports `verified` AND yields a credential; otherwise it throws and
    * stores nothing (so the caller — identity — records no enrollment fact: the no-half-bound property GLA-013 AC#4).
-   * On success the pending challenge is cleared and `{ credentialId, authStrength: "webauthn" }` (a FACT) is returned.
+   * On success the pending challenge is cleared and `{ credentialId, authStrength: "webauthn", assurance }` (a
+   * FACT) is returned.
    */
   async finishEnrollment(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ credentialId: string; authStrength: AuthStrength }> {
+  ): Promise<AuthProviderEnrollmentResult> {
     const pending = this.challenges.get(userId);
     if (pending === undefined || pending.kind !== "register") {
       throw new Error("no pending registration challenge for this user");
     }
     let verification: Awaited<ReturnType<typeof verifyRegistrationResponse>>;
     try {
-      verification = await verifyRegistrationResponse({
+      verification = await this.verifyRegistration({
         // The browser's RegistrationResponseJSON (validated by the library; an out-of-shape body fails here).
         response: assertion as RegistrationResponseJSON,
         expectedChallenge: pending.challenge,
         expectedOrigin: this.expectedOrigin,
         expectedRPID: this.rpID,
         requireUserPresence: true,
-        requireUserVerification: false,
+        requireUserVerification: true,
       });
     } catch (e) {
       // A malformed/forged attestation throws — surface a stable failure, store NOTHING (atomic).
@@ -210,6 +227,9 @@ export class AuthWebauthnProvider implements AuthProviderPort {
     }
     if (!verification.verified || verification.registrationInfo === undefined) {
       throw new Error("webauthn registration not verified");
+    }
+    if (!verification.registrationInfo.userVerified) {
+      throw new Error("webauthn registration missing user verification");
     }
     const cred = verification.registrationInfo.credential;
     const stored: StoredCredential = {
@@ -221,7 +241,17 @@ export class AuthWebauthnProvider implements AuthProviderPort {
     // Commit only now (after a verified ceremony) — the atomic write.
     this.credentials.set(userId, stored);
     this.challenges.delete(userId);
-    return { credentialId: stored.id, authStrength: "webauthn" };
+    return {
+      credentialId: stored.id,
+      authStrength: "webauthn",
+      assurance: assuranceFromAuthStrength("webauthn", {
+        methodResolvable: true,
+        userPresent: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      }),
+    };
   }
 
   /**
@@ -242,7 +272,7 @@ export class AuthWebauthnProvider implements AuthProviderPort {
           ? { id: cred.id, transports: cred.transports }
           : { id: cred.id },
       ],
-      userVerification: "preferred",
+      userVerification: "required",
     });
     this.challenges.set(userId, { challenge: options.challenge, kind: "authenticate" });
     return options;
@@ -251,13 +281,14 @@ export class AuthWebauthnProvider implements AuthProviderPort {
   /**
    * Verify an authentication assertion (kernel `AuthProviderPort.verifyAssertion`): check the assertion against the
    * stored credential + the pending challenge. Returns FACTS — `{ ok, authStrength }` — never an allow/deny. On a
-   * verified assertion the stored counter is bumped (replay-defense) and `ok: true, authStrength: "webauthn"` is
-   * returned; an un-enrolled user, a wrong/forged assertion, or no pending challenge yields `ok: false`.
+   * verified assertion the stored counter is bumped (replay-defense) and `ok: true, authStrength: "webauthn",
+   * assurance` is returned; an un-enrolled user, a wrong/forged assertion, or no pending challenge yields
+   * `ok: false`.
    */
   async verifyAssertion(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength }> {
+  ): Promise<AuthProviderVerificationResult> {
     const cred = this.credentials.get(userId);
     const pending = this.challenges.get(userId);
     if (cred === undefined || pending === undefined || pending.kind !== "authenticate") {
@@ -265,7 +296,7 @@ export class AuthWebauthnProvider implements AuthProviderPort {
     }
     let verification: Awaited<ReturnType<typeof verifyAuthenticationResponse>>;
     try {
-      verification = await verifyAuthenticationResponse({
+      verification = await this.verifyAuthentication({
         response: assertion as AuthenticationResponseJSON,
         expectedChallenge: pending.challenge,
         expectedOrigin: this.expectedOrigin,
@@ -276,18 +307,54 @@ export class AuthWebauthnProvider implements AuthProviderPort {
           counter: cred.counter,
           ...(cred.transports !== undefined ? { transports: cred.transports } : {}),
         },
-        requireUserVerification: false,
+        requireUserVerification: true,
       });
     } catch {
-      return { ok: false, authStrength: "none" };
+      return {
+        ok: false,
+        authStrength: "none",
+        assurance: assuranceFromAuthStrength("none", {
+          diagnostics: ["assertion-verification-failed"],
+        }),
+      };
     }
     if (!verification.verified) {
-      return { ok: false, authStrength: "none" };
+      return {
+        ok: false,
+        authStrength: "none",
+        assurance: assuranceFromAuthStrength("none", {
+          diagnostics: ["assertion-verification-failed"],
+        }),
+      };
+    }
+    if (!verification.authenticationInfo.userVerified) {
+      return {
+        ok: false,
+        authStrength: "none",
+        assurance: assuranceFromAuthStrength("none", {
+          methodResolvable: true,
+          userPresent: true,
+          userVerified: false,
+          recipientBound: true,
+          replayResistant: true,
+          diagnostics: ["missing-user-verification"],
+        }),
+      };
     }
     // Bump the stored counter (replay-defense) and clear the consumed challenge.
     this.credentials.set(userId, { ...cred, counter: verification.authenticationInfo.newCounter });
     this.challenges.delete(userId);
-    return { ok: true, authStrength: "webauthn" };
+    return {
+      ok: true,
+      authStrength: "webauthn",
+      assurance: assuranceFromAuthStrength("webauthn", {
+        methodResolvable: true,
+        userPresent: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      }),
+    };
   }
 
   /** Is a credential stored for this user? (Identity uses this to derive the enrollment fact.) */

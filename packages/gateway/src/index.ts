@@ -6,10 +6,13 @@
 //
 // Routes (Phase E):
 //   GET  /enroll?grant=<token>  → verify the grant (sig, recipient caveat, TTL, single-use NOT-spent, class +
-//                                 purpose) → serve the enrollment web page (HTML+JS running navigator.credentials.create)
-//   POST /enroll/options        → re-verify the grant → registration options (a challenge) from Identity+Auth
-//   POST /enroll/verify         → re-verify the grant → verify the attestation + ATOMICALLY store the credential
-//                                 bound to the recipient + set auth_strength=webauthn + MARK THE GRANT SPENT
+//                                 purpose) → serve the enrollment web page and issue an HttpOnly bootstrap ticket.
+//   POST /enroll/options        → resolve the bootstrap ticket or legacy body grant → registration options from
+//                                 Identity+Auth. Redirect-shaped delegated ceremonies consume the GLA grant before
+//                                 the browser leaves this origin.
+//   POST /enroll/verify         → verify the attestation + ATOMICALLY store the credential bound to the recipient;
+//                                 in-page ceremonies consume here, delegated callbacks must match a pending consumed
+//                                 grant from /enroll/options.
 // On an absent/invalid/expired/wrong-recipient/REUSED grant → refuse (400/401/403) with a stable reason; NO
 // credential is stored. The grant is re-checked on EVERY enrollment request (a stale page cannot complete).
 //
@@ -19,20 +22,62 @@
 // AC#5; the import-boundary lint proves it). The seams below are structural interfaces the capability/identity
 // services satisfy.
 
-import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
+import { randomBytes } from "node:crypto";
+import { readFile, realpath, stat } from "node:fs/promises";
+import {
+  type IncomingMessage,
+  type OutgoingHttpHeaders,
+  type Server,
+  type ServerResponse,
+  createServer,
+} from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
-import type {
-  AuthStrength,
-  Capability,
-  CapabilityId,
-  ErrorCode,
-  OpaqueToken,
-  RecipientRef,
-  RouteId,
-  SessionId,
+import { extname, isAbsolute, relative, resolve as resolvePath } from "node:path";
+import {
+  type AuthAssuranceEvidence,
+  type AuthAssurancePolicy,
+  type AuthStrength,
+  type Capability,
+  type CapabilityId,
+  type ErrorCode,
+  type OpaqueToken,
+  type RecipientRef,
+  type RouteId,
+  type SessionId,
+  authAssurancePolicyFromProfile,
+  authAssurancePolicyFromRequiredAuthStrength,
+  authAssuranceSufficient,
 } from "@gla/kernel";
+import { authCallbackPageHtml } from "./callback-page.js";
 import { enrollPageHtml, refusalPageHtml } from "./enroll-page.js";
 import { handoffPageHtml, handoffRefusalHtml, handoffReusedPageHtml } from "./handoff-page.js";
+import {
+  type PublicBase,
+  internalPathForPublicRequest,
+  parsePublicBaseUrl,
+  publicPath,
+  publicUrl,
+} from "./public-base.js";
+
+const STREAM_TICKET_COOKIE = "gla_handoff";
+const HANDOFF_BOOTSTRAP_COOKIE = "gla_handoff_boot";
+const ENROLL_BOOTSTRAP_COOKIE = "gla_enroll_boot";
+const STREAM_TICKET_TTL_MS = 5 * 60 * 1000;
+const GRANT_BOOTSTRAP_TTL_MS = 15 * 60 * 1000;
+const NO_STORE_SECURITY_HEADERS = {
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+} as const;
+
+export {
+  PublicBaseUrlError,
+  internalPathForPublicRequest,
+  parsePublicBaseUrl,
+  publicPath,
+  publicUrl,
+} from "./public-base.js";
+export type { PublicBase } from "./public-base.js";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
 export const GATEWAY_MODULE = "@gla/gateway" as const;
@@ -68,6 +113,11 @@ export interface EnrollmentGrantPort {
    * calls {@link unspend} to roll the nonce back (so a genuine failure stays retryable).
    */
   tryConsumeEnrollmentGrantToken(token: OpaqueToken, now?: string): EnrollmentGrantVerifyResult;
+  /**
+   * Verify a signed grant whose nonce is already consumed. Used only for delegated callback completion after
+   * `/enroll/options` consumed the grant and the gateway recorded the nonce as pending.
+   */
+  verifyConsumedEnrollmentGrantToken(token: OpaqueToken, now?: string): EnrollmentGrantVerifyResult;
   /** Roll back an optimistic consume (un-spend a nonce) when the ceremony that followed it failed. */
   unspend(nonce: string): void;
 }
@@ -118,6 +168,15 @@ export interface SessionGrantPort {
     token: OpaqueToken,
     args: { scopePath: string; now?: string },
   ): SessionGrantVerifyResult;
+  /**
+   * Non-authorizing stale-link classifier: proves a refused token is signature-valid, session-class, and route-scoped
+   * while ignoring TTL/revocation. The gateway uses this only after normal verification already refused the token, so
+   * expired/revoked tokens from other routes cannot reveal recently retired route history.
+   */
+  proveStaleSessionGrantRoute?(
+    token: OpaqueToken,
+    args: { scopePath: string; now?: string },
+  ): SessionGrantVerifyResult;
 }
 
 /**
@@ -140,33 +199,71 @@ export interface IdentityStepUpPort {
   verifyAuthentication(
     recipient: RecipientRef,
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength; userId: string }>;
+  ): Promise<{
+    ok: boolean;
+    authStrength: AuthStrength;
+    assurance?: AuthAssuranceEvidence;
+    userId: string;
+  }>;
 }
 
-/** The auth strength the gateway requires of the bound recipient before forwarding to the capsule. */
+/** Deprecated compatibility input for deployments that still pass the pre-policy strength floor. */
 export type RequiredAuthStrength = Exclude<AuthStrength, "none">;
 
 /**
- * A route programmed on the gateway by the Route controller (Slice 4b). The gateway is the {@link RouteGatewayPort}
- * the controller programs: it exposes `path` publicly, verifies the bound grant statelessly on every request + WS
- * upgrade, and proxies an AUTHORIZED WS upgrade to `internalEndpoint` (the capsule's noVNC human entrypoint) — and
- * nothing else (GLA-038/039 AC#1). A route is reachable ONLY within an open authorized window (GLA-039 AC#2).
+ * A route programmed on the gateway by the Route controller (Slice 4b). Authorization state (path, grant,
+ * recipient/session) is separate from the reverse-proxy transport binding. The gateway verifies the bound grant
+ * statelessly on every request + upgrade; only after authorization does the transport binding get used.
  */
 interface ProgrammedRoute {
   routeId: RouteId;
   path: string;
-  internalEndpoint: string;
+  entrypointResourceId: string;
+  client: HumanEntrypointClientBinding;
+  transport: ReverseProxyTransportBinding;
   boundGrantId: CapabilityId;
   sessionId: SessionId;
 }
 
-/** What a `mount` request from the Route controller carries (mirrors `@gla/route`'s RouteMount — kept structural). */
-export interface RouteMountRequest {
+interface RetiredRoute extends ProgrammedRoute {
+  retiredAt: number;
+}
+
+interface HumanEntrypointClientBinding {
+  kind: string;
+  ref?: string;
+  bootstrap?: Record<string, unknown>;
+}
+
+interface ReverseProxyTransportBinding {
+  kind: "reverse-proxy";
+  protocol: string;
+  upstream: string;
+}
+
+/** Provider-owned browser-client assets the gateway serves read-only under `/handoff/client-assets/<ref>/...`. */
+export interface EntrypointClientAssetMount {
+  /** Provider-owned reference from `HumanEntrypointClientBinding.ref`. */
+  ref: string;
+  /** Local read-only directory containing browser assets for that ref. */
+  root: string;
+  /** Cache policy for served assets. Defaults to `no-cache` so module trees revalidate across upgrades. */
+  cacheControl?: string;
+}
+
+interface RouteAuthorizationMount {
   routeId: RouteId;
   path: string;
-  internalEndpoint: string;
   boundGrantId: CapabilityId;
   sessionId: SessionId;
+  entrypointResourceId: string;
+}
+
+/** What a `mount` request from the Route controller carries (mirrors `@gla/route`'s RouteMount — kept structural). */
+export interface RouteMountRequest {
+  authorization: RouteAuthorizationMount;
+  transport: ReverseProxyTransportBinding;
+  client: HumanEntrypointClientBinding;
 }
 
 /** Construction options for the Access Gateway. */
@@ -182,26 +279,44 @@ export interface GatewayOptions {
    */
   sessionGrants?: SessionGrantPort;
   /**
-   * The identity step-up seam (the Identity service; Slice 4b / Phase 6). The gateway triggers WebAuthn step-up
-   * when the bound recipient's `auth_strength` is insufficient. Optional in an enrollment-only gateway.
+   * The identity step-up seam (the Identity service; Slice 4b / Phase 6). The gateway triggers provider-backed
+   * step-up when the bound recipient's assurance is insufficient. Optional in an enrollment-only gateway.
    */
   stepUp?: IdentityStepUpPort;
   /**
-   * The auth strength a handoff requires of the bound recipient (default `webauthn`). When the recipient's
-   * step-up reaches this strength, the WS upgrade is authorized; below it, step-up is triggered.
+   * The provider-neutral assurance policy a handoff requires of the bound recipient. Defaults to the secure
+   * phishing-resistant profile. Gateway decisions consult this common contract, not provider method names.
+   */
+  authAssurancePolicy?: AuthAssurancePolicy;
+  /**
+   * Deprecated compatibility input. Prefer {@link authAssurancePolicy}. `"webauthn"` maps to the default
+   * phishing-resistant profile; `"password"` maps to the explicit password-permitted profile.
    */
   requiredAuthStrength?: RequiredAuthStrength;
   /**
    * The **auth-reuse TTL** (ms) — how long a successful recipient step-up stays valid for REUSE across a LATER
    * handoff window for the SAME recipient (scenario-01 Phase 12: "auth still valid, no re-prompt"). On a successful
    * step-up the gateway records a short-lived `{recipient, auth_strength, expiresAt}` validity; a SECOND window's
-   * grant for the SAME recipient, while that validity is unexpired AND meets the required strength, is authorized
+   * grant for the SAME recipient, while that validity is unexpired AND satisfies the selected policy, is authorized
    * WITHOUT a fresh WebAuthn ceremony (no re-prompt). An expired/absent validity, or a DIFFERENT recipient, falls
    * back to a full step-up (Phase 6 behaviour). The grant is STILL verified cryptographically on every request +
    * upgrade — reuse only skips the interactive ceremony, never the grant check (recipient-specific, TTL-bounded,
    * not bypassable). Default 15 minutes (≈ the handoff window TTL). Set 0 to DISABLE reuse (always re-prompt).
    */
   authReuseTtlMs?: number;
+  /**
+   * The externally reachable public base URL. When it contains a non-root path, generated links and browser
+   * same-origin calls use that public prefix while internal route scope paths remain root-shaped.
+   */
+  publicBaseUrl?: string;
+  /**
+   * Trust `X-Forwarded-Prefix` as proof that a stripping reverse proxy received the configured public prefix.
+   *
+   * Default false: prefix-preserving proxying works without trusting client-supplied headers, and a direct client
+   * cannot publish unprefixed aliases by spoofing the header. Enable only behind an edge that overwrites or strips
+   * incoming `X-Forwarded-Prefix` before forwarding to GLA.
+   */
+  trustForwardedPrefix?: boolean;
   /**
    * The bind host. Default `0.0.0.0` (the hermes-1 deployment target, behind host Caddy). Tests pass `127.0.0.1`
    * with an ephemeral port.
@@ -222,6 +337,11 @@ export interface GatewayOptions {
    * proxy resets this on every byte, so a live stream is never killed. Default 120_000 (120s). Set 0 to disable.
    */
   proxyIdleTimeoutMs?: number;
+  /**
+   * Provider-owned browser-client asset trees. This is static client hosting only; every capsule connection still
+   * goes through grant-verified route upgrades.
+   */
+  entrypointClientAssets?: EntrypointClientAssetMount[];
 }
 
 /** A parsed enrollment/handoff request body. `attestation` is enrollment; `assertion`/`path` are the handoff step-up. */
@@ -250,6 +370,10 @@ function statusForReason(reason: ErrorCode): number {
   }
 }
 
+function staleGrantReasonProvesIssuedLink(reason: ErrorCode): boolean {
+  return reason === "auth.expired" || reason === "auth.revoked" || reason === "auth.not_yet_valid";
+}
+
 /**
  * The Access Gateway HTTP server. The SOLE public entry; for Phase E it serves the grant-verified enrollment
  * flow. Construct with the grant + identity seams (and an optional host/port), then `listen()`.
@@ -259,14 +383,16 @@ export class AccessGateway {
   private readonly identity: IdentityEnrollPort | undefined;
   private readonly sessionGrants: SessionGrantPort | undefined;
   private readonly stepUp: IdentityStepUpPort | undefined;
-  private readonly requiredAuthStrength: RequiredAuthStrength;
+  private readonly authAssurancePolicy: AuthAssurancePolicy;
   private readonly host: string;
   private readonly port: number;
   private server: Server | undefined;
   /** The route table programmed by the Route controller, keyed by public path. A route binds to one grant. */
   private readonly routes = new Map<string, ProgrammedRoute>();
+  /** Recently-unmounted handoff paths, retained only to classify stale links as typed auth refusals. */
+  private readonly retiredRoutes = new Map<string, RetiredRoute>();
   /**
-   * The per-grant step-up marker: a grant id whose bound recipient has authenticated to the required strength
+   * The per-grant step-up marker: a grant id whose bound recipient has authenticated to the selected policy
    * (so the next WS upgrade for that grant is authorized). It is the small mutable edge state the step-up needs —
    * the WS upgrade still verifies the grant STATELESSLY (signature/recipient/TTL/scope/revocation) AND checks this
    * marker. Cleared on the grant's revoke/force-close so a revoked grant cannot reach the capsule.
@@ -282,28 +408,64 @@ export class AccessGateway {
    */
   private readonly recipientAuth = new Map<
     RecipientRef,
-    { authStrength: AuthStrength; expiresAt: number }
+    { assurance: AuthAssuranceEvidence | AuthStrength; expiresAt: number }
   >();
   /** The auth-reuse TTL (ms) — how long a step-up stays valid for reuse on a later window. 0 disables reuse. */
   private readonly authReuseTtlMs: number;
+  /** The public URL/path contract used for links, page calls, and inbound prefix normalization. */
+  private readonly publicBase: PublicBase;
+  /** Whether to trust `X-Forwarded-Prefix` for strip-prefix proxy mode. */
+  private readonly trustForwardedPrefix: boolean;
   /** Live proxied sockets per grant id, so a revoke/force-close can sever them (GLA-039 AC#3). */
   private readonly liveSockets = new Map<CapabilityId, Set<Socket>>();
   /** The WS-proxy upstream connect timeout (ms) — a stalled dial cannot pin an fd waiting on `connect`. */
   private readonly proxyConnectTimeoutMs: number;
   /** The WS-proxy idle timeout (ms) applied to both proxied sockets — a stalled stream cannot pin fds. 0 disables. */
   private readonly proxyIdleTimeoutMs: number;
+  /** Provider browser-client assets served from local read-only roots, grouped by provider ref. */
+  private readonly entrypointClientAssets = new Map<string, EntrypointClientAssetMount[]>();
+  /** Short-lived same-origin stream tickets that let browser WebSockets avoid grant-bearing URLs. */
+  private readonly streamTickets = new Map<
+    string,
+    { grant: OpaqueToken; grantId: CapabilityId; routePath: string; expiresAt: number }
+  >();
+  /** Server-side bootstrap tickets: public pages hold only opaque cookie ids, never raw grant values. */
+  private readonly grantBootstrapTickets = new Map<
+    string,
+    { grant: OpaqueToken; purpose: "enroll" | "handoff"; routePath?: string; expiresAt: number }
+  >();
+  /**
+   * Delegated enrollment redirects consume the GLA grant before leaving this origin. The callback may finish only
+   * once for a nonce recorded here; abandonment leaves the grant spent and the pending attempt harmlessly unusable.
+   */
+  private readonly pendingDelegatedEnrollmentNonces = new Set<string>();
 
   constructor(opts: GatewayOptions) {
     this.grants = opts.grants;
     this.identity = opts.identity;
     this.sessionGrants = opts.sessionGrants;
     this.stepUp = opts.stepUp;
-    this.requiredAuthStrength = opts.requiredAuthStrength ?? "webauthn";
+    this.authAssurancePolicy =
+      opts.authAssurancePolicy ??
+      (opts.requiredAuthStrength !== undefined
+        ? authAssurancePolicyFromRequiredAuthStrength(opts.requiredAuthStrength)
+        : authAssurancePolicyFromProfile());
     this.authReuseTtlMs = opts.authReuseTtlMs ?? 15 * 60 * 1000;
+    this.publicBase = parsePublicBaseUrl(opts.publicBaseUrl ?? "http://localhost/");
     this.host = opts.host ?? "0.0.0.0";
     this.port = opts.port ?? 3000;
     this.proxyConnectTimeoutMs = opts.proxyConnectTimeoutMs ?? 10_000;
     this.proxyIdleTimeoutMs = opts.proxyIdleTimeoutMs ?? 120_000;
+    this.trustForwardedPrefix = opts.trustForwardedPrefix ?? false;
+    for (const mount of opts.entrypointClientAssets ?? []) {
+      const normalized = normalizeClientAssetMount(mount);
+      if (normalized === undefined) {
+        continue;
+      }
+      const existing = this.entrypointClientAssets.get(normalized.ref) ?? [];
+      existing.push(normalized);
+      this.entrypointClientAssets.set(normalized.ref, existing);
+    }
   }
 
   /** Start listening. Returns the actual bound `{ host, port }` (port is the ephemeral one when 0 was requested). */
@@ -311,8 +473,8 @@ export class AccessGateway {
     const server = createServer((req, res) => {
       void this.handle(req, res);
     });
-    // The WS upgrade is the human side of the two-actor capsule: verify the grant + require the bound identity,
-    // then proxy the AUTHORIZED upgrade to the capsule's noVNC endpoint and nothing else (GLA-038/039 AC#1).
+    // The upgrade is the human side of the two-actor capsule: verify the grant + require the bound identity,
+    // then proxy the AUTHORIZED upgrade to the mounted entrypoint transport and nothing else (GLA-038/039 AC#1).
     server.on("upgrade", (req, socket, head) => {
       this.handleUpgrade(req, socket as Socket, head);
     });
@@ -365,16 +527,12 @@ export class AccessGateway {
 
   /** Build an enrollment invite link for a recipient's grant token, given the public base URL. */
   static enrollLink(baseUrl: string, grant: OpaqueToken): string {
-    const u = new URL("/enroll", baseUrl);
-    u.searchParams.set("grant", grant);
-    return u.toString();
+    return publicUrl(baseUrl, "/enroll", { grant });
   }
 
   /** Build a recipient-bound handoff link for a grant token + the route path, given the public base URL. */
   static handoffLink(baseUrl: string, path: string, grant: OpaqueToken): string {
-    const u = new URL(path, baseUrl);
-    u.searchParams.set("grant", grant);
-    return u.toString();
+    return publicUrl(baseUrl, path, { grant });
   }
 
   // ── RouteGatewayPort — the Route controller programs the gateway (Slice 4b, GLA-033) ──────────────────────
@@ -385,7 +543,13 @@ export class AccessGateway {
    * statelessly and requires the bound identity. Replacing an existing route on the same path re-binds it.
    */
   async mount(route: RouteMountRequest): Promise<void> {
-    this.routes.set(route.path, { ...route });
+    validateTransportBinding(route.transport);
+    this.retiredRoutes.delete(route.authorization.path);
+    this.routes.set(route.authorization.path, {
+      ...route.authorization,
+      transport: route.transport,
+      client: route.client,
+    });
   }
 
   /**
@@ -396,6 +560,7 @@ export class AccessGateway {
     for (const [path, route] of [...this.routes.entries()]) {
       if (route.routeId === routeId) {
         this.routes.delete(path);
+        this.rememberRetiredRoute(route);
         // Force-close the live WS + drop the auth marker so the capsule is no longer reachable via this grant.
         this.forceCloseGrant(route.boundGrantId);
         this.authorizedGrants.delete(route.boundGrantId);
@@ -422,13 +587,18 @@ export class AccessGateway {
       this.liveSockets.delete(grantId);
     }
     this.authorizedGrants.delete(grantId);
+    this.deleteStreamTicketsForGrant(grantId);
   }
 
   /** The single request router. Every enrollment + handoff route verifies the grant FIRST — no bypass. */
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      const path = url.pathname;
+      const path = this.internalRequestPath(url.pathname, req);
+      if (path === undefined) {
+        this.sendJson(res, 404, { error: { code: "catalog.unknown", message: "not found" } });
+        return;
+      }
       const method = (req.method ?? "GET").toUpperCase();
 
       // ── Phase E — enrollment (Slice 4a). Only wired when the enrollment seams are present. ──
@@ -447,6 +617,26 @@ export class AccessGateway {
         }
       }
 
+      // ── Delegated-auth callback landing. Provider-neutral: it restores same-origin GLA state and re-POSTs
+      // `{code,state}` to the unchanged verify routes. The IdP never receives the GLA grant.
+      if (method === "GET" && path === "/auth/callback") {
+        this.sendHtml(
+          res,
+          200,
+          authCallbackPageHtml({
+            enrollVerify: this.publicPath("/enroll/verify"),
+            handoffVerify: this.publicPath("/handoff/auth/verify"),
+            clientAssets: this.publicPath("/handoff/client-assets"),
+          }),
+        );
+        return;
+      }
+
+      if (method === "GET" && path.startsWith("/handoff/client-assets/")) {
+        await this.handleClientAsset(path, res);
+        return;
+      }
+
       // ── Phase 6/12 — handoff (Slice 4b). Verify the recipient-bound grant + require the bound identity. ──
       // The step-up auth POST is grant-verified and recipient-bound (no bypass — only the bound recipient).
       if (method === "POST" && path === "/handoff/auth/options") {
@@ -463,6 +653,11 @@ export class AccessGateway {
         await this.handleHandoffPage(url, route, res);
         return;
       }
+      const retiredRoute = this.retiredRouteForPath(path);
+      if (method === "GET" && retiredRoute !== undefined) {
+        this.handleStaleHandoffPage(url, retiredRoute, res);
+        return;
+      }
 
       // Nothing else is publicly reachable on the gateway (the agent has NO path through it).
       this.sendJson(res, 404, { error: { code: "catalog.unknown", message: "not found" } });
@@ -473,9 +668,10 @@ export class AccessGateway {
   }
 
   /**
-   * `GET /enroll?grant=<token>` — verify the grant, then serve the enrollment page. The recipient is read from the
-   * VERIFIED grant (never a query param), so a forwarded link is bound to its recipient. An absent grant → 400; an
-   * invalid/expired/wrong-recipient/reused grant → 403, the refusal page.
+   * `GET /enroll?grant=<token>` — verify the grant, set an HttpOnly bootstrap ticket, then serve the enrollment
+   * page without embedding the raw grant. The recipient is read from the VERIFIED grant (never a query param), so a
+   * forwarded link is bound to its recipient. An absent grant → 400; an invalid/expired/wrong-recipient/reused grant
+   * → 403, the refusal page.
    */
   private handleEnrollPage(url: URL, res: ServerResponse): void {
     const grants = this.grants;
@@ -494,12 +690,27 @@ export class AccessGateway {
       return;
     }
     // The recipient label is display-only; the binding is the verified grant's recipient caveat.
-    this.sendHtml(res, 200, enrollPageHtml(grant, String(verified.recipient)));
+    this.sendHtml(
+      res,
+      200,
+      enrollPageHtml(String(verified.recipient), {
+        options: this.publicPath("/enroll/options"),
+        verify: this.publicPath("/enroll/verify"),
+      }),
+      {
+        "set-cookie": this.createGrantBootstrapCookie(
+          ENROLL_BOOTSTRAP_COOKIE,
+          "enroll",
+          grant as OpaqueToken,
+        ),
+      },
+    );
   }
 
   /**
    * `POST /enroll/options` — re-verify the grant (every request), then return registration options for the bound
-   * recipient. No bypass: a request without a valid grant is refused before any options are produced.
+   * recipient. Redirect-shaped delegated options spend the GLA grant before the browser leaves this origin; abandoning
+   * the provider flow then requires a fresh invite. In-page WebAuthn options stay retryable until verify consumes.
    */
   private async handleEnrollOptions(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const grants = this.grants;
@@ -509,12 +720,12 @@ export class AccessGateway {
       return;
     }
     const body = await this.readJson(req);
-    const grant = body.grant;
-    if (typeof grant !== "string" || grant.length === 0) {
+    const grant = this.enrollmentGrantFromRequest(body, req);
+    if (grant === undefined) {
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant"));
       return;
     }
-    const verified = grants.verifyEnrollmentGrantToken(grant as OpaqueToken);
+    const verified = grants.verifyEnrollmentGrantToken(grant);
     if (!verified.ok) {
       this.sendJson(
         res,
@@ -523,19 +734,30 @@ export class AccessGateway {
       );
       return;
     }
-    const options = await identity.enrollmentOptions(verified.recipient, grant as OpaqueToken);
+    const options = await identity.enrollmentOptions(verified.recipient, grant);
+    if (isDelegatedEnrollmentOptions(options)) {
+      const consumed = grants.tryConsumeEnrollmentGrantToken(grant);
+      if (!consumed.ok) {
+        this.sendJson(
+          res,
+          statusForReason(consumed.reason),
+          this.errBody(consumed.reason, "enrollment grant rejected"),
+        );
+        return;
+      }
+      this.pendingDelegatedEnrollmentNonces.add(consumed.nonce);
+    }
     this.sendJson(res, 200, options as Record<string, unknown>);
   }
 
   /**
-   * `POST /enroll/verify` — **atomically verify-and-consume** the grant, then verify the attestation + store the
-   * credential. No bypass: a direct POST with no/invalid grant is refused and stores nothing (GLA-012 AC#2).
+   * `POST /enroll/verify` — verify the attestation + store the credential. No bypass: a direct POST with no/invalid
+   * grant is refused and stores nothing (GLA-012 AC#2).
    *
-   * The grant is consumed (its single-use nonce marked spent) **before** the WebAuthn ceremony, atomically, so two
-   * concurrent verifies of the same grant cannot both proceed — exactly one consumes it; the loser is refused
-   * `auth.revoked` (closes the single-use TOCTOU window, GLA-013 AC#2's "one grant = one ceremony"). If the
-   * ceremony then fails (no half-bound — GLA-013 AC#4), the consume is **rolled back** (`unspend`) so the same
-   * still-valid grant stays retryable.
+   * In-page WebAuthn consumes here, before the ceremony, atomically: two concurrent verifies cannot both proceed. If
+   * the local ceremony fails, the consume is rolled back so the same still-valid grant stays retryable. Delegated
+   * callbacks are different: the grant was already consumed by redirect-shaped `/enroll/options`; callback completion
+   * must match that pending nonce once, and failure/abandonment leaves the grant spent so recovery uses a fresh invite.
    */
   private async handleEnrollVerify(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const grants = this.grants;
@@ -545,8 +767,8 @@ export class AccessGateway {
       return;
     }
     const body = await this.readJson(req);
-    const grant = body.grant;
-    if (typeof grant !== "string" || grant.length === 0) {
+    const grant = this.enrollmentGrantFromRequest(body, req);
+    if (grant === undefined) {
       // NO BYPASS: a verify with no grant is refused before any credential work.
       this.sendJson(res, 401, this.errBody("auth.insufficient", "missing enrollment grant"));
       return;
@@ -554,7 +776,7 @@ export class AccessGateway {
     // Validate the request BEFORE consuming the grant, so a malformed body (no attestation) never burns it.
     if (body.attestation === undefined) {
       // The grant must still verify (no-bypass) — read-only check, no consume.
-      const check = grants.verifyEnrollmentGrantToken(grant as OpaqueToken);
+      const check = grants.verifyEnrollmentGrantToken(grant);
       if (!check.ok) {
         this.sendJson(
           res,
@@ -566,9 +788,41 @@ export class AccessGateway {
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing attestation"));
       return;
     }
+    if (isDelegatedRedirectAttestation(body.attestation)) {
+      const verified = grants.verifyConsumedEnrollmentGrantToken(grant);
+      if (!verified.ok) {
+        this.sendJson(
+          res,
+          statusForReason(verified.reason),
+          this.errBody(verified.reason, "enrollment grant rejected"),
+        );
+        return;
+      }
+      if (!this.pendingDelegatedEnrollmentNonces.delete(verified.nonce)) {
+        this.sendJson(res, 403, this.errBody("auth.revoked", "enrollment grant rejected"));
+        return;
+      }
+      try {
+        const record = await identity.enrollComplete(verified.recipient, body.attestation);
+        this.deleteGrantBootstrapTicketFromRequest(req, ENROLL_BOOTSTRAP_COOKIE);
+        this.sendJson(
+          res,
+          200,
+          {
+            enrolled: true,
+            auth_strength: this.readEnrolledStrength(record),
+          },
+          { "set-cookie": this.clearCookie(ENROLL_BOOTSTRAP_COOKIE) },
+        );
+      } catch (e) {
+        const code = isCoded(e) ? e.code : "auth.insufficient";
+        this.sendJson(res, 403, this.errBody(code, "enrollment attestation did not verify"));
+      }
+      return;
+    }
     // ATOMIC verify-and-consume: marks the single-use nonce spent in the same synchronous step as the verify, so
     // a concurrent second verify of the same grant observes it already spent and is refused.
-    const verified = grants.tryConsumeEnrollmentGrantToken(grant as OpaqueToken);
+    const verified = grants.tryConsumeEnrollmentGrantToken(grant);
     if (!verified.ok) {
       this.sendJson(
         res,
@@ -577,19 +831,31 @@ export class AccessGateway {
       );
       return;
     }
+    let record: unknown;
     try {
-      await identity.enrollComplete(verified.recipient, body.attestation);
+      record = await identity.enrollComplete(verified.recipient, body.attestation);
     } catch (e) {
-      // A failed/abandoned ceremony: refuse, store NOTHING, and ROLL BACK the consume so the still-valid grant is
-      // retryable (no half-bound — GLA-013 AC#4). The error code is the typed one identity threw when present.
-      grants.unspend(verified.nonce);
+      // A failed ceremony stores NOTHING. WebAuthn's in-page attestation stays retryable with the same live grant;
+      // delegated redirect callbacks stay spent once they return, so a failed delegated enrollment cannot reuse
+      // the same GLA invite. In both cases, recovery is a fresh operator invite.
+      if (!isDelegatedRedirectAttestation(body.attestation)) {
+        grants.unspend(verified.nonce);
+      }
       const code = isCoded(e) ? e.code : "auth.insufficient";
       this.sendJson(res, 403, this.errBody(code, "enrollment attestation did not verify"));
       return;
     }
-    // Success: the credential is stored bound to the recipient with auth_strength=webauthn; the grant is already
-    // consumed (single-use) so it can never be reused (GLA-013 AC#2).
-    this.sendJson(res, 200, { enrolled: true, auth_strength: "webauthn" });
+    // Success: the credential is stored bound to the recipient; the grant is already consumed (single-use) so it can
+    // never be reused (GLA-013 AC#2). ECHO the strength the identity service actually recorded (provider-agnostic —
+    // `"webauthn"` for a passkey enrollment, `"password"` for a password-grade delegated one), matching the handoff
+    // verify response's `auth_strength: factResult.authStrength` echo (no hardcoded strength, no provider special-case).
+    this.deleteGrantBootstrapTicketFromRequest(req, ENROLL_BOOTSTRAP_COOKIE);
+    this.sendJson(
+      res,
+      200,
+      { enrolled: true, auth_strength: this.readEnrolledStrength(record) },
+      { "set-cookie": this.clearCookie(ENROLL_BOOTSTRAP_COOKIE) },
+    );
   }
 
   // ── Handoff at the edge (Slice 4b, scenario-01 Phases 6/12) ───────────────────────────────────────────
@@ -620,7 +886,11 @@ export class AccessGateway {
     }
     const verified = this.verifyHandoffGrant(grant as OpaqueToken, route);
     if (!verified.ok) {
-      this.sendHtml(res, statusForReason(verified.reason), handoffRefusalHtml(verified.reason));
+      this.sendJson(
+        res,
+        statusForReason(verified.reason),
+        this.errBody(verified.reason, "handoff grant rejected"),
+      );
       return;
     }
     // Require the bound identity: an UN-ENROLLED recipient gets a catchable refusal page, never a crash.
@@ -641,15 +911,50 @@ export class AccessGateway {
     //    verified above (not bypassable). An expired/absent validity falls through to the full step-up page (Phase 6).
     if (this.recipientAuthValid(verified.recipient)) {
       this.authorizedGrants.add(verified.capability.id as CapabilityId);
-      this.sendHtml(res, 200, handoffReusedPageHtml(grant, route.path, String(verified.recipient)));
+      const streamCookie = this.createStreamTicketCookie(
+        grant as OpaqueToken,
+        verified.capability.id as CapabilityId,
+        route,
+      );
+      this.sendHtml(
+        res,
+        200,
+        handoffReusedPageHtml(
+          grant,
+          route.path,
+          String(verified.recipient),
+          this.publicPath(route.path),
+          route.client,
+          this.publicPath("/handoff/client-assets"),
+        ),
+        { "set-cookie": streamCookie },
+      );
       return;
     }
     // Serve the step-up page (runs navigator.credentials.get against the recipient's registered credential).
-    this.sendHtml(res, 200, handoffPageHtml(grant, route.path, String(verified.recipient)));
+    this.sendHtml(
+      res,
+      200,
+      handoffPageHtml(grant, route.path, String(verified.recipient), {
+        authOptions: this.publicPath("/handoff/auth/options"),
+        authVerify: this.publicPath("/handoff/auth/verify"),
+        stream: this.publicPath(route.path),
+        clientAssets: this.publicPath("/handoff/client-assets"),
+        entrypointClient: route.client,
+      }),
+      {
+        "set-cookie": this.createGrantBootstrapCookie(
+          HANDOFF_BOOTSTRAP_COOKIE,
+          "handoff",
+          grant as OpaqueToken,
+          route.path,
+        ),
+      },
+    );
   }
 
   /**
-   * `POST /handoff/auth/options` — re-verify the grant (every request, no bypass), then return WebAuthn step-up
+   * `POST /handoff/auth/options` — re-verify the grant (every request, no bypass), then return step-up
    * options for the bound recipient. The route the grant is scoped to is resolved by the grant's scope path; an
    * un-enrolled recipient is refused (a recipient is verifiable only if enrolled — GLA-035 AC#4).
    */
@@ -661,13 +966,26 @@ export class AccessGateway {
       return;
     }
     const body = await this.readJson(req);
-    const grant = body.grant;
     const route = this.routeForBody(body);
-    if (typeof grant !== "string" || grant.length === 0 || route === undefined) {
+    if (route === undefined) {
+      const grant = this.handoffGrantFromBody(body, req);
+      const retiredRoute = this.retiredRouteForBody(body);
+      if (
+        grant !== undefined &&
+        retiredRoute !== undefined &&
+        this.sendStaleHandoffJson(res, grant, retiredRoute)
+      ) {
+        return;
+      }
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
       return;
     }
-    const verified = this.verifyHandoffGrant(grant as OpaqueToken, route);
+    const grant = this.handoffGrantFromBody(body, req, route.path);
+    if (grant === undefined) {
+      this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
+      return;
+    }
+    const verified = this.verifyHandoffGrant(grant, route);
     if (!verified.ok) {
       this.sendJson(
         res,
@@ -691,10 +1009,10 @@ export class AccessGateway {
   }
 
   /**
-   * `POST /handoff/auth/verify` — re-verify the grant (no bypass), then verify the recipient's WebAuthn assertion
-   * against the enrolled credential. On a verified assertion that reaches the required `auth_strength`, MARK the
-   * grant authorized (so the next WS upgrade for it is proxied). A failed assertion → refused, NOT authorized. An
-   * un-enrolled recipient → a catchable refusal (GLA-035 AC#4). Auth is DELEGATED to the provider (GLA-035 AC#5).
+   * `POST /handoff/auth/verify` — resolve the bootstrap ticket or legacy body grant (no bypass), then verify the
+   * recipient's opaque assertion against the selected auth provider. On a verified assertion that reaches the
+   * required assurance, MARK the grant authorized and issue a short-lived HttpOnly stream ticket for the next WS
+   * upgrade. A failed assertion → refused, NOT authorized. An un-enrolled recipient → a catchable refusal.
    */
   private async handleHandoffAuthVerify(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const sessionGrants = this.sessionGrants;
@@ -704,13 +1022,26 @@ export class AccessGateway {
       return;
     }
     const body = await this.readJson(req);
-    const grant = body.grant;
     const route = this.routeForBody(body);
-    if (typeof grant !== "string" || grant.length === 0 || route === undefined) {
+    if (route === undefined) {
+      const grant = this.handoffGrantFromBody(body, req);
+      const retiredRoute = this.retiredRouteForBody(body);
+      if (
+        grant !== undefined &&
+        retiredRoute !== undefined &&
+        this.sendStaleHandoffJson(res, grant, retiredRoute)
+      ) {
+        return;
+      }
       this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
       return;
     }
-    const verified = this.verifyHandoffGrant(grant as OpaqueToken, route);
+    const grant = this.handoffGrantFromBody(body, req, route.path);
+    if (grant === undefined) {
+      this.sendJson(res, 400, this.errBody("usage.bad_argument", "missing grant or unknown route"));
+      return;
+    }
+    const verified = this.verifyHandoffGrant(grant, route);
     if (!verified.ok) {
       this.sendJson(
         res,
@@ -727,50 +1058,81 @@ export class AccessGateway {
       this.sendJson(res, 403, this.errBody("auth.insufficient", "recipient is not enrolled"));
       return;
     }
-    let factResult: { ok: boolean; authStrength: AuthStrength };
+    let factResult: { ok: boolean; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence };
     try {
       factResult = await stepUp.verifyAuthentication(verified.recipient, body.assertion);
     } catch {
       this.sendJson(res, 403, this.errBody("auth.insufficient", "step-up verification failed"));
       return;
     }
-    if (!factResult.ok || !this.strengthSufficient(factResult.authStrength)) {
+    const assurance = factResult.assurance ?? factResult.authStrength;
+    if (!factResult.ok || !this.strengthSufficient(assurance)) {
       // A failed assertion or an insufficient strength → refused, the grant is NOT authorized (GLA-035 AC#…).
       this.sendJson(
         res,
         403,
-        this.errBody("auth.insufficient", "step-up did not satisfy the required strength"),
+        this.errBody(
+          "auth.insufficient",
+          "step-up did not satisfy the selected auth assurance policy",
+        ),
       );
       return;
     }
-    // The bound recipient authenticated to the required strength: authorize the grant so its WS upgrade proxies.
+    // The bound recipient satisfied the selected policy: authorize the grant so its WS upgrade proxies.
     this.authorizedGrants.add(verified.capability.id as CapabilityId);
     // Record the RECIPIENT-level auth validity for REUSE on a later window (scenario-01 Phase 12, GLA-050/051) —
     // keyed by the recipient from the SIGNED grant, TTL-bounded. A second window's grant for THIS recipient, while
     // unexpired + sufficient, skips the ceremony. Disabled when the reuse TTL is 0.
-    this.recordRecipientAuth(verified.recipient, factResult.authStrength);
-    this.sendJson(res, 200, { authorized: true, auth_strength: factResult.authStrength });
+    this.recordRecipientAuth(verified.recipient, assurance);
+    this.deleteGrantBootstrapTicketFromRequest(req, HANDOFF_BOOTSTRAP_COOKIE);
+    this.sendJson(
+      res,
+      200,
+      { authorized: true, auth_strength: factResult.authStrength },
+      {
+        "set-cookie": [
+          this.clearCookie(HANDOFF_BOOTSTRAP_COOKIE),
+          this.createStreamTicketCookie(grant, verified.capability.id as CapabilityId, route),
+        ],
+      },
+    );
   }
 
   /**
    * Handle a WebSocket upgrade on a handoff route (the human reaching the capsule surface — GLA-038/039). VERIFY the
    * recipient-bound grant statelessly AND require that the bound recipient already authenticated to the required
-   * strength (the grant is in the authorized set). Only an AUTHORIZED, in-window upgrade is proxied to the capsule's
-   * noVNC endpoint — and NOTHING else (GLA-038 AC#1). An unverified/expired/revoked grant, an unknown route, or an
-   * un-authorized grant is refused (the connection resolves onward to nothing — GLA-035 AC#2/#3, GLA-039 AC#2).
+   * strength (the grant is in the authorized set). Browser upgrades normally present a one-use HttpOnly stream
+   * ticket instead of a raw grant in the URL; legacy query grants are still accepted for compatibility. Only an
+   * AUTHORIZED, in-window upgrade is proxied to the mounted transport binding — and NOTHING else (GLA-038 AC#1).
    */
   private handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      const route = this.routes.get(url.pathname);
+      const path = this.internalRequestPath(url.pathname, req);
+      const route = path !== undefined ? this.routes.get(path) : undefined;
+      const retiredRoute = path !== undefined ? this.retiredRouteForPath(path) : undefined;
       const sessionGrants = this.sessionGrants;
       if (route === undefined || sessionGrants === undefined) {
+        if (retiredRoute !== undefined && sessionGrants !== undefined) {
+          const grant = this.handoffGrantFromRequest(url, req, retiredRoute.path);
+          if (grant === undefined) {
+            this.refuseUpgrade(socket, 404);
+            return;
+          }
+          const refusal = this.staleHandoffRefusal(grant as OpaqueToken, retiredRoute);
+          if (refusal === undefined) {
+            this.refuseUpgrade(socket, 404);
+            return;
+          }
+          this.refuseUpgrade(socket, statusForReason(refusal.code));
+          return;
+        }
         // No such route is publicly reachable (the route exists only while its window is open — GLA-039 AC#2).
         this.refuseUpgrade(socket, 404);
         return;
       }
-      const grant = url.searchParams.get("grant");
-      if (grant === null || grant.length === 0) {
+      const grant = this.handoffGrantFromRequest(url, req, route.path);
+      if (grant === undefined) {
         this.refuseUpgrade(socket, 400);
         return;
       }
@@ -794,7 +1156,7 @@ export class AccessGateway {
           return;
         }
       }
-      // AUTHORIZED, in-window: proxy the WS upgrade to the capsule's noVNC endpoint and NOTHING else.
+      // AUTHORIZED, in-window: proxy the upgrade to the mounted transport binding and NOTHING else.
       this.proxyUpgrade(req, socket, head, route, grantId);
     } catch {
       this.refuseUpgrade(socket, 500);
@@ -830,24 +1192,87 @@ export class AccessGateway {
     return { error: { code, message } };
   }
 
-  private sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+  private sendJson(
+    res: ServerResponse,
+    status: number,
+    body: Record<string, unknown>,
+    headers: OutgoingHttpHeaders = {},
+  ): void {
     const payload = JSON.stringify(body);
     res.writeHead(status, {
       "content-type": "application/json; charset=utf-8",
       "content-length": Buffer.byteLength(payload),
+      ...NO_STORE_SECURITY_HEADERS,
+      ...headers,
     });
     res.end(payload);
   }
 
-  private sendHtml(res: ServerResponse, status: number, html: string): void {
+  private sendHtml(
+    res: ServerResponse,
+    status: number,
+    html: string,
+    headers: OutgoingHttpHeaders = {},
+  ): void {
     res.writeHead(status, {
       "content-type": "text/html; charset=utf-8",
       "content-length": Buffer.byteLength(html),
+      ...NO_STORE_SECURITY_HEADERS,
+      ...headers,
     });
     res.end(html);
   }
 
+  private async handleClientAsset(path: string, res: ServerResponse): Promise<void> {
+    const asset = resolveClientAssetRequest(path, this.entrypointClientAssets);
+    if (asset === undefined) {
+      this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+      return;
+    }
+    try {
+      const root = await realpath(asset.root);
+      const file = await realpath(asset.path);
+      const rel = relative(root, file);
+      if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+        this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+        return;
+      }
+      const fileStat = await stat(file);
+      if (!fileStat.isFile()) {
+        this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+        return;
+      }
+      const body = await readFile(file);
+      res.writeHead(200, {
+        "content-type": contentTypeForPath(file),
+        "content-length": body.byteLength,
+        "cache-control": asset.cacheControl ?? "no-cache",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+      });
+      res.end(body);
+    } catch {
+      this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+    }
+  }
+
   // ── handoff helpers ───────────────────────────────────────────────────────────────────────────────────
+
+  /** Public same-origin path for an internal gateway route path. */
+  private publicPath(routePath: string): string {
+    return publicPath(this.publicBase, routePath);
+  }
+
+  /** Map an inbound request path to the internal route table path, or undefined if outside the public base. */
+  private internalRequestPath(pathname: string, req: IncomingMessage): string | undefined {
+    const forwardedPrefix = firstHeader(req.headers["x-forwarded-prefix"]);
+    return internalPathForPublicRequest(
+      this.publicBase,
+      pathname,
+      forwardedPrefix,
+      this.trustForwardedPrefix,
+    );
+  }
 
   /**
    * Verify a presented handoff grant against a route — the stateless edge check (GLA-035). Delegates to the injected
@@ -873,10 +1298,111 @@ export class AccessGateway {
     return this.routes.get(body.path);
   }
 
-  /** Is a step-up's reported strength at least the required strength? (`webauthn` ⊇ `password` ⊇ `none`.) */
-  private strengthSufficient(strength: AuthStrength): boolean {
-    const rank: Record<AuthStrength, number> = { none: 0, password: 1, webauthn: 2 };
-    return rank[strength] >= rank[this.requiredAuthStrength];
+  private retiredRouteForBody(body: EnrollBody): RetiredRoute | undefined {
+    if (typeof body.path !== "string" || body.path.length === 0) {
+      return undefined;
+    }
+    return this.retiredRouteForPath(body.path);
+  }
+
+  private retiredRouteForPath(path: string): RetiredRoute | undefined {
+    const route = this.retiredRoutes.get(path);
+    if (route === undefined) {
+      return undefined;
+    }
+    const maxAgeMs = 15 * 60 * 1000;
+    if (Date.now() - route.retiredAt > maxAgeMs) {
+      this.retiredRoutes.delete(path);
+      return undefined;
+    }
+    return route;
+  }
+
+  private rememberRetiredRoute(route: ProgrammedRoute): void {
+    const maxRetiredRoutes = 128;
+    this.retiredRoutes.set(route.path, { ...route, retiredAt: Date.now() });
+    while (this.retiredRoutes.size > maxRetiredRoutes) {
+      const oldest = this.retiredRoutes.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        return;
+      }
+      this.retiredRoutes.delete(oldest);
+    }
+  }
+
+  private handleStaleHandoffPage(url: URL, route: RetiredRoute, res: ServerResponse): void {
+    const grant = url.searchParams.get("grant");
+    if (grant === null || grant.length === 0) {
+      this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+      return;
+    }
+    if (!this.sendStaleHandoffJson(res, grant as OpaqueToken, route)) {
+      this.sendJson(res, 404, this.errBody("catalog.unknown", "not found"));
+    }
+  }
+
+  private sendStaleHandoffJson(
+    res: ServerResponse,
+    grant: OpaqueToken,
+    route: RetiredRoute,
+  ): boolean {
+    const refusal = this.staleHandoffRefusal(grant, route);
+    if (refusal === undefined) {
+      return false;
+    }
+    this.sendJson(res, statusForReason(refusal.code), this.errBody(refusal.code, refusal.message));
+    return true;
+  }
+
+  private staleHandoffRefusal(
+    grant: OpaqueToken,
+    route: RetiredRoute,
+  ): { code: ErrorCode; message: string } | undefined {
+    const verified = this.verifyHandoffGrant(grant, route);
+    if (!verified.ok) {
+      if (!staleGrantReasonProvesIssuedLink(verified.reason)) {
+        return undefined;
+      }
+      if (!this.staleGrantMatchesRoute(grant, route)) {
+        return undefined;
+      }
+      return { code: verified.reason, message: "handoff grant rejected" };
+    }
+    return { code: "auth.revoked", message: "handoff window is no longer open" };
+  }
+
+  private staleGrantMatchesRoute(grant: OpaqueToken, route: RetiredRoute): boolean {
+    const sessionGrants = this.sessionGrants;
+    const prove = sessionGrants?.proveStaleSessionGrantRoute;
+    if (sessionGrants === undefined || prove === undefined) {
+      return false;
+    }
+    return prove.call(sessionGrants, grant, { scopePath: route.path }).ok;
+  }
+
+  /** Is a step-up's reported fact sufficient for the selected provider-neutral assurance policy? */
+  private strengthSufficient(assurance: AuthAssuranceEvidence | AuthStrength): boolean {
+    return authAssuranceSufficient(assurance, this.authAssurancePolicy);
+  }
+
+  /**
+   * Read the recorded `auth_strength` off whatever the identity service returned from `enrollComplete` (an opaque
+   * `unknown` at this seam — the gateway is provider-agnostic and never names a provider). The identity service
+   * returns its `EnrollmentRecord` (`{ authStrength, … }`); we echo that recorded fact so the enroll-verify response
+   * is TRUTHFUL under either provider (`"webauthn"` for a passkey enrollment, `"password"` for a password-grade
+   * delegated one). If the value is missing/out-of-shape (a custom seam that returns nothing), fail to the WEAKEST
+   * strength `"none"` — an auth-fact default must never OVER-report (a defensive default on an auth surface fails
+   * closed, not open). NO provider knowledge — just the fact. (In the real composition the identity service always
+   * returns a well-formed record, so this fallback is unreachable; it is belt-and-suspenders for a custom seam.)
+   */
+  private readEnrolledStrength(record: unknown): AuthStrength {
+    if (typeof record === "object" && record !== null) {
+      const s = (record as { authStrength?: unknown }).authStrength;
+      if (s === "none" || s === "password" || s === "webauthn") {
+        return s;
+      }
+    }
+    return "none";
   }
 
   /**
@@ -884,12 +1410,15 @@ export class AccessGateway {
    * from now. Keyed by the recipient READ FROM THE SIGNED GRANT (recipient-specific). A 0 TTL disables reuse (records
    * nothing → every window re-prompts).
    */
-  private recordRecipientAuth(recipient: RecipientRef, authStrength: AuthStrength): void {
+  private recordRecipientAuth(
+    recipient: RecipientRef,
+    assurance: AuthAssuranceEvidence | AuthStrength,
+  ): void {
     if (this.authReuseTtlMs <= 0) {
       return; // reuse disabled — never re-prompt-free.
     }
     this.recipientAuth.set(recipient, {
-      authStrength,
+      assurance,
       expiresAt: Date.now() + this.authReuseTtlMs,
     });
   }
@@ -913,7 +1442,7 @@ export class AccessGateway {
       this.recipientAuth.delete(recipient);
       return false;
     }
-    return this.strengthSufficient(rec.authStrength);
+    return this.strengthSufficient(rec.assurance);
   }
 
   /**
@@ -937,7 +1466,9 @@ export class AccessGateway {
               ? "Forbidden"
               : "Error";
     try {
-      socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`);
+      socket.write(
+        `HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\n\r\n`,
+      );
     } catch {
       // The socket may already be gone; nothing to do.
     }
@@ -945,10 +1476,10 @@ export class AccessGateway {
   }
 
   /**
-   * Proxy an AUTHORIZED WS upgrade to the capsule's internal noVNC endpoint — and nothing else (GLA-038/039 AC#1).
-   * Opens a raw TCP connection to the noVNC host:port, replays the WebSocket handshake (the upgrade request line +
-   * headers) verbatim, then pipes bytes bidirectionally. The live socket is tracked per grant so a revoke/expiry can
-   * force-close it (GLA-039 AC#3). If the upstream cannot be reached, the client upgrade is refused (502).
+   * Proxy an AUTHORIZED upgrade to the route's reverse-proxy transport binding — and nothing else (GLA-038/039
+   * AC#1). Opens a raw TCP connection to the upstream host:port, replays the WebSocket handshake (the upgrade request
+   * line + headers) verbatim, then pipes bytes bidirectionally. The live socket is tracked per grant so a revoke/
+   * expiry can force-close it (GLA-039 AC#3). If the upstream cannot be reached, the client upgrade is refused (502).
    */
   private proxyUpgrade(
     req: IncomingMessage,
@@ -957,7 +1488,11 @@ export class AccessGateway {
     route: ProgrammedRoute,
     grantId: CapabilityId,
   ): void {
-    const target = parseWsEndpoint(route.internalEndpoint);
+    if (route.transport.kind !== "reverse-proxy" || route.transport.protocol !== "websocket") {
+      this.refuseUpgrade(clientSocket, 502);
+      return;
+    }
+    const target = parseWsEndpoint(route.transport.upstream);
     if (target === undefined) {
       this.refuseUpgrade(clientSocket, 502);
       return;
@@ -968,6 +1503,7 @@ export class AccessGateway {
     this.trackSocket(grantId, upstream);
 
     let cleaned = false;
+    let proxyStarted = false;
     const cleanup = (): void => {
       if (cleaned) {
         return;
@@ -999,7 +1535,7 @@ export class AccessGateway {
       upstream.removeAllListeners("timeout");
       this.armIdleTimeout(clientSocket, upstream, cleanup);
 
-      // Replay ONLY the WS-handshake-relevant headers to the upstream (the capsule-internal noVNC server completes
+      // Replay ONLY the WS-handshake-relevant headers to the upstream (the capsule-internal server completes
       // the handshake). Defense-in-depth (#2): client `Cookie`/`Authorization`/`X-Forwarded-*`/other hop-by-hop
       // headers are DROPPED so the internal endpoint never sees untrusted client headers; `Host` is set to the
       // upstream, not the client's. There is no request-controlled target and node:http already blocks CRLF, so
@@ -1010,13 +1546,16 @@ export class AccessGateway {
       if (head !== undefined && head.length > 0) {
         upstream.write(head);
       }
-      // Pipe bytes both ways — the gateway is a transparent conduit to the noVNC stream and NOTHING else. Every
+      // Pipe bytes both ways — the gateway is a transparent conduit to the mounted stream and NOTHING else. Every
       // byte resets the idle timeout (Node refreshes `setTimeout` on activity), so a LIVE stream is never killed.
+      proxyStarted = true;
       upstream.pipe(clientSocket);
       clientSocket.pipe(upstream);
     });
     upstream.on("error", () => {
-      this.refuseUpgrade(clientSocket, 502);
+      if (!proxyStarted) {
+        this.refuseUpgrade(clientSocket, 502);
+      }
       cleanup();
     });
     clientSocket.on("error", cleanup);
@@ -1061,6 +1600,9 @@ export class AccessGateway {
         continue;
       }
       const value = Array.isArray(v) ? v.join(", ") : (v ?? "");
+      if (value.length === 0) {
+        continue;
+      }
       out.push(`${k}: ${value}`);
     }
     return out.join("\r\n");
@@ -1100,13 +1642,292 @@ export class AccessGateway {
   liveSocketCount(grantId: CapabilityId): number {
     return this.liveSockets.get(grantId)?.size ?? 0;
   }
+
+  private handoffGrantFromRequest(
+    url: URL,
+    req: IncomingMessage,
+    routePath: string,
+  ): OpaqueToken | undefined {
+    const queryGrant = url.searchParams.get("grant");
+    if (queryGrant !== null && queryGrant.length > 0) {
+      return queryGrant as OpaqueToken;
+    }
+    return this.takeStreamTicket(req, routePath);
+  }
+
+  private enrollmentGrantFromRequest(
+    body: EnrollBody,
+    req: IncomingMessage,
+  ): OpaqueToken | undefined {
+    if (typeof body.grant === "string" && body.grant.length > 0) {
+      return body.grant as OpaqueToken;
+    }
+    return this.grantBootstrapFromRequest(req, ENROLL_BOOTSTRAP_COOKIE, "enroll");
+  }
+
+  private handoffGrantFromBody(
+    body: EnrollBody,
+    req: IncomingMessage,
+    routePath?: string,
+  ): OpaqueToken | undefined {
+    if (typeof body.grant === "string" && body.grant.length > 0) {
+      return body.grant as OpaqueToken;
+    }
+    return this.grantBootstrapFromRequest(req, HANDOFF_BOOTSTRAP_COOKIE, "handoff", routePath);
+  }
+
+  private createGrantBootstrapCookie(
+    cookieName: string,
+    purpose: "enroll" | "handoff",
+    grant: OpaqueToken,
+    routePath?: string,
+  ): string {
+    this.pruneExpiredGrantBootstrapTickets();
+    const ticket = randomBytes(24).toString("base64url");
+    this.grantBootstrapTickets.set(ticket, {
+      grant,
+      purpose,
+      ...(routePath !== undefined ? { routePath } : {}),
+      expiresAt: Date.now() + GRANT_BOOTSTRAP_TTL_MS,
+    });
+    return this.cookieHeader(
+      cookieName,
+      ticket,
+      this.gatewayStateCookiePath(),
+      GRANT_BOOTSTRAP_TTL_MS,
+    );
+  }
+
+  private grantBootstrapFromRequest(
+    req: IncomingMessage,
+    cookieName: string,
+    purpose: "enroll" | "handoff",
+    routePath?: string,
+  ): OpaqueToken | undefined {
+    const ticket = parseCookieHeader(firstHeader(req.headers.cookie))[cookieName];
+    if (ticket === undefined) {
+      return undefined;
+    }
+    const record = this.grantBootstrapTickets.get(ticket);
+    if (
+      record === undefined ||
+      record.purpose !== purpose ||
+      Date.now() >= record.expiresAt ||
+      (routePath !== undefined && record.routePath !== routePath)
+    ) {
+      this.grantBootstrapTickets.delete(ticket);
+      return undefined;
+    }
+    return record.grant;
+  }
+
+  private deleteGrantBootstrapTicketFromRequest(req: IncomingMessage, cookieName: string): void {
+    const ticket = parseCookieHeader(firstHeader(req.headers.cookie))[cookieName];
+    if (ticket !== undefined) {
+      this.grantBootstrapTickets.delete(ticket);
+    }
+  }
+
+  private createStreamTicketCookie(
+    grant: OpaqueToken,
+    grantId: CapabilityId,
+    route: ProgrammedRoute,
+  ): string {
+    this.pruneExpiredStreamTickets();
+    const ticket = randomBytes(24).toString("base64url");
+    this.streamTickets.set(ticket, {
+      grant,
+      grantId,
+      routePath: route.path,
+      expiresAt: Date.now() + STREAM_TICKET_TTL_MS,
+    });
+    return this.cookieHeader(
+      STREAM_TICKET_COOKIE,
+      ticket,
+      this.publicPath(route.path),
+      STREAM_TICKET_TTL_MS,
+    );
+  }
+
+  private takeStreamTicket(req: IncomingMessage, routePath: string): OpaqueToken | undefined {
+    const ticket = parseCookieHeader(firstHeader(req.headers.cookie))[STREAM_TICKET_COOKIE];
+    if (ticket === undefined) {
+      return undefined;
+    }
+    const record = this.streamTickets.get(ticket);
+    this.streamTickets.delete(ticket);
+    if (record === undefined || record.routePath !== routePath || Date.now() >= record.expiresAt) {
+      return undefined;
+    }
+    return record.grant;
+  }
+
+  private deleteStreamTicketsForGrant(grantId: CapabilityId): void {
+    for (const [ticket, record] of [...this.streamTickets.entries()]) {
+      if (record.grantId === grantId) {
+        this.streamTickets.delete(ticket);
+      }
+    }
+  }
+
+  private pruneExpiredStreamTickets(): void {
+    const now = Date.now();
+    for (const [ticket, record] of [...this.streamTickets.entries()]) {
+      if (now >= record.expiresAt) {
+        this.streamTickets.delete(ticket);
+      }
+    }
+  }
+
+  private pruneExpiredGrantBootstrapTickets(): void {
+    const now = Date.now();
+    for (const [ticket, record] of [...this.grantBootstrapTickets.entries()]) {
+      if (now >= record.expiresAt) {
+        this.grantBootstrapTickets.delete(ticket);
+      }
+    }
+  }
+
+  private clearCookie(cookieName: string): string {
+    return this.cookieHeader(cookieName, "", this.gatewayStateCookiePath(), 0);
+  }
+
+  private cookieHeader(cookieName: string, value: string, path: string, ttlMs: number): string {
+    const attrs = [
+      `${cookieName}=${value}`,
+      "HttpOnly",
+      "SameSite=Strict",
+      `Path=${path}`,
+      `Max-Age=${Math.ceil(ttlMs / 1000)}`,
+    ];
+    if (this.publicBase.href.startsWith("https://")) {
+      attrs.push("Secure");
+    }
+    return attrs.join("; ");
+  }
+
+  private gatewayStateCookiePath(): string {
+    return this.publicBase.pathPrefix.length > 0 ? this.publicBase.pathPrefix : "/";
+  }
 }
 
-/** Parse a `ws://host:port/path` (or `http://…`) endpoint into `{ host, port, path }`, or undefined if malformed. */
+function validateTransportBinding(transport: ReverseProxyTransportBinding): void {
+  if (transport.kind !== "reverse-proxy") {
+    throw layerError("reverse-proxy-transport", `unsupported transport kind: ${transport.kind}`);
+  }
+  if (typeof transport.upstream !== "string" || transport.upstream.length === 0) {
+    throw layerError("reverse-proxy-transport", "missing reverse-proxy upstream");
+  }
+  if (transport.protocol === "websocket" && parseWsEndpoint(transport.upstream) === undefined) {
+    throw layerError("reverse-proxy-transport", "invalid websocket upstream");
+  }
+}
+
+function layerError(layer: string, message: string): Error {
+  const err = new Error(message) as Error & { layer: string; detail: { layer: string } };
+  err.layer = layer;
+  err.detail = { layer };
+  return err;
+}
+
+function normalizeClientAssetMount(
+  mount: EntrypointClientAssetMount,
+): EntrypointClientAssetMount | undefined {
+  if (!/^[a-zA-Z0-9._-]+$/.test(mount.ref)) {
+    return undefined;
+  }
+  const root = resolvePath(mount.root);
+  if (root.length === 0) {
+    return undefined;
+  }
+  return {
+    ref: mount.ref,
+    root,
+    ...(mount.cacheControl !== undefined ? { cacheControl: mount.cacheControl } : {}),
+  };
+}
+
+function resolveClientAssetRequest(
+  path: string,
+  mountsByRef: ReadonlyMap<string, readonly EntrypointClientAssetMount[]>,
+): { path: string; root: string; cacheControl?: string } | undefined {
+  const prefix = "/handoff/client-assets/";
+  if (!path.startsWith(prefix)) {
+    return undefined;
+  }
+  const rest = path.slice(prefix.length);
+  const slash = rest.indexOf("/");
+  if (slash <= 0) {
+    return undefined;
+  }
+  const ref = rest.slice(0, slash);
+  if (!/^[a-zA-Z0-9._-]+$/.test(ref)) {
+    return undefined;
+  }
+  const rawAssetPath = rest.slice(slash + 1);
+  const segments = rawAssetPath.split("/").flatMap((segment) => {
+    try {
+      const decoded = decodeURIComponent(segment);
+      return decoded.length === 0 ? [] : [decoded];
+    } catch {
+      return [".."];
+    }
+  });
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment === "." || segment === ".." || segment.includes("\0"))
+  ) {
+    return undefined;
+  }
+  for (const mount of mountsByRef.get(ref) ?? []) {
+    const root = resolvePath(mount.root);
+    const candidate = resolvePath(root, ...segments);
+    const rel = relative(root, candidate);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+      continue;
+    }
+    return {
+      path: candidate,
+      root,
+      ...(mount.cacheControl !== undefined ? { cacheControl: mount.cacheControl } : {}),
+    };
+  }
+  return undefined;
+}
+
+function contentTypeForPath(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+    case ".mjs":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".wasm":
+      return "application/wasm";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+/** Parse a websocket-compatible endpoint into `{ host, port, path }`, or undefined if malformed. */
 function parseWsEndpoint(
   endpoint: string,
 ): { host: string; port: number; path: string } | undefined {
   try {
+    if (!/^wss?:/i.test(endpoint)) {
+      return undefined;
+    }
     // Normalize ws/wss to http/https so the URL parser accepts it.
     const normalized = endpoint.replace(/^ws:/i, "http:").replace(/^wss:/i, "https:");
     const u = new URL(normalized);
@@ -1128,4 +1949,39 @@ function isCoded(e: unknown): e is { code: ErrorCode } {
     "code" in e &&
     typeof (e as { code: unknown }).code === "string"
   );
+}
+
+function isDelegatedRedirectAttestation(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.code === "string" && typeof record.state === "string";
+}
+
+function isDelegatedEnrollmentOptions(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return record.kind === "redirect" && typeof record.authorizeUrl === "string";
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
+function parseCookieHeader(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of header?.split(";") ?? []) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (rawName === undefined || rawName.length === 0 || rawValue.length === 0) {
+      continue;
+    }
+    out[rawName] = rawValue.join("=");
+  }
+  return out;
 }

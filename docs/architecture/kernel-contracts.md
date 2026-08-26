@@ -135,13 +135,16 @@ interface Capability {
 interface Route {
   id: `route_${string}`;
   path: string;                      // the public path the gateway exposes
-  internalEndpoint: string;          // the capsule's human-entrypoint address
+  entrypointResourceId: string;      // provider-owned human-entrypoint resource
+  client: HumanEntrypointClientBinding;
+  transport: ReverseProxyTransportBinding; // upstream transport, not authorization
   boundGrantId: Capability["id"];    // a route binds to exactly one grant
 }
 ```
 **Lifecycle:** a route **exists only while its window is open**, is bound to exactly one grant, and is force-
-unmounted (WebSocket closed) on window close/grant revoke. Reconciliation converges programmed routes to
-Session truth (one of the few reconcilers the design keeps).
+unmounted on window close/grant revoke. Route authorization state (`path`, `boundGrantId`, recipient/session scope)
+is separate from reverse-proxy transport state (`transport.upstream`, protocol, client asset). Reconciliation
+converges programmed routes to Session truth (one of the few reconcilers the design keeps).
 
 ### 1.6 Completion — normalized done-signal (`see completion-service.md`)
 
@@ -411,10 +414,10 @@ interface PolicyPort {                 // Cedar is one adapter; forbid-wins, det
 
 interface AuthProviderPort {           // WebAuthn / authentik / OIDC are adapters
   beginEnrollment(userId: UserIdentity["id"], discharge: OpaqueToken): Promise<EnrollmentChallenge>;
-  finishEnrollment(userId: UserIdentity["id"], assertion: unknown): Promise<{ credentialId: string; authStrength: AuthStrength }>;
+  finishEnrollment(userId: UserIdentity["id"], assertion: unknown): Promise<{ credentialId: string; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence }>;
   challenge(userId: UserIdentity["id"]): Promise<AuthChallenge>;
-  verifyAssertion(userId: UserIdentity["id"], assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength }>;
-}                                       // GUARANTEE: reports FACTS (ok + auth_strength), never an access decision.
+  verifyAssertion(userId: UserIdentity["id"], assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence }>;
+}                                       // GUARANTEE: reports FACTS (ok + auth_strength + assurance evidence), never an access decision. `authStrength` is compatibility; phishing-resistant enforcement needs explicit assurance evidence.
 
 interface SecretStorePort {            // Vault/OpenBao/file are adapters; agent-blind
   put(value: SecretValue, audience: string): Promise<Ref<"secret-ref">>;   // returns a ref, never echoes the value
@@ -435,12 +438,43 @@ interface WorkspacePort {              // browser-profile-temp / staged-copy / p
   reap(h: WorkspaceHandle): Promise<void>;   // destroys OWN ephemeral materials only; host mounts survive
 }
 
-interface HumanEntrypointPort {        // noVNC / form / doc-editor are adapters
-  open(h: RuntimeHandle): Promise<{ internalEndpoint: string }>;   // the address the gateway proxies to
+interface RuntimeEndpointDescriptor {
+  resourceId: string;                  // stable provider-owned identity; never a raw upstream URL
+  family: "agent-connector" | "human-entrypoint" | string;
+  provider: string;
+  transport: "websocket" | "http" | "tcp" | "stdio" | "file" | string;
+  address?: string;                    // adapter-owned locator; core treats as opaque transport data
+  client?: { kind: string; ref?: string; bootstrap?: Record<string, unknown> };
+  metadata?: Record<string, unknown>;  // non-secret diagnostics only
+}
+
+interface RuntimeDescriptor {
+  launchMode?: string;                 // diagnostic hint, not an authorization input
+  endpoints?: RuntimeEndpointDescriptor[];
+  [launcherPrivate: string]: unknown;  // pid/ports/process data remain launcher-private
+}
+
+interface HumanEntrypointBinding {
+  resourceId: string;                  // provider-owned identity, stable for lifecycle/teardown
+  provider: string;
+  client: { kind: string; ref?: string; bootstrap?: Record<string, unknown> };
+  transport: { kind: "reverse-proxy"; protocol: string; upstream: string };
+}
+
+interface HumanEntrypointPort {
+  open(h: RuntimeHandle): Promise<HumanEntrypointBinding>;
 }                                       // GUARANTEE: agent-blind input path — human keystrokes reach the site, not the agent.
 
-interface AgentConnectorPort {         // CDP / fs-path / secret-ref are adapters
-  attach(h: RuntimeHandle): Promise<AgentConnector>;   // { type, cdp_url|path, secret_ref } — printed as data, driven off-gla
+interface AgentConnector {
+  type: string;                         // adapter-owned public connector DTO type
+  resourceId: string;                   // provider-owned identity for bind/unbind/reuse/teardown
+  provider?: string;
+  secret_ref?: Ref<"secret-ref">;       // capability reference, never raw secret
+  [providerField: string]: unknown;     // protocol-specific public fields stay adapter-owned
+}
+
+interface AgentConnectorPort {
+  attach(h: RuntimeHandle): Promise<AgentConnector>;   // printed as data, driven off-gla
 }
 
 interface CompletionDetectorPort {     // url-watcher / user-done / exit-code / dom-watcher are adapters
@@ -464,6 +498,11 @@ interface CatalogPort {                // the registry read interface — Store�
 `DockerPort`). The kernel depends on the *shape*; `app` wires the adapter. This is exactly what makes horizontal
 extension change no core code (`baseline.md §6`).
 
+Auth providers also project verified provider evidence into the common auth-assurance contract before an
+enforcement point evaluates sufficiency. `AuthStrength` remains the stable compatibility fact on the port
+result; provider vocabulary such as `amr`, `acr`, factor, source, or future provider claims stays adapter-local
+and diagnostic-only.
+
 ---
 
 ## §7 · Recipient-identity & enrollment model (AC #7)
@@ -474,6 +513,26 @@ docs/components/identity-and-auth.md`). Authentication ≠ authorization, never 
 
 ```ts
 type AuthStrength = "none" | "password" | "webauthn";
+
+type AuthAssuranceLevel = "none" | "password" | "phishing-resistant";
+type AuthAssuranceProfile = "phishing-resistant" | "password-permitted";
+
+interface AuthAssuranceEvidence {
+  authStrength: AuthStrength;          // compatibility fact
+  level: AuthAssuranceLevel;           // provider-neutral assurance tier
+  methodResolvable?: boolean;          // false when a valid token degraded to the safe floor
+  userPresent?: boolean;               // local authenticator/user interaction was observed
+  userVerified?: boolean;              // user was verified by PIN/biometric/equivalent provider proof
+  recipientBound?: boolean;            // proof was bound to the intended recipient/RP/audience
+  replayResistant?: boolean;           // challenge/nonce/state/counter replay checks passed
+  diagnostics?: string[];              // redacted downgrade/fail-closed reasons
+  providerEvidence?: Record<string, unknown>; // diagnostic only; never used directly by the gateway
+}
+
+interface AuthAssurancePolicy {
+  profile: AuthAssuranceProfile;       // stable deployment surface
+  minimumLevel: "password" | "phishing-resistant";
+}
 
 interface UserIdentity {
   id: string;                          // stable across channels
@@ -490,11 +549,17 @@ interface RecipientBinding {
 interface IdentityPort {
   bind(recipient: RecipientRef, ctx: { channel: string }): Promise<RecipientBinding>;  // narrow-only, never widened
   /** One-time, operator-initiated enrollment, authorized by a single-use operator-discharge grant. */
-  enroll(recipient: RecipientRef, discharge: OpaqueToken): Promise<{ binding: RecipientBinding; authStrength: AuthStrength }>;
+  enroll(recipient: RecipientRef, discharge: OpaqueToken): Promise<{ binding: RecipientBinding; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence }>;
   /** Verify a recipient at the edge; returns FACTS, not an allow/deny. */
-  verify(recipient: RecipientRef, assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }>;
+  verify(recipient: RecipientRef, assertion: unknown): Promise<{ ok: boolean; authStrength: AuthStrength; assurance?: AuthAssuranceEvidence; userId: UserIdentity["id"] }>;
 }
 ```
+**Policy profiles:** unset policy resolves to `phishing-resistant`, which demands passkey/phishing-resistant
+assurance with explicit user-verification, recipient-binding, and replay-resistant evidence. A legacy
+`authStrength: "webauthn"` string without an `AuthAssuranceEvidence` object is not enough for that profile.
+`password-permitted` is the explicit profile that admits password-grade evidence. Unknown profile
+values are usage errors with stable diagnostics; they never silently fall back to a weaker policy.
+
 **Invariants (frozen, `identity-and-auth.md`):** a recipient can be verified **only if previously enrolled**;
 **enrollment is one-time and operator-initiated**, authorized by a single-use `operator-discharge` grant the
 gateway verifies like any other — it is **never a per-task or per-handoff step**. Recipient-binding originates

@@ -104,15 +104,20 @@ the others are the supported settings the same dependency can take.
 - **Seam:** the browser is template-bundled; its automation surfaces as **`AgentConnectorPort` (CDP)** for the
   agent and underlies the **`LauncherPort`** spawn.
 
-**D2 · noVNC + websockify + VNC server + Xvfb (+ x11vnc)** — *human-view layer*
+**D2 · noVNC/RFB browser client + websockify + VNC server + Xvfb (+ x11vnc)** — *human-view layer*
 - **Classification:** host-touching (services + a virtual display on the host) → **`wpm` bundle**. Justification:
-  a stack of host processes, distinct from the browser and the connector.
+  a stack of host processes, distinct from the browser and the connector. The browser-side RFB client is provider
+  code/assets owned by the `entrypoint-novnc` package and served through the gateway's generic client-asset mount;
+  the host mutation remains the X display, VNC server, and WebSocket bridge that make the live view reachable.
 - **Candidate:** **noVNC + websockify** over a VNC server on **Xvfb** (most portable, browser-native remote
-  view); `x11vnc` exposes the Xvfb display in the process tier. Alternatives: KasmVNC, Guacamole, Xpra.
+  view); `x11vnc` exposes the Xvfb display in the process tier. The default client uses the noVNC RFB ES module
+  bundled with the entrypoint provider; `GLA_NOVNC_WEB_ROOT` may point at reviewed host-provided assets if the
+  operator adopts them. Alternatives: KasmVNC, Guacamole, Xpra.
 - **`wpm` task:** **GLA-008** (human-view stack).
 - **Modes (reference):** **Managed**. Local-External if present; Remote-External n/a (must reach the capsule's
   display locally); Manual-BYO via pause; Disabled for non-visual entrypoints (a form/doc surface).
-- **Seam:** **`HumanEntrypointPort`** (the browser-stream entrypoint). Whatever fills it, the **agent-blind input
+- **Seam:** **`HumanEntrypointPort`** (the browser-stream entrypoint). It returns a provider-owned entrypoint
+  resource id, browser-client metadata, and reverse-proxy transport. Whatever fills it, the **agent-blind input
   path** is upheld (human keystrokes reach the site, never the agent).
 
 **D3 · CDP (control protocol)** — *control protocol layer*
@@ -216,6 +221,14 @@ interface DependencyBinding {
   lastProbe?: { at: string; result: "available" | "degraded" | "unavailable"; detail?: string };
 }
 ```
+
+GLA-082 refines the runtime side of this sketch: provider manifests now declare static
+`DependencyRequirement` entries, while WPM receipts supply dynamic `DependencyBinding` evidence. Host-touching
+dependencies are unavailable until a structured `source: "wpm-receipt"` binding proves ownership mode, state,
+connection references, typed receipt facts, and a successful WPM probe; GLA then combines that receipt with the
+current runtime probe. See `docs/architecture/catalog-dependency-bindings.md` for the exact ingest and diagnostic
+rules.
+
 **Division of labor (must not merge):** `wpm verify`/Repair proves the *install converged* (one-time, agent-run);
 GLA `doctor`/`probe` proves the *runtime is healthy right now* (continuous, server-side). Same binding, different
 question, different time. GLA's runtime **never installs anything**; a `wpm` bundle **never models a GLA
@@ -231,7 +244,7 @@ The map the dependency tasks (GLA-006–011) are cut against. **Default referenc
 | Dependency | Seam (port) | Integration path | `wpm` bundle (host pieces) | Reference mode | GLA task |
 |---|---|---|---|---|---|
 | Chromium + Playwright (browser+automation) | AgentConnector / Launcher | `wpm` bundle | **browser-runtime** | **Managed** | **GLA-007** |
-| noVNC + websockify + VNC + Xvfb (human-view) | HumanEntrypoint | `wpm` bundle | **human-view stack** | **Managed** | **GLA-008** |
+| noVNC/RFB client + websockify + VNC + Xvfb (human-view) | HumanEntrypoint | provider client assets + `wpm` host stack | **human-view stack** | **Managed** | **GLA-008** |
 | CDP (control protocol) | AgentConnector | in-tree adapter | (rides on browser-runtime) | Managed via D1 | (in-tree; GLA-007 host pieces) |
 | Isolation runtime (T2 process default / T4 docker alt) | Launcher (Spawner) | `wpm` bundle | **isolation runtime** | **Local-External** (process tier) | **GLA-009** |
 | Caddy (public edge / TLS) | reverse-proxy ↔ Route ctrl; Access Gateway verifies | `wpm` bundle | **edge-proxy** | **Local-External** (host Caddy in hermes-1) | **GLA-010** |

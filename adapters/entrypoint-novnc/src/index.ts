@@ -13,17 +13,83 @@
 // runtime handle via the kernel's neutral `decodeRuntimeHandle` codec (NOT by importing the launcher
 // adapter; the boundary lint forbids adapter→adapter). It is injected at `app`; core never imports it.
 
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, resolve as resolvePath } from "node:path";
 import {
+  type HumanEntrypointBinding,
   type HumanEntrypointPort,
+  type RuntimeClientDescriptor,
   type RuntimeHandle,
   decodeRuntimeHandle,
   glaError,
+  runtimeEndpoint,
 } from "@gla/kernel";
 
 /** Stable identifier for this module (used by the `app` composition root's wiring record). */
 export const ENTRYPOINT_NOVNC_MODULE = "@gla/entrypoint-novnc" as const;
 /** Ring classification from the architecture baseline (informational). */
 export const ENTRYPOINT_NOVNC_RING = "adapter" as const;
+/** Provider-owned asset reference the gateway can mount under its generic client-asset host. */
+export const NOVNC_CLIENT_ASSET_REF = "novnc" as const;
+/** Browser-client kind understood by the gateway handoff page as an RFB-compatible web client. */
+export const RFB_WEB_CLIENT_KIND = "rfb-web-client" as const;
+
+/** Generic static-client asset mount consumed structurally by the gateway. */
+export interface EntrypointClientAssetMount {
+  /** Provider-owned asset reference, used only as a same-origin URL segment. */
+  readonly ref: string;
+  /** Local read-only directory containing browser assets for this client. */
+  readonly root: string;
+  /** Cache policy for these assets. noVNC docs recommend revalidation during upgrades. */
+  readonly cacheControl?: string;
+}
+
+/** The noVNC/RFB browser client declared by this provider. */
+export function novncClientDescriptor(): RuntimeClientDescriptor {
+  return {
+    kind: RFB_WEB_CLIENT_KIND,
+    ref: NOVNC_CLIENT_ASSET_REF,
+    bootstrap: {
+      module: "core/rfb.js",
+      scaleViewport: true,
+      resizeSession: false,
+      viewOnly: false,
+    },
+  };
+}
+
+/**
+ * Static asset roots for the noVNC browser client. The bundled `@novnc/novnc` package is the deterministic default;
+ * `GLA_NOVNC_WEB_ROOT` lets a host/WPM receipt provide an alternate reviewed asset tree without gateway changes.
+ */
+export function novncClientAssetMounts(
+  env: NodeJS.ProcessEnv = process.env,
+): EntrypointClientAssetMount[] {
+  const roots = [...(env.GLA_NOVNC_WEB_ROOT?.split(":") ?? []), bundledNovncRoot()].flatMap(
+    (root) => {
+      const trimmed = root?.trim();
+      return trimmed === undefined || trimmed.length === 0 ? [] : [resolvePath(trimmed)];
+    },
+  );
+  return [...new Set(roots)]
+    .filter((root) => existsSync(root))
+    .map((root) => ({
+      ref: NOVNC_CLIENT_ASSET_REF,
+      root,
+      cacheControl: "no-cache",
+    }));
+}
+
+function bundledNovncRoot(): string | undefined {
+  try {
+    const req = createRequire(import.meta.url);
+    const rfbModule = req.resolve("@novnc/novnc");
+    return dirname(dirname(rfbModule));
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * The noVNC Human-Entrypoint adapter (docs/03 §6). `open` returns the capsule's internal noVNC ws
@@ -39,30 +105,54 @@ export class EntrypointNovncAdapter implements HumanEntrypointPort {
    * gateway proxies. Throws `dependency.unavailable` when the capsule is headless (no noVNC endpoint on
    * the runtime) — the honest "this path is unavailable in this mode" the worker degrades on.
    */
-  async open(handle: RuntimeHandle): Promise<{ internalEndpoint: string }> {
+  async open(handle: RuntimeHandle): Promise<HumanEntrypointBinding> {
     const runtime = decodeRuntimeHandle(handle);
     if (runtime === undefined) {
       throw glaError("state.no_live_capsule", "no live capsule to open a human entrypoint on", {});
     }
-    const novnc = typeof runtime.novncEndpoint === "string" ? runtime.novncEndpoint : undefined;
-    if (runtime.mode === "headless" || novnc === undefined) {
+    const endpoint = runtimeEndpoint(runtime, {
+      family: "human-entrypoint",
+      provider: "novnc",
+      transport: "websocket",
+    });
+    const novnc = typeof endpoint?.address === "string" ? endpoint.address : undefined;
+    const launchMode =
+      typeof runtime.launchMode === "string"
+        ? runtime.launchMode
+        : typeof runtime.mode === "string"
+          ? runtime.mode
+          : undefined;
+    if (launchMode === "headless" || endpoint === undefined || novnc === undefined) {
       // Headless: no human-view stack → the noVNC entrypoint is unavailable. Real in hermes-1 (full mode).
       throw glaError(
         "dependency.unavailable",
         "noVNC human entrypoint is unavailable in headless mode (no human-view stack)",
-        { detail: { mode: runtime.mode } },
+        { detail: { mode: launchMode } },
       );
     }
-    return { internalEndpoint: novnc };
+    return {
+      resourceId: endpoint.resourceId,
+      provider: endpoint.provider,
+      client:
+        endpoint.client?.kind === RFB_WEB_CLIENT_KIND ? endpoint.client : novncClientDescriptor(),
+      transport: { kind: "reverse-proxy", protocol: "websocket", upstream: novnc },
+    };
   }
 
   /** Is a human entrypoint available for this runtime? (Convenience for the worker / a probe.) */
   isAvailable(handle: RuntimeHandle): boolean {
     const runtime = decodeRuntimeHandle(handle);
+    const endpoint = runtimeEndpoint(runtime, {
+      family: "human-entrypoint",
+      provider: "novnc",
+      transport: "websocket",
+    });
     return (
-      runtime !== undefined && runtime.mode === "full" && typeof runtime.novncEndpoint === "string"
+      runtime !== undefined &&
+      runtime.launchMode === "full" &&
+      typeof endpoint?.address === "string"
     );
   }
 }
 
-export type { HumanEntrypointPort, RuntimeHandle };
+export type { HumanEntrypointBinding, HumanEntrypointPort, RuntimeHandle };

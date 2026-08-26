@@ -22,17 +22,19 @@
 // fresh virtual authenticator, a fresh workspace root scanned for the temp profile. The capsule + broker +
 // gateway + browsers are always reaped in a finally/afterAll.
 //
-// GATED: skips when no cached Chromium is available; every step it composes is ALSO proven by the per-slice
-// E2Es (cited inline) and the unit/contract tests, so the security seams hold regardless. Spawns REAL
-// browsers — a generous timeout; but it RUNS in `pnpm gate` (it is the MVP proof, not an excluded slow test).
+// GATED by the full quality gate: `pnpm gate` runs `test:e2e:preflight` before Vitest, so missing Chromium
+// is a gate failure rather than an acceptable skipped capstone. The skip branch remains only for the explicit
+// non-DoD opt-out command. Spawns REAL browsers — a generous timeout; it is the MVP proof, not an excluded
+// slow test.
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { type AddressInfo, type Socket, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthWebauthnProvider } from "@gla/auth-webauthn";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import {
   ChannelCli,
   type DeliverySink,
@@ -67,9 +69,12 @@ const recipient = "tg:user:123" as RecipientRef;
 const wrongRecipient = "tg:user:999" as RecipientRef; // S-1/S-10: a DIFFERENT recipient (forwarded link is useless)
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
@@ -493,6 +498,7 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
       // completion-close pipeline. NO warm state: this stack is built right here, fresh, per test.
       const wsRoot = workspaceRoot();
       const stack = createProvisioningBridge({
+        dependencyBindings: referenceWpmDependencyBindings(),
         launcherMode: "headless",
         workspaceRoot: wsRoot,
         startTimeoutMs: 40_000,
@@ -507,7 +513,16 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
           // The gateway proxies the human's WS upgrade to the stub noVNC upstream (real noVNC gated for hermes-1).
           entrypoint: {
             async open() {
-              return { internalEndpoint: upstream.endpoint };
+              return {
+                resourceId: "entrypoint:fake-view:scenario-01",
+                provider: "fake-view",
+                client: { kind: "provider-asset", ref: "fake-viewer" },
+                transport: {
+                  kind: "reverse-proxy" as const,
+                  protocol: "websocket",
+                  upstream: upstream.endpoint,
+                },
+              };
             },
           },
           completion: { pollMs: 100 }, // the REAL url-watcher reads the capsule's CDP /json active URL.
@@ -559,7 +574,8 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         if (invite === undefined) {
           throw new Error("enrollInvite not wired");
         }
-        const enrollLink = invite.link.replace("127.0.0.1", "localhost");
+        const deliveredInvite = JSON.parse(deliveredLinks.at(-1) ?? "{}") as { link?: string };
+        const enrollLink = (deliveredInvite.link ?? "").replace("127.0.0.1", "localhost");
         expect(await runEnrollment(hpageGw, enrollLink)).toMatch(/Enrolled/i);
         expect(stack.identity?.isEnrolled(recipient)).toBe(true);
         expect(countingIdentity.verifyStrength(recipient)).toBe("webauthn");
@@ -742,8 +758,12 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         expect(view1.state).toBe("open");
         // S-2: the agent's brokered socket is SEVERED the instant the window opens (its connection cut).
         expect(stack.connector.isSuspended(cdpUrl)).toBe(true);
-        await new Promise((r) => setTimeout(r, 300)); // let the sever propagate.
-        expect(stack.connector.liveSocketCount(cdpUrl)).toBe(0); // the agent's live socket is GONE.
+        await expect
+          .poll(() => stack.connector.liveSocketCount(cdpUrl), {
+            message: "window-open severance must close the agent's live CDP socket",
+            timeout: 5_000,
+          })
+          .toBe(0); // the agent's live socket is GONE.
         // S-2 (the REAL threat): a read over the agent's SAME pre-existing CDP connection now FAILS.
         let agentReadFailed = false;
         try {
@@ -791,7 +811,11 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         // able to use grant-1 (which is bound to `recipient`, not `wrongRecipient`).
         const atkInvite = await stack.enrollInvite?.(wrongRecipient);
         if (atkInvite !== undefined) {
-          await runEnrollment(apageAtk, atkInvite.link.replace("127.0.0.1", "localhost"));
+          const deliveredInvite = JSON.parse(deliveredLinks.at(-1) ?? "{}") as { link?: string };
+          await runEnrollment(
+            apageAtk,
+            (deliveredInvite.link ?? "").replace("127.0.0.1", "localhost"),
+          );
         }
         // The forwarded grant-1 link opened by the wrong recipient: a raw WS upgrade with grant-1 must NOT
         // reach the capsule (the grant is recipient-bound; the edge verify fails closed — S-1/S-10).
@@ -819,14 +843,31 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         // ── Phase 7 — the human fills the form + submits the SECRET agent-blind (reaches /verify). ──
         const waitPromise1 = stack.bridge.handoffWait(view1.handoff_id, 25_000);
         await hcpage.goto(`${site.base}/submit?password=${encodeURIComponent(KNOWN_PASSWORD)}`);
-        await new Promise((r) => setTimeout(r, 300));
+        await expect
+          .poll(() => site.submittedPasswords().includes(KNOWN_PASSWORD), {
+            message:
+              "site must receive the human-submitted password before completion checks continue",
+            timeout: 5_000,
+          })
+          .toBe(true);
 
         // ── S-8 (out-of-contract completion rejected): the human first navigates to a URL that is NOT in the
         //    detector contract (neither the intermediate `/verify` nor the complete `/dashboard`). The
         //    url-watcher emits no matching signal → the window does NOT complete → the session stays `opened`
         //    (the connector stays severed). Only the DECLARED `/verify` below advances it (the contract holds).
         await hcpage.goto(`${site.base}/random-not-in-contract`);
-        await new Promise((r) => setTimeout(r, 400)); // give the poller several intervals to (not) fire.
+        await expect
+          .poll(
+            () => ({
+              connectorSuspended: stack.connector.isSuspended(cdpUrl),
+              sessionState: stack.session.get(sessionId as SessionId).state,
+            }),
+            {
+              message: "off-contract URL must not complete or close the handoff window",
+              timeout: 700,
+            },
+          )
+          .toEqual({ connectorSuspended: true, sessionState: "opened" });
         expect(stack.session.get(sessionId as SessionId).state).toBe("opened"); // NOT completed by an off-contract URL.
         expect(stack.connector.isSuspended(cdpUrl)).toBe(true); // still severed — the window never closed.
         log("7", "S-8: an off-contract URL did NOT complete the window (status did not advance)");
@@ -903,7 +944,13 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
         // ── Phase 12 cont. — the human enters the verification CODE agent-blind → /dashboard. ──
         const waitPromise2 = stack.bridge.handoffWait(view2.handoff_id, 25_000);
         await hcpage.goto(`${site.base}/code?code=${encodeURIComponent(KNOWN_CODE)}`);
-        await new Promise((r) => setTimeout(r, 300));
+        await expect
+          .poll(() => site.submittedCodes().includes(KNOWN_CODE), {
+            message:
+              "site must receive the human-submitted verification code before dashboard completion",
+            timeout: 5_000,
+          })
+          .toBe(true);
         await hcpage.goto(`${site.base}/dashboard`);
         log("12", "human entered the verification code agent-blind + reached /dashboard");
 
@@ -978,10 +1025,14 @@ describe("GLA-066 CAPSTONE — scenario-01 through-case end to end, COLD, in one
           await run(["task", "complete", taskId], cComplete.out, { bridge: stack.bridge }),
         ).toBe(0);
         expect(JSON.parse(cComplete.stdout()).state).toBe("completed");
-        await new Promise((r) => setTimeout(r, 400)); // let SIGKILL reach the process group + free the CDP port.
 
         // (1) no live capsule — the process is GONE and the launcher health reads `down`.
-        expect(pidAlive(capsulePid), "the capsule process is GONE after teardown").toBe(false);
+        await expect
+          .poll(() => pidAlive(capsulePid), {
+            message: "the capsule process must be gone after teardown",
+            timeout: 10_000,
+          })
+          .toBe(false);
         expect(await stack.lifecycle.health(sessionId as SessionId)).toBe("down");
         expect(stack.lifecycle.hasLive(sessionId as SessionId)).toBe(false);
         // no runtime + the temp profile is wiped (the capsule's OWN ephemeral state).

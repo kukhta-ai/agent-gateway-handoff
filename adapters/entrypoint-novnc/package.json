@@ -18,6 +18,7 @@
     "clean": "tsc -b --clean"
   },
   "dependencies": {
-    "@gla/kernel": "workspace:*"
+    "@gla/kernel": "workspace:*",
+    "@novnc/novnc": "^1.7.0"
   }
 }

@@ -25,7 +25,6 @@
 import { type ChildProcess, spawn as spawnChild, spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import {
   type LauncherPort,
@@ -136,15 +135,22 @@ export class LauncherProcessAdapter implements LauncherPort {
    * typed `dependency.*` error — the worker's saga then compensates (no orphan).
    *
    * @param spec   the immutable resolved spec (read-only). The worker passes the realized workspace via
-   *               the kernel's `setSpawnContext` before this call; if absent, a throwaway profile under
-   *               tmpdir is used.
+   *               the kernel's `setSpawnContext` before this call; if absent, spawn fails closed before
+   *               mutating host state.
    * @param asUid  the agent's uid the capsule runs as (priv-esc off; docs/04 §6). Honored when the
    *               process has the privilege to setuid; in the single-operator profile the capsule runs
    *               as the operator already, so this is the same uid.
    */
   async spawn(spec: ResolvedAssemblySpec, asUid: number): Promise<RuntimeHandle> {
     const mode = this.resolveMode();
-    const profileDir = readWorkspaceProfileDir(spec) ?? freshThrowawayProfile();
+    const profileDir = readWorkspaceProfileDir(spec);
+    if (profileDir === undefined) {
+      throw glaError(
+        "dependency.unavailable",
+        "launcher-process missing realized workspace context before spawn",
+        { detail: { expected: "worker setSpawnContext with workspace profileDir" } },
+      );
+    }
     const cdpPort = await freePort();
 
     if (mode === "headless") {
@@ -227,6 +233,8 @@ export class LauncherProcessAdapter implements LauncherPort {
         String(vncPort),
         "-localhost",
         "-forever",
+        "-shared",
+        "-noshm",
         "-nopw",
         "-quiet",
       ],
@@ -242,6 +250,25 @@ export class LauncherProcessAdapter implements LauncherPort {
     );
     if (websockify.pid !== undefined) {
       sidePids.push(websockify.pid);
+    }
+
+    const vncReady = await waitForVncBanner(vncPort, this.startTimeoutMs);
+    const websockifyReady = vncReady
+      ? await waitForTcpPorts([novncPort], this.startTimeoutMs)
+      : false;
+    if (!vncReady || !websockifyReady) {
+      reapPids(collectPids(child, sidePids));
+      throw glaError("dependency.probe_failed", "noVNC sidecar endpoints did not come up in time", {
+        detail: {
+          mode: "full",
+          display,
+          vncPort,
+          novncPort,
+          vncReady,
+          websockifyReady,
+          timeoutMs: this.startTimeoutMs,
+        },
+      });
     }
 
     const novncEndpoint = `ws://127.0.0.1:${novncPort}/`;
@@ -293,11 +320,42 @@ export class LauncherProcessAdapter implements LauncherPort {
       if (ws !== undefined) {
         const pid = child.pid ?? -1;
         const runtime: ProcessRuntime = {
+          launchMode: base.mode,
           mode: base.mode,
           pid,
           cdpPort: base.cdpPort,
           cdpWebSocketUrl: ws,
+          endpoints: [
+            {
+              resourceId: `agent-connector:launcher-process:${base.cdpPort}`,
+              family: "agent-connector",
+              provider: "cdp",
+              transport: "websocket",
+              address: ws,
+              metadata: { port: base.cdpPort },
+            },
+          ],
         };
+        if (base.novncEndpoint !== undefined) {
+          runtime.endpoints?.push({
+            resourceId: `human-entrypoint:launcher-process:${base.novncEndpoint}`,
+            family: "human-entrypoint",
+            provider: "novnc",
+            transport: "websocket",
+            address: base.novncEndpoint,
+            client: {
+              kind: "rfb-web-client",
+              ref: "novnc",
+              bootstrap: {
+                module: "core/rfb.js",
+                scaleViewport: true,
+                resizeSession: false,
+                viewOnly: false,
+              },
+            },
+            metadata: { mode: base.mode },
+          });
+        }
         return runtime;
       }
       await delay(150);
@@ -482,16 +540,76 @@ async function freePort(): Promise<number> {
   });
 }
 
-/** A monotonic-ish X display number picker (full mode). Starts high to avoid a real :0. */
-let displayCounter = 90;
+/** Wait until every loopback TCP endpoint accepts a connection. */
+async function waitForTcpPorts(ports: number[], timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (const port of ports) {
+    let ready = false;
+    while (Date.now() < deadline) {
+      if (await tcpAccepts(port)) {
+        ready = true;
+        break;
+      }
+      await delay(150);
+    }
+    if (!ready) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Probe one loopback TCP port without sending application bytes. */
+async function tcpAccepts(port: number): Promise<boolean> {
+  const { createConnection } = await import("node:net");
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const done = (ok: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(500, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
+/** Probe x11vnc by waiting for the RFB banner instead of opening and immediately closing. */
+async function waitForVncBanner(port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await vncBannerAvailable(port)) {
+      return true;
+    }
+    await delay(150);
+  }
+  return false;
+}
+
+async function vncBannerAvailable(port: number): Promise<boolean> {
+  const { createConnection } = await import("node:net");
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const done = (ok: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(750, () => done(false));
+    socket.once("data", (chunk) => done(chunk.toString("ascii").startsWith("RFB ")));
+    socket.once("error", () => done(false));
+  });
+}
+
+/**
+ * A monotonic-ish X display number picker (full mode). Vitest can run full-mode launcher tests in
+ * different worker processes, so seed from the pid; a module-local counter alone collides at `:91`.
+ */
+let displayCounter = 90 + (process.pid % 1000);
 function pickDisplay(): number {
   displayCounter += 1;
   return displayCounter;
-}
-
-/** A throwaway profile under tmpdir when the worker did not pass a workspace handle (defensive). */
-function freshThrowawayProfile(): string {
-  return joinPath(tmpdir(), `gla-throwaway-${process.pid}-${Date.now()}`);
 }
 
 /** A small async delay. */

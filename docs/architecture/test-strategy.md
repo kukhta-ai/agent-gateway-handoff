@@ -10,7 +10,7 @@
 > `docs/architecture/kernel-contracts.md`, `docs/architecture/dependency-strategy.md`,
 > `docs/01-architecture-overview.md §6`, `docs/05-cli-and-entities.md §5–§6`.
 >
-> **Quality gate:** `pnpm gate` = `tsc -b && biome ci . && vitest run` — the one bar used locally,
+> **Quality gate:** `pnpm gate` = `tsc -b && biome ci . && browser-E2E preflight && vitest run` — the one bar used locally,
 > in pre-commit, in CI, and as every task's Definition of Done (see CONTRIBUTING.md).
 
 ---
@@ -43,14 +43,14 @@ packages/admission     → UNIT (mutate pipeline, Cedar policy evaluation) + CON
 packages/catalog       → UNIT (entity validation, availability derivation) + CONTRACT (CatalogPort)
 packages/identity      → UNIT (binding narrowing, enrollment rules) + CONTRACT (IdentityPort / AuthProviderPort)
 packages/worker        → CONTRACT (LauncherPort × process-tier adapter; WorkspacePort)
-packages/gateway       → INTEGRATION (stateless verify against real CapabilityPort; WS upgrade path; route proxy)
+packages/gateway       → INTEGRATION (stateless verify against real CapabilityPort; browser-client asset host; WS upgrade path; route proxy)
 packages/bridge        → INTEGRATION (CLI + MCP surface parity; thin transport test)
 packages/assembly      → UNIT (AssemblySpec schema, template resolution, offline dry-run)
 packages/app           → E2E only (the composition root; not unit-tested in isolation)
 adapters/policy-cedar  → CONTRACT (PolicyPort guarantee: pure, total, forbid-wins)
 adapters/auth-webauthn → CONTRACT (AuthProviderPort: enrollment + assertion round-trip with a virtual authenticator)
 adapters/launcher-process → CONTRACT (LauncherPort: spawn + health + stop on T2 process tier)
-adapters/entrypoint-novnc → CONTRACT (HumanEntrypointPort: returns a reachable internalEndpoint)
+adapters/entrypoint-novnc → CONTRACT (HumanEntrypointPort: returns provider-neutral binding + noVNC/RFB client metadata)
 adapters/connector-cdp → CONTRACT (AgentConnectorPort: attach returns a live CDP url)
 adapters/workspace-profile → CONTRACT (WorkspacePort: realize → reap, ephemeral)
 adapters/detector-url  → CONTRACT (CompletionDetectorPort: watcher fires on the declared URL; contract rejection)
@@ -87,7 +87,7 @@ Drive Phases E, 0–15 (see `docs/scenario-01-unified.html`) headlessly in two e
 |---|---|---|
 | `ChannelPort` | **`channel-cli` adapter** (real, in-tree) | Delivers links to stdout/file instead of Telegram; the "human" Playwright client polls for the link |
 | `LauncherPort` | **`launcher-process` adapter** (real, T2) | `hermes-1`'s Docker storage driver is broken; process-tier is the correct default |
-| `HumanEntrypointPort` | **`entrypoint-novnc` adapter** (real) | noVNC stack started by the launcher; the Playwright client connects to the websocket URL |
+| `HumanEntrypointPort` | **`entrypoint-novnc` adapter** (real) | noVNC stack started by the launcher; the recipient browser loads the provider-owned RFB client from same-origin gateway assets and connects through the grant-protected route |
 | `AuthProviderPort` | **`auth-webauthn` adapter** (real) + `Page.addVirtualAuthenticator` | Full WebAuthn round-trip in Chromium; no mock |
 | `PolicyPort` | **`policy-cedar` adapter** (real) | Actual Cedar evaluation; the policy file is the minimal MVP policy set |
 | `CompletionDetectorPort` (url-watcher) | **`detector-url` adapter** (real) against the **local stub** | Fires deterministically when the stub serves `/dashboard` |
@@ -132,10 +132,11 @@ Phase 5  handoff 1 open
 Phase 6  user authenticates at the edge
   harness (human Playwright): navigates to the handoff link (direct `:3000` or via Caddy)
   harness: WebAuthn assertion via Page.addVirtualAuthenticator
-  assert:  GW accepts; WebSocket proxied to noVNC; HTTP 101
+  assert:  GW accepts; the provider client loads from same-origin assets; RFB/noVNC renders a visible live viewport
+  assert:  lower-level gateway proxy tests still prove the authorized WebSocket upgrade reaches only the mounted entrypoint
 
 Phase 7  user fills the form
-  harness (human Playwright): fills the registration form via noVNC WebSocket interaction
+  harness (human Playwright): fills the registration form through the rendered noVNC/RFB viewport
   stub:    POST /register → 200, "check your email"; emits verification-email event (known code)
   assert:  url-watcher signals /verify
 
@@ -154,7 +155,7 @@ Phase 11  handoff 2 open (same capsule)
 Phase 12  user enters the code (auth reused)
   harness (human Playwright): opens handoff-2 link
   assert:  GW reuses auth (no re-challenge because auth is still valid within TTL)
-  harness: reads known code from stub; enters via noVNC interaction
+  harness: reads known code from stub; enters through the rendered noVNC/RFB viewport
   stub:    POST /verify-code → 302 /dashboard
   assert:  url-watcher fires on /dashboard
 
@@ -178,7 +179,7 @@ Phase 15  teardown
 |---|---|---|
 | TLS | No TLS; direct `:3000` | Host Caddy at `https://203.0.113.10/`; harness sets `GLA_ENDPOINT=https://203.0.113.10/` |
 | Launcher | `launcher-process` (same) | `launcher-process` (same; Docker alt is not the default) |
-| noVNC connectivity | `ws://127.0.0.1:<port>` | `wss://203.0.113.10/<path>` via Caddy |
+| noVNC connectivity | provider RFB client assets from gateway + grant-protected `ws://127.0.0.1:<path>` | provider RFB client assets from gateway + grant-protected `wss://203.0.113.10/<path>` via Caddy |
 | Network isolation | Loopback only | LXD container network; same security invariants |
 | Cold start | `pnpm install && pnpm gate` from a fresh checkout | Same; GLA-066 specifically mandates a **cold start** (clean env, nothing warm) |
 
@@ -244,28 +245,37 @@ GLA-066 (`Pass the scenario-01 through-case end to end`) depends on every scenar
 dependencies stated in the backlog: GLA-013,015,017,019,021,023,025,027,033,035,039,041,043,045,065, plus the
 delta chain 047–063). It is the **final test gate** that proves the whole system composes correctly:
 
-- Clean checkout, `pnpm install`, `pnpm gate` (all unit + contract tests green) — then run the E2E suite.
+- Clean checkout, `pnpm install`, `pnpm gate`: one command runs unit, contract, browser/full-human-view
+  preflight, and browser-backed E2E evidence inside the same DoD gate.
 - No warm state: the GLA process is started fresh; the `hermes-1` variant additionally verifies no residual
   capsule processes from prior runs.
 - The harness runs Phases E,0–15 in the order above (§2.4).
 - All 10 security invariants (§3) are asserted within the same E2E run.
-- `pnpm gate` remains the final CLI command — the E2E suite is wired into `vitest run` via a separate workspace
-  Vitest project (`vitest.e2e.config.ts`) that is included in the gate's `vitest run` invocation.
+- `pnpm gate` remains the final CLI command. Before Vitest runs, `test:e2e:preflight` verifies that the
+  Playwright Chromium runtime is installed, executable, and launchable; `Xvfb`, `x11vnc`, and `websockify`
+  are on `PATH`; and the browser-backed E2E fixture files are present. Browser/full-human-view absence is
+  therefore a gate failure, not a skipped green result.
 
 ### 4.3 `pnpm gate` is the single DoD bar
 
 ```
-pnpm gate = tsc -b && biome ci . && vitest run
-                                      ↑
-                         includes:  unit tests (packages/*)
-                                    contract tests (adapters/*)
-                                    boundary selftest (tools/boundary-check)
-                                    E2E suite (vitest.e2e.config.ts, tags=e2e)
+pnpm gate = tsc -b && biome ci . && test:e2e:preflight && vitest run
+                                                   ↑              ↑
+                   browser + full human-view runtime/fixtures     includes:
+                                                                 unit tests (packages/*)
+                                                                 contract tests (adapters/*)
+                                                                 boundary selftest (tools/boundary-check)
+                                                                 browser-backed E2E suite
 ```
 
-The E2E suite is tagged `e2e` in Vitest; on a developer's machine it can be excluded with
-`vitest run --reporter=verbose --project=unit,contract` for speed, but the full `pnpm gate` always includes it
-(this is the Definition of Done requirement for GLA-066 and for CI).
+The full `pnpm gate` always requires browser-backed E2E availability. For local iteration only, a developer
+can run `pnpm run gate:without-browser-e2e`; that command sets `GLA_BROWSER_E2E_MODE=optional`, uses
+`test:e2e:preflight:optional`, prints an explicit opt-out warning, and is not valid backlog
+Definition-of-Done evidence for work whose acceptance criteria require browser-level proof.
+
+To prove browser-backed E2E assertions are actually inside the full gate, `pnpm run gate:browser-canary`
+temporarily sets `GLA_BROWSER_E2E_CANARY_FAIL=1`, runs the real `pnpm gate`, and passes only when the gate
+turns red for the deliberate assertion inside `packages/gateway/src/handoff-client-browser.test.ts`.
 
 ---
 

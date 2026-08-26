@@ -4,6 +4,7 @@
 // (it is `PolicyPort`, not `CedarPort`). These are the contracts the contract-tests enforce.
 
 import type { MountSpec, PartRef, ResolvedAssemblySpec } from "./assembly.js";
+import type { AuthAssuranceEvidence } from "./auth-assurance.js";
 import type { Iso8601, OpaqueToken, RecipientRef, Ref } from "./brands.js";
 import type { Capability } from "./capability.js";
 import type { ConfigSchema } from "./config-schema.js";
@@ -16,6 +17,31 @@ import type { ErrorCode } from "./errors.js";
 
 /** The strength of a recipient's current proof (§7). Authentication ≠ authorization. */
 export type AuthStrength = "none" | "password" | "webauthn";
+
+/** A provider-reported auth fact plus its provider-neutral assurance projection. */
+export interface AuthAssuranceFact {
+  authStrength: AuthStrength;
+  /**
+   * Provider-neutral assurance evidence. Legacy providers may omit this only for compatibility;
+   * strongest phishing-resistant enforcement requires explicit assurance evidence, not `authStrength`.
+   */
+  assurance?: AuthAssuranceEvidence;
+}
+
+/** The result of a provider enrollment ceremony. */
+export interface AuthProviderEnrollmentResult extends AuthAssuranceFact {
+  credentialId: string;
+}
+
+/** The result of a provider verification ceremony. Reports facts, not an allow/deny decision. */
+export interface AuthProviderVerificationResult extends AuthAssuranceFact {
+  ok: boolean;
+}
+
+/** The identity-level verification fact returned at the recipient boundary. */
+export interface IdentityVerificationResult extends AuthProviderVerificationResult {
+  userId: UserIdentity["id"];
+}
 
 /** A stable user identity across channels (§7). */
 export interface UserIdentity {
@@ -52,12 +78,9 @@ export interface IdentityPort {
   enroll(
     recipient: RecipientRef,
     discharge: OpaqueToken,
-  ): Promise<{ binding: RecipientBinding; authStrength: AuthStrength }>;
+  ): Promise<{ binding: RecipientBinding } & AuthAssuranceFact>;
   /** Verify a recipient at the edge; returns FACTS, not an allow/deny. */
-  verify(
-    recipient: RecipientRef,
-    assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength; userId: UserIdentity["id"] }>;
+  verify(recipient: RecipientRef, assertion: unknown): Promise<IdentityVerificationResult>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,12 +112,12 @@ export interface AuthProviderPort {
   finishEnrollment(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ credentialId: string; authStrength: AuthStrength }>;
+  ): Promise<AuthProviderEnrollmentResult>;
   challenge(userId: UserIdentity["id"]): Promise<AuthChallenge>;
   verifyAssertion(
     userId: UserIdentity["id"],
     assertion: unknown,
-  ): Promise<{ ok: boolean; authStrength: AuthStrength }>;
+  ): Promise<AuthProviderVerificationResult>;
 }
 
 /** Opaque secret value + injection target (agent-blind; never inspected by the kernel). */
@@ -151,23 +174,59 @@ export interface WorkspacePort {
   reap(h: WorkspaceHandle): Promise<void>;
 }
 
+/** Provider-neutral reverse-proxy transport binding for a human-entrypoint route. */
+export interface ReverseProxyTransportBinding {
+  kind: "reverse-proxy";
+  /** Transport class, e.g. websocket/http. The gateway/transport adapter decides how to dial it. */
+  protocol: string;
+  /** Adapter-owned upstream locator. Core packages never treat this as a resource identity. */
+  upstream: string;
+}
+
+/** Provider-neutral browser-client requirements for a human-entrypoint provider. */
+export interface HumanEntrypointClientBinding {
+  kind: string;
+  ref?: string;
+  bootstrap?: Record<string, unknown>;
+}
+
+/** A provider-neutral human-entrypoint resource binding resolved for a live runtime. */
+export interface HumanEntrypointBinding {
+  /** Stable provider-owned resource identity. */
+  resourceId: string;
+  /** Provider id as registered in the provider catalog. */
+  provider: string;
+  /** Browser client requirements for this entrypoint. */
+  client: HumanEntrypointClientBinding;
+  /** How the gateway/transport layer can reach this entrypoint. */
+  transport: ReverseProxyTransportBinding;
+  /** Non-secret diagnostic metadata. */
+  metadata?: Record<string, unknown>;
+}
+
 /**
- * Human-entrypoint port (§6). noVNC / form / doc-editor are adapters. Agent-blind input path —
+ * Human-entrypoint port (§6). Live-view, form, and document-editor surfaces are adapters. Agent-blind input path —
  * human keystrokes reach the site, not the agent.
  */
 export interface HumanEntrypointPort {
-  open(h: RuntimeHandle): Promise<{ internalEndpoint: string }>;
+  open(h: RuntimeHandle): Promise<HumanEntrypointBinding>;
 }
 
 /** The agent's handle to drive the capsule (printed as data, driven off-gla). */
 export interface AgentConnector {
+  /** Connector kind the agent client understands. Adapter-owned DTOs may add provider-specific fields. */
   type: string;
-  cdp_url?: string;
-  path?: string;
+  /** Stable provider-owned resource identity used by core lifecycle, bind/unbind, suspend/resume, and teardown. */
+  resourceId: string;
+  /** Provider id as registered in the provider catalog. */
+  provider?: string;
+  /** Agent-blind capability reference; never raw secret/signing material. */
   secret_ref?: Ref<"secret-ref">;
+  /** Adapter-owned public payload fields. Core packages must not inspect these. */
+  [providerField: string]: unknown;
 }
 
-/** Agent-connector port (§6). CDP / fs-path / secret-ref are adapters. */
+/** Agent-connector port (§6). Browser automation, paths, and secret-ref shapes are adapter-owned. */
 export interface AgentConnectorPort {
   attach(h: RuntimeHandle): Promise<AgentConnector>;
 }

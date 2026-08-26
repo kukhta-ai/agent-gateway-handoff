@@ -56,6 +56,9 @@ function specWithProfile(profileDir: string): ResolvedAssemblySpec {
 
 /** Is a usable Chromium available (the cached browser)? Skip the REAL test if not. */
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
     return typeof p === "string" && p.length > 0 && existsSync(p);
@@ -156,6 +159,8 @@ describe("LauncherProcessAdapter — FULL mode noVNC (gated; runs in hermes-1)",
         expect(runtime?.cdpWebSocketUrl).toMatch(/^ws:\/\/127\.0\.0\.1:/);
         // The noVNC ws endpoint is exposed (the human entrypoint the gateway proxies in Slice 4).
         expect(runtime?.novncEndpoint).toMatch(/^ws:\/\/127\.0\.0\.1:/);
+        const banner = await firstWebSocketMessage(runtime?.novncEndpoint ?? "");
+        expect(banner.toString("ascii")).toMatch(/^RFB /);
         expect(await launcher.health(handle)).toBe("up");
       } finally {
         await launcher.stop(handle);
@@ -165,9 +170,9 @@ describe("LauncherProcessAdapter — FULL mode noVNC (gated; runs in hermes-1)",
   );
 
   it.skipIf(HAVE_FULL)(
-    "FULL noVNC test SKIPPED — Xvfb/x11vnc/websockify absent (will run in hermes-1)",
+    "FULL noVNC test SKIPPED — full stack unavailable or browser E2E optional",
     () => {
-      expect(fullStackAvailable()).toBe(false);
+      expect(HAVE_FULL).toBe(false);
     },
   );
 });
@@ -183,4 +188,38 @@ function processAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+async function firstWebSocketMessage(endpoint: string): Promise<Buffer> {
+  return await new Promise<Buffer>((resolve, reject) => {
+    if (endpoint.length === 0) {
+      reject(new Error("missing noVNC endpoint"));
+      return;
+    }
+    const timeout = setTimeout(() => {
+      reject(new Error("noVNC websocket probe timed out"));
+    }, 5_000);
+    const ws = new WebSocket(endpoint, ["binary"]);
+    ws.binaryType = "arraybuffer";
+    const finish = (result: Buffer | Error): void => {
+      clearTimeout(timeout);
+      ws.close();
+      if (result instanceof Error) {
+        reject(result);
+        return;
+      }
+      resolve(result);
+    };
+    ws.addEventListener("message", (event) => {
+      const data = event.data as unknown;
+      const bytes =
+        data instanceof ArrayBuffer
+          ? Buffer.from(data)
+          : ArrayBuffer.isView(data)
+            ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+            : Buffer.from(String(data));
+      finish(bytes);
+    });
+    ws.addEventListener("error", () => finish(new Error("noVNC websocket probe failed")));
+  });
 }

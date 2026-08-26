@@ -8,19 +8,21 @@
 
 ## Role
 
-A Session is one handoff: a scoped, recipient-bound window onto a capsule, plus the saga that stands that window up and tears it down. The Session service owns the aggregate and its state machine, runs the TTL timer wheel, and coordinates the Capability service (mint the grant), the Route controller (mount the route), and the Worker plane (spawn/attach the capsule). It is the conductor; the instruments are other components.
+A Session is one handoff: a scoped, recipient-bound window onto a capsule, plus the saga that stands that window up and tears it down. The Session service owns the aggregate and its state machine, runs the TTL timer wheel, and coordinates the Capability service (mint the grant), the Route controller (mount the route), and the Worker plane (spawn/attach the capsule). It is the conductor; the instruments are other components. Connector and entrypoint lifecycle state is tracked by provider-neutral resource ids returned by the adapter seams, not by raw transport addresses.
 
 ## Responsibilities (owns)
 
 - Own the `Session` aggregate and drive its state machine.
 - Coordinate the saga: mint grant → mount route → spawn/attach capsule; and the inverse on completion/expiry.
+- Bind, unbind, suspend/resume, and teardown connector resources by `connectorResourceId`.
+- Pass human-entrypoint bindings to Route without interpreting provider-specific client assets or upstream transport data.
 - Open and close handoff windows (re-opening for a second handoff on the same capsule).
 - Run the TTL timer wheel for windows and grants.
 
 ## Interfaces
 
 **Receives** — from Task/Bridge: create-session, open-handoff, revoke; from Completion: completion signals.
-**Produces** — to Capability: mint/revoke grant; to Route: mount/unmount; to Worker: spawn/stop; status + handoff links to the Bridge/Channel.
+**Produces** — to Capability: mint/revoke grant; to Route: mount/unmount with human-entrypoint binding; to Worker: spawn/stop; status + handoff links to the Bridge/Channel.
 
 ## What it does NOT do
 
@@ -28,7 +30,7 @@ It does **not** mint capabilities (Capability), program the gateway (Route), or 
 
 ## Entities & data
 
-`Session` (id, task_id, step_name, spec [immutable after admission], state, `grant_token`, `route`, `runtime` handle, recipient, completion, timestamps).
+`Session` (id, task_id, step_name, spec [immutable after admission], state, `grant_token`, `route`, `runtime` handle, recipient, completion, timestamps). Provision bookkeeping stores capsule id, connector capability id, connector resource id, and lineage parent; provider-specific DTO fields remain adapter-owned output.
 
 ## In scenario 01
 
@@ -36,7 +38,7 @@ Phase 3 — creates Session-1 and runs the spawn saga. Phases 5 / 11 — opens h
 
 ## Failure modes
 
-Spawn failure → session `failed`, contained to this step. Window TTL expiry → grant revoked, route unmounted, agent notified. A saga step failing mid-way is reconciled toward the recorded intent.
+Spawn failure → session `failed`, contained to this step. Connector providers that cannot return a resource id fail the provision saga before a live connector is recorded. Window TTL expiry → grant revoked, route unmounted, agent notified. A saga step failing mid-way is reconciled toward the recorded intent.
 
 ## Invariants
 

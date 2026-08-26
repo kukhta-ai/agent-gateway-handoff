@@ -1,15 +1,16 @@
 // Integration tests for the `gla` CLI surface (surfaces/cli): the exit-code taxonomy, the JSON/TTY
 // output contract (docs/05 §1, §4, §5), and the Slice-1 orient commands wired over the Agent Bridge.
 // Drives the async `run()` with an injected sink so no process is spawned.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentBridge } from "@gla/bridge";
-import { CatalogService, defaultStoreContent } from "@gla/catalog";
+import { CatalogService, defaultStoreContent, referenceWpmDependencyBindings } from "@gla/catalog";
 import { glaError } from "@gla/kernel";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CLI_VERSION, type CliServices, run } from "./cli.js";
 import { ExitCode } from "./exit-codes.js";
+import { main } from "./index.js";
 import { Output, type OutputStreams } from "./output.js";
 
 /** Build an Output over capture buffers, with a settable stdout TTY flag. */
@@ -33,9 +34,16 @@ function capture(stdoutTty: boolean): { out: Output; stdout: () => string; stder
   return { out: new Output("auto", streams), stdout: () => o.join(""), stderr: () => e.join("") };
 }
 
-/** Default services for tests (the in-tree reference-slice Bridge). */
-function services(bridge: AgentBridge = new AgentBridge()): CliServices {
-  return { bridge };
+/** Bridge fixture for tests that intentionally simulate WPM having installed the reference slice. */
+function readyBridge(): AgentBridge {
+  return new AgentBridge({
+    catalog: new CatalogService({ dependencyBindings: referenceWpmDependencyBindings() }),
+  });
+}
+
+/** Default services for tests (the reference-slice Bridge with explicit WPM receipt fixtures). */
+function services(bridge: AgentBridge = readyBridge()): CliServices {
+  return { bridge, connection: { mode: "in-process" } };
 }
 
 describe("gla exit codes", () => {
@@ -43,7 +51,7 @@ describe("gla exit codes", () => {
     const c = capture(false);
     const code = await run(["version"], c.out, services());
     expect(code).toBe(ExitCode.OK);
-    expect(JSON.parse(c.stdout())).toEqual({ client: CLI_VERSION });
+    expect(JSON.parse(c.stdout())).toEqual({ client: CLI_VERSION, connection: "in-process" });
     expect(c.stderr()).toBe("");
   });
 
@@ -76,7 +84,118 @@ describe("gla exit codes", () => {
   it("treats `--` as end-of-options so `pnpm gla -- version` works (exit 0)", async () => {
     const c = capture(false);
     expect(await run(["--", "version"], c.out, services())).toBe(ExitCode.OK);
-    expect(JSON.parse(c.stdout())).toEqual({ client: CLI_VERSION });
+    expect(JSON.parse(c.stdout())).toEqual({ client: CLI_VERSION, connection: "in-process" });
+  });
+
+  it("process entry redacts refused GLA_ENDPOINT values before printing daemon connection diagnostics", async () => {
+    const endpoint =
+      "https://gla.example/handoff/sess_1?grant=BRIDGE_GRANT_CANARY_090&secret=RAW_SECRET_CANARY_090";
+    const previous = process.env.GLA_ENDPOINT;
+    process.env.GLA_ENDPOINT = endpoint;
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    try {
+      const code = await main(["-o", "json", "whoami"]);
+      expect(code).toBe(ExitCode.USAGE);
+      expect(stdout.join("")).toBe("");
+      const text = stderr.join("");
+      expect(text).toContain("usage.bad_argument");
+      expect(text).not.toContain("BRIDGE_GRANT_CANARY_090");
+      expect(text).not.toContain("RAW_SECRET_CANARY_090");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
+      } else {
+        process.env.GLA_ENDPOINT = previous;
+      }
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("process entry reports unreachable local daemon endpoints as dependency errors", async () => {
+    const previous = process.env.GLA_ENDPOINT;
+    process.env.GLA_ENDPOINT = join(tmpdir(), `gla-missing-${Date.now()}.sock`);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    try {
+      const code = await main(["-o", "json", "whoami"]);
+      expect(code).toBe(ExitCode.DEPENDENCY);
+      expect(stdout.join("")).toBe("");
+      const err = JSON.parse(stderr.join("")).error;
+      expect(err.code).toBe("dependency.unavailable");
+      expect(err.detail.endpoint).toContain("gla-missing-");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
+      } else {
+        process.env.GLA_ENDPOINT = previous;
+      }
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("--endpoint overrides a bad GLA_ENDPOINT before connecting", async () => {
+    const previous = process.env.GLA_ENDPOINT;
+    process.env.GLA_ENDPOINT = "https://gla.example/bridge?secret=ENV_SECRET_CANARY_094";
+    const endpoint = join(tmpdir(), `gla-missing-override-${Date.now()}.sock`);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    try {
+      const code = await main(["-o", "json", "--endpoint", endpoint, "whoami"]);
+      expect(code).toBe(ExitCode.DEPENDENCY);
+      expect(stdout.join("")).toBe("");
+      const text = stderr.join("");
+      expect(text).not.toContain("ENV_SECRET_CANARY_094");
+      const err = JSON.parse(text).error;
+      expect(err.code).toBe("dependency.unavailable");
+      expect(err.detail.endpoint).toBe(endpoint);
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
+      } else {
+        process.env.GLA_ENDPOINT = previous;
+      }
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
   });
 });
 
@@ -108,6 +227,405 @@ describe("gla JSON/TTY output contract", () => {
     });
     await run(["version"], out, services());
     expect(() => JSON.parse(o.join(""))).not.toThrow();
+  });
+});
+
+describe("gla current contract/schema/help (GLA-094)", () => {
+  it("root machine help lists current executable commands separately from deferred surfaces", async () => {
+    const c = capture(false);
+    expect(await run(["--help"], c.out, services())).toBe(ExitCode.OK);
+    const help = JSON.parse(c.stdout()) as {
+      commands: Array<{ noun: string; verb?: string }>;
+      deferred_surfaces: Array<{ surface: string }>;
+    };
+    const commands = help.commands.map((cmd) => [cmd.noun, cmd.verb].filter(Boolean).join(" "));
+    expect(commands).toEqual(
+      expect.arrayContaining([
+        "whoami",
+        "version",
+        "schema",
+        "catalog list",
+        "template list",
+        "template show",
+        "skill list",
+        "skill show",
+        "task create",
+        "task get",
+        "task list",
+        "task complete",
+        "task revoke",
+        "session create",
+        "session get",
+        "session list",
+        "session connector",
+        "session revoke",
+        "handoff open",
+        "handoff wait",
+        "handoff get",
+        "handoff list",
+        "handoff cancel",
+      ]),
+    );
+    expect(commands).not.toContain("events");
+    expect(commands).not.toContain("audit list");
+    expect(help.deferred_surfaces.map((s) => s.surface)).toEqual(
+      expect.arrayContaining(["events", "audit list", "auth login/logout", "output ndjson"]),
+    );
+  });
+
+  it("docs/05 preserves current contract and future roadmap labels that root help exposes", async () => {
+    const docs = readFileSync("docs/05-cli-and-entities.md", "utf8");
+    const c = capture(false);
+    await run(["--help"], c.out, services());
+    const help = JSON.parse(c.stdout()) as {
+      commands: Array<{ noun: string; verb?: string }>;
+      deferred_surfaces: Array<{ surface: string }>;
+    };
+    expect(docs).toContain("### 3.1 Current executable contract");
+    expect(docs).toContain("### 3.2 Future/target command tree");
+    for (const command of help.commands) {
+      const rendered = ["gla", command.noun, command.verb].filter(Boolean).join(" ");
+      const treeLabel = [command.noun, command.verb].filter(Boolean).join(" ");
+      expect(docs.includes(rendered) || docs.includes(treeLabel)).toBe(true);
+    }
+    for (const deferred of help.deferred_surfaces) {
+      const docLabel = deferred.surface === "output ndjson" ? "-o ndjson" : deferred.surface;
+      expect(docs).toContain(docLabel);
+    }
+  });
+
+  it("command-scoped machine help exposes noun, verb, flags, output, effect, and exit codes", async () => {
+    const c = capture(false);
+    expect(await run(["task", "create", "--help"], c.out, services())).toBe(ExitCode.OK);
+    const help = JSON.parse(c.stdout()) as {
+      command: string;
+      commands: Array<Record<string, unknown>>;
+    };
+    expect(help.command).toBe("gla task create");
+    expect(help.commands).toHaveLength(1);
+    expect(help.commands[0]).toMatchObject({
+      noun: "task",
+      verb: "create",
+      output: "task",
+      effect: "mutates",
+    });
+    expect(help.commands[0]?.flags).toContain("--intent <s>");
+    expect(help.commands[0]?.exitCodes).toContain(0);
+    expect(help.commands[0]?.exitCodes).toContain(2);
+  });
+
+  it("`schema [noun [verb]]` returns scoped machine-readable command contracts", async () => {
+    const c = capture(false);
+    expect(await run(["schema", "handoff", "wait"], c.out, services())).toBe(ExitCode.OK);
+    const schema = JSON.parse(c.stdout()) as {
+      command: string;
+      commands: Array<Record<string, unknown>>;
+    };
+    expect(schema.command).toBe("gla handoff wait");
+    expect(schema.commands).toEqual([
+      expect.objectContaining({
+        noun: "handoff",
+        verb: "wait",
+        effect: "blocks",
+        output: "completion",
+        args: ["id"],
+        flags: ["--timeout <dur>"],
+      }),
+    ]);
+  });
+
+  it("deferred nouns, deferred auth login/logout, and ndjson fail with stable unsupported diagnostics", async () => {
+    for (const argv of [
+      ["policy", "mounts"],
+      ["events"],
+      ["audit", "list"],
+      ["auth", "login"],
+      ["-o", "ndjson", "version"],
+      ["--context", "prod", "version"],
+      ["--trace-id", "trace-1", "version"],
+      ["batch"],
+    ]) {
+      const c = capture(false);
+      expect(await run(argv, c.out, services())).toBe(ExitCode.USAGE);
+      expect(c.stdout()).toBe("");
+      const err = JSON.parse(c.stderr()).error;
+      expect(err.code).toBe("usage.unsupported");
+      expect(err.detail.surface).toBeTruthy();
+      expect(err.detail.status).toBe("deferred");
+    }
+  });
+
+  it("--fields trims successful JSON results and --quiet does not suppress results", async () => {
+    const c = capture(false);
+    const code = await run(
+      [
+        "task",
+        "create",
+        "--intent",
+        "register on acme",
+        "--recipient",
+        "tg:user:123",
+        "--fields",
+        "task_id,state",
+        "--quiet",
+      ],
+      c.out,
+      services(),
+    );
+    expect(code).toBe(ExitCode.OK);
+    const out = JSON.parse(c.stdout());
+    expect(Object.keys(out).sort()).toEqual(["state", "task_id"]);
+    expect(out.task_id).toMatch(/^task_/);
+    expect(out.state).toBe("active");
+    expect(c.stderr()).toBe("");
+  });
+
+  it("unknown --fields fail before mutating command state", async () => {
+    const bridge = new AgentBridge();
+    const bad = capture(false);
+    const code = await run(
+      ["task", "create", "--intent", "x", "--fields", "missing"],
+      bad.out,
+      services(bridge),
+    );
+    expect(code).toBe(ExitCode.USAGE);
+    expect(bad.stdout()).toBe("");
+    expect(JSON.parse(bad.stderr()).error.code).toBe("usage.bad_field");
+
+    const list = capture(false);
+    await run(["task", "list"], list.out, services(bridge));
+    expect(JSON.parse(list.stdout())).toEqual([]);
+  });
+
+  it("unknown command-scoped flags fail with allowed flags before dispatch", async () => {
+    const c = capture(false);
+    expect(await run(["version", "--bogus", "x"], c.out, services())).toBe(ExitCode.USAGE);
+    expect(c.stdout()).toBe("");
+    const err = JSON.parse(c.stderr()).error;
+    expect(err.code).toBe("usage.bad_flag");
+    expect(err.detail.flags).toEqual(["--bogus"]);
+    expect(err.detail.allowed_flags).toEqual([]);
+  });
+
+  it("unknown command-scoped flags on mutating commands fail before changing bridge state", async () => {
+    const bridge = new AgentBridge();
+    const bad = capture(false);
+    expect(
+      await run(
+        ["task", "create", "--intent", "x", "--unsupported", "value"],
+        bad.out,
+        services(bridge),
+      ),
+    ).toBe(ExitCode.USAGE);
+    expect(bad.stdout()).toBe("");
+    const err = JSON.parse(bad.stderr()).error;
+    expect(err.code).toBe("usage.bad_flag");
+    expect(err.detail.flags).toEqual(["--unsupported"]);
+    expect(err.detail.allowed_flags).toEqual(["--intent", "--recipient"]);
+
+    const list = capture(false);
+    await run(["task", "list"], list.out, services(bridge));
+    expect(JSON.parse(list.stdout())).toEqual([]);
+  });
+
+  it("value-bearing command flags without values fail before changing bridge state", async () => {
+    const bridge = new AgentBridge();
+    const bad = capture(false);
+    expect(await run(["task", "create", "--intent"], bad.out, services(bridge))).toBe(
+      ExitCode.USAGE,
+    );
+    expect(bad.stdout()).toBe("");
+    const err = JSON.parse(bad.stderr()).error;
+    expect(err.code).toBe("usage.bad_flag");
+    expect(err.detail.missing_values).toEqual(["--intent"]);
+
+    const list = capture(false);
+    await run(["task", "list"], list.out, services(bridge));
+    expect(JSON.parse(list.stdout())).toEqual([]);
+  });
+
+  it("repeatable value-bearing flags without values fail before dispatch", async () => {
+    const c = capture(false);
+    expect(
+      await run(
+        ["session", "create", "--template", "browser-handoff", "--mount", "--dry-run"],
+        c.out,
+        services(),
+      ),
+    ).toBe(ExitCode.USAGE);
+    expect(c.stdout()).toBe("");
+    const err = JSON.parse(c.stderr()).error;
+    expect(err.code).toBe("usage.bad_flag");
+    expect(err.detail.missing_values).toEqual(["--mount"]);
+  });
+
+  it("boolean command flags with values fail before mutating command dispatch", async () => {
+    const bridge = new AgentBridge();
+    const bad = capture(false);
+    expect(
+      await run(
+        ["session", "create", "--template", "browser-handoff", "--dry-run", "false"],
+        bad.out,
+        services(bridge),
+      ),
+    ).toBe(ExitCode.USAGE);
+    expect(bad.stdout()).toBe("");
+    const err = JSON.parse(bad.stderr()).error;
+    expect(err.code).toBe("usage.bad_flag");
+    expect(err.detail.unexpected_values).toEqual(["--dry-run"]);
+
+    const sessions = capture(false);
+    await run(["session", "list"], sessions.out, services(bridge));
+    expect(JSON.parse(sessions.stdout())).toEqual([]);
+  });
+
+  it("documented field-mask snippets parse JSON object ids before reuse", async () => {
+    const docs = readFileSync("docs/05-cli-and-entities.md", "utf8");
+    expect(docs).toContain("Field masks keep JSON object shape");
+    expect(docs).toContain("TASK_JSON=$(gla task create");
+    expect(docs).toContain("TASK=$(node -pe 'JSON.parse(process.argv[1]).task_id'");
+    expect(docs).toContain("CONN_JSON=$(gla session connector");
+    expect(docs).toContain("H1_JSON=$(gla handoff open");
+
+    const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
+    try {
+      const path = specFile(dir, OK_ASSEMBLY);
+      const bridge = readyBridge();
+
+      const task = capture(false);
+      expect(
+        await run(
+          [
+            "task",
+            "create",
+            "--intent",
+            "register on acme",
+            "--recipient",
+            "tg:user:123",
+            "--fields",
+            "task_id",
+            "--quiet",
+          ],
+          task.out,
+          services(bridge),
+        ),
+      ).toBe(ExitCode.OK);
+      const taskJson = JSON.parse(task.stdout());
+      expect(Object.keys(taskJson)).toEqual(["task_id"]);
+      const taskId = taskJson.task_id as string;
+
+      const session = capture(false);
+      expect(
+        await run(
+          ["session", "create", "--task", taskId, "-f", path, "--fields", "session_id", "--quiet"],
+          session.out,
+          services(bridge),
+        ),
+      ).toBe(ExitCode.OK);
+      const sessionJson = JSON.parse(session.stdout());
+      expect(Object.keys(sessionJson)).toEqual(["session_id"]);
+      const sessionId = sessionJson.session_id as string;
+
+      const connector = capture(false);
+      expect(
+        await run(
+          ["session", "connector", sessionId, "--fields", "type,secret_ref"],
+          connector.out,
+          services(new FakeSessionConnectorBridge()),
+        ),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(connector.stdout())).toEqual({
+        type: "cdp",
+        secret_ref: "cap_ref_connector_1",
+      });
+
+      const handoff = capture(false);
+      expect(
+        await run(
+          [
+            "handoff",
+            "open",
+            "--session",
+            sessionId,
+            "--reason",
+            "complete registration form",
+            "--fields",
+            "handoff_id",
+            "--quiet",
+          ],
+          handoff.out,
+          services(new FakeHandoffBridge()),
+        ),
+      ).toBe(ExitCode.OK);
+      const handoffJson = JSON.parse(handoff.stdout());
+      expect(Object.keys(handoffJson)).toEqual(["handoff_id"]);
+      expect(handoffJson.handoff_id).toBe("hand_1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("--quiet does not suppress machine-readable errors", async () => {
+    const c = capture(false);
+    expect(await run(["--quiet", "frobnicate"], c.out, services())).toBe(ExitCode.USAGE);
+    expect(c.stdout()).toBe("");
+    expect(JSON.parse(c.stderr()).error.code).toBe("usage.unknown_command");
+  });
+
+  it("version distinguishes client-only, in-process, and daemon profiles without inventing a server version", async () => {
+    const clientOnly = capture(false);
+    expect(
+      await run(["version"], clientOnly.out, {
+        bridge: readyBridge(),
+        connection: { mode: "client-only" },
+      }),
+    ).toBe(ExitCode.OK);
+    expect(JSON.parse(clientOnly.stdout())).toEqual({
+      client: CLI_VERSION,
+      connection: "client-only",
+    });
+
+    const daemon = capture(false);
+    expect(
+      await run(["version"], daemon.out, {
+        bridge: readyBridge(),
+        connection: { mode: "daemon" },
+      }),
+    ).toBe(ExitCode.OK);
+    expect(JSON.parse(daemon.stdout())).toEqual({
+      client: CLI_VERSION,
+      connection: "daemon",
+    });
+  });
+
+  it("auth diagnostics field masks use the real diagnostic read-model fields", async () => {
+    const bridge = Object.assign(readyBridge(), {
+      request: vi.fn(async () => ({
+        authProvider: "authentik",
+        authAssuranceProfile: "passkey-and-password",
+        enrollmentPolicy: { provider: "authentik" },
+        deploymentRoles: [],
+        edgeGuard: { summary: "GLA OIDC provider selected", outerGuards: [] },
+        summary: "authentik diagnostics ready",
+        concerns: ["missing deployed passkey proof"],
+        actions: ["record loginMethodProofs"],
+        bindingSemantics: {
+          providerAccount: "provider-local account is not a GLA binding",
+          glaBinding: "recipient must have a GLA enrollment record",
+        },
+      })),
+    });
+    const c = capture(false);
+    expect(
+      await run(["auth", "diagnostics", "--fields", "summary,concerns"], c.out, {
+        bridge,
+        connection: { mode: "daemon" },
+      }),
+    ).toBe(ExitCode.OK);
+    expect(JSON.parse(c.stdout())).toEqual({
+      summary: "authentik diagnostics ready",
+      concerns: ["missing deployed passkey proof"],
+    });
   });
 });
 
@@ -163,6 +681,7 @@ describe("gla catalog list (GLA-017 AC#3)", () => {
     // A Bridge whose launcher probe reports unavailable — the system derives the drop.
     const catalog = new CatalogService({
       content: defaultStoreContent(),
+      dependencyBindings: referenceWpmDependencyBindings(),
       probes: { "launcher-process": () => "unavailable" },
     });
     const c = capture(false);
@@ -272,7 +791,7 @@ describe("gla session create — dry-run (admission only)", () => {
     const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
     try {
       const path = specFile(dir, OK_ASSEMBLY);
-      const bridge = new AgentBridge();
+      const bridge = readyBridge();
       const c = capture(false);
       const code = await run(["session", "create", "-f", path, "--dry-run"], c.out, { bridge });
       expect(code).toBe(ExitCode.OK);
@@ -285,6 +804,27 @@ describe("gla session create — dry-run (admission only)", () => {
       const list = capture(false);
       await run(["task", "list"], list.out, { bridge });
       expect(JSON.parse(list.stdout()).length).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unavailable provider from missing WPM binding rejects with catalog.unavailable and creates no state", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
+    try {
+      const path = specFile(dir, OK_ASSEMBLY);
+      const bridge = new AgentBridge();
+      const c = capture(false);
+      const code = await run(["session", "create", "-f", path], c.out, { bridge });
+      expect(code).toBe(ExitCode.DEPENDENCY);
+      expect(JSON.parse(c.stderr()).error.code).toBe("catalog.unavailable");
+
+      const tasks = capture(false);
+      await run(["task", "list"], tasks.out, { bridge });
+      expect(JSON.parse(tasks.stdout()).length).toBe(0);
+      const sessions = capture(false);
+      await run(["session", "list"], sessions.out, { bridge });
+      expect(JSON.parse(sessions.stdout()).length).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -390,7 +930,7 @@ describe("gla session create — real run (dispatch a Session in `issued`, no sp
     const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
     try {
       const path = specFile(dir, OK_ASSEMBLY);
-      const bridge = new AgentBridge();
+      const bridge = readyBridge();
       const c = capture(false);
       const code = await run(["session", "create", "-f", path], c.out, { bridge });
       expect(code).toBe(ExitCode.OK);
@@ -418,7 +958,7 @@ describe("gla session create — real run (dispatch a Session in `issued`, no sp
         ...OK_ASSEMBLY,
         spec: { ...OK_ASSEMBLY.spec, detectors: [{ use: "url-watcher" }] },
       });
-      const bridge = new AgentBridge();
+      const bridge = readyBridge();
       const c = capture(false);
       const code = await run(["session", "create", "-f", badSpec], c.out, { bridge });
       expect(code).toBe(ExitCode.POLICY); // rejected (config-schema) → exit 3
@@ -438,7 +978,7 @@ describe("gla session create — real run (dispatch a Session in `issued`, no sp
     const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
     try {
       const path = specFile(dir, OK_ASSEMBLY);
-      const bridge = new AgentBridge();
+      const bridge = readyBridge();
       const tc = capture(false);
       await run(["task", "create", "--intent", "explicit"], tc.out, { bridge });
       const taskId = JSON.parse(tc.stdout()).task_id as string;
@@ -476,6 +1016,34 @@ describe("gla session create — real run (dispatch a Session in `issued`, no sp
   });
 });
 
+class FakeSessionConnectorBridge extends AgentBridge {
+  override async sessionConnector(id: string) {
+    return {
+      session_id: id as `sess_${string}`,
+      type: "cdp" as const,
+      cdp_url: "ws://127.0.0.1:9222/devtools/browser/abc",
+      secret_ref: "cap_ref_connector_1",
+      state: "issued" as const,
+    } as never;
+  }
+}
+
+describe("gla session connector", () => {
+  it("`session connector <id>` re-emits the connector and supports field masks", async () => {
+    const c = capture(false);
+    const code = await run(
+      ["session", "connector", "sess_1", "--fields", "type,secret_ref"],
+      c.out,
+      services(new FakeSessionConnectorBridge()),
+    );
+    expect(code).toBe(ExitCode.OK);
+    expect(JSON.parse(c.stdout())).toEqual({
+      type: "cdp",
+      secret_ref: "cap_ref_connector_1",
+    });
+  });
+});
+
 // ── Handoff verbs (Slice 4b) — dispatch + exit-code contract over a FAKE bridge ─────────────────────────
 // A minimal AgentBridge subclass returning canned handoff results, so the CLI dispatch (flags, JSON output,
 // the exit-6 timeout re-label) is tested without the full provision/gateway stack.
@@ -507,7 +1075,10 @@ class FakeHandoffBridge extends AgentBridge {
       handoff_id: id as `hand_${string}`,
       status: "submitted",
       state: "completed" as const,
-      result: { url: "https://acme.example/verify", match: "/verify" },
+      result: {
+        url: "https://acme.example/verify?token=completion-token-canary&ok=1",
+        match: "/verify",
+      },
       next: "email-verification",
     };
   }
@@ -537,7 +1108,7 @@ class FakeHandoffBridge extends AgentBridge {
 }
 
 describe("gla handoff verbs (Slice 4b)", () => {
-  it("`handoff open --session S --reason r` prints {handoff_id, link, recipient, expires_at} (exit 0)", async () => {
+  it("`handoff open --session S --reason r` prints a redacted read model (exit 0)", async () => {
     const c = capture(false);
     const bridge = new FakeHandoffBridge();
     const code = await run(
@@ -548,7 +1119,9 @@ describe("gla handoff verbs (Slice 4b)", () => {
     expect(code).toBe(ExitCode.OK);
     const out = JSON.parse(c.stdout());
     expect(out.handoff_id).toBe("hand_1");
-    expect(out.link).toContain("grant=");
+    expect(out.link).toBe("<redacted-url>");
+    expect(c.stdout()).not.toContain("grant=");
+    expect(c.stdout()).not.toContain("tok");
     expect(out.recipient).toBe("tg:user:123");
     expect(out.expires_at).toBeTruthy();
     // The CLI passed the flags through to the bridge.
@@ -573,10 +1146,14 @@ describe("gla handoff verbs (Slice 4b)", () => {
     const code = await run(["handoff", "wait", "hand_1"], c.out, services(bridge));
     expect(code).toBe(ExitCode.OK);
     const out = JSON.parse(c.stdout());
-    // The CLI passes the envelope through verbatim (the JSON contract): status + result + the next hint.
+    // The CLI preserves completion structure while redacting operator-visible result details.
     expect(out.status).toBe("submitted");
-    expect(out.result).toEqual({ url: "https://acme.example/verify", match: "/verify" });
+    expect(out.result).toEqual({
+      url: "https://acme.example/verify?token=<redacted>&ok=1",
+      match: "/verify",
+    });
     expect(out.next).toBe("email-verification");
+    expect(c.stdout()).not.toContain("completion-token-canary");
   });
 
   it("`handoff wait <id>` on a timeout/expiry exits 6 (TIMEOUT), not 4 (auth)", async () => {
@@ -596,7 +1173,10 @@ describe("gla handoff verbs (Slice 4b)", () => {
     const c = capture(false);
     const code = await run(["handoff", "get", "hand_1"], c.out, services(new FakeHandoffBridge()));
     expect(code).toBe(ExitCode.OK);
-    expect(JSON.parse(c.stdout()).state).toBe("open");
+    const out = JSON.parse(c.stdout());
+    expect(out.state).toBe("open");
+    expect(out.link).toBe("<redacted-url>");
+    expect(c.stdout()).not.toContain("grant=");
   });
 
   it("`handoff cancel <id>` closes the window (exit 0)", async () => {
@@ -607,7 +1187,10 @@ describe("gla handoff verbs (Slice 4b)", () => {
       services(new FakeHandoffBridge()),
     );
     expect(code).toBe(ExitCode.OK);
-    expect(JSON.parse(c.stdout()).state).toBe("cancelled");
+    const out = JSON.parse(c.stdout());
+    expect(out.state).toBe("cancelled");
+    expect(out.link).toBe("<redacted-url>");
+    expect(c.stdout()).not.toContain("grant=");
   });
 
   it("`handoff list` returns an array (exit 0)", async () => {

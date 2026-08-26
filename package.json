@@ -15,7 +15,12 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "test": "vitest run",
-    "gate": "pnpm run typecheck && biome ci . && vitest run",
+    "test:e2e:preflight": "node tools/browser-e2e-preflight.mjs",
+    "test:e2e:preflight:optional": "node tools/browser-e2e-preflight.mjs --allow-skip",
+    "gate": "pnpm run typecheck && biome ci . && GLA_BROWSER_E2E_MODE=required pnpm run test:e2e:preflight && GLA_BROWSER_E2E_MODE=required vitest run",
+    "gate:without-browser-e2e": "pnpm run typecheck && biome ci . && GLA_BROWSER_E2E_MODE=optional pnpm run test:e2e:preflight:optional && GLA_BROWSER_E2E_MODE=optional vitest run",
+    "gate:browser-canary": "node tools/browser-e2e-canary.mjs",
+    "gate:e2e-proof-canaries": "node tools/e2e-proof-canaries.mjs",
     "gate:selftest": "node tools/boundary-check/selftest.mjs",
     "gla": "node surfaces/cli/bin/gla.mjs",
     "serve": "node packages/app/bin/gla.mjs serve"

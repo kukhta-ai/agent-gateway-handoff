@@ -17,11 +17,31 @@
 // it spawns a real browser — but the no-orphan teardown logic is ALSO proven by teardown-e2e + the worker
 // unit tests, so the property holds regardless.
 
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  chmodSync,
+  chownSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { request as httpRequest } from "node:http";
-import { type Socket, connect as netConnect } from "node:net";
+import {
+  type AddressInfo,
+  type Server as NetServer,
+  type Socket,
+  createServer as createNetServer,
+  connect as netConnect,
+} from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { DaemonBridgeClient, Output, type OutputStreams, run } from "@gla/cli";
 import type { RecipientRef } from "@gla/kernel";
 import { chromium } from "playwright-core";
@@ -29,11 +49,112 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type DaemonHandle, endpointIsLocal, parseServeArgs, serve } from "./daemon.js";
 
 const recipient = "tg:user:123" as RecipientRef;
+const AUTHENTIK_ENROLLMENT_POLICY_JSON = JSON.stringify({
+  provider: "authentik",
+  declared: true,
+  enrollmentFlow: "gla-invitation-enrollment",
+  authenticationFlow: "gla-login-passkey-or-password",
+  invitationStage: "gla-invitation-stage",
+  userWriteStage: "gla-user-write-stage",
+  userLoginStage: "gla-user-login-stage",
+  credentialSetupStages: [
+    {
+      method: "password",
+      stage: "gla-password-prompt",
+      authStrength: "password",
+      assuranceLevel: "password",
+      choiceGroup: "primary-credential",
+      providerEvidence: { amr: ["pwd"] },
+    },
+    {
+      method: "webauthn-passkey",
+      stage: "gla-webauthn-setup",
+      authStrength: "webauthn",
+      assuranceLevel: "phishing-resistant",
+      choiceGroup: "primary-credential",
+      providerEvidence: {
+        amr: ["swk"],
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
+    },
+  ],
+  externalSources: [
+    {
+      kind: "oauth",
+      name: "github",
+      source: "github-oauth",
+      choiceGroup: "primary-credential",
+      assuranceLevel: "password",
+    },
+  ],
+  mfaRecoveryMethods: [{ method: "totp", stage: "gla-totp-setup", purpose: "mfa" }],
+  optionalRecipientChoices: [
+    { id: "primary-credential", choices: ["password", "webauthn-passkey", "oauth:github"] },
+  ],
+  loginMethodProofs: [
+    {
+      method: "password",
+      kind: "password",
+      stage: "gla-password-prompt",
+      status: "verified",
+      authStrength: "password",
+      assuranceLevel: "password",
+      evidence: { amr: ["pwd"] },
+    },
+    {
+      method: "webauthn-passkey",
+      kind: "webauthn-passkey",
+      stage: "gla-webauthn-setup",
+      status: "verified",
+      authStrength: "webauthn",
+      assuranceLevel: "phishing-resistant",
+      evidence: {
+        amr: ["swk"],
+        gla_uv: true,
+        userVerified: true,
+        recipientBound: true,
+        replayResistant: true,
+      },
+    },
+    {
+      method: "oauth:github",
+      kind: "external-source",
+      source: "github-oauth",
+      status: "verified",
+      authStrength: "password",
+      assuranceLevel: "password",
+      subjectStable: true,
+      evidence: { source: "github-oauth", subjectMode: "stable" },
+    },
+  ],
+});
+const AUTHENTIK_EDGE_GUARD_ROLES_JSON = JSON.stringify([
+  {
+    role: "authentik-forward-auth",
+    provider: "authentik",
+    mode: "forward-auth",
+    label: "authentik outpost in front of GLA",
+    optional: true,
+    publicSurface: "https://gla.example/team-a/",
+    providerEvidence: { outpost: "embedded", access_token: "EDGE_TOKEN_CANARY_087" },
+  },
+  {
+    role: "gla-oidc-provider",
+    provider: "authentik",
+    mode: "oidc-provider",
+    label: "GLA handoff step-up provider",
+  },
+]);
 
 function chromiumAvailable(): boolean {
+  if (process.env.GLA_BROWSER_E2E_MODE === "optional") {
+    return false;
+  }
   try {
     const p = chromium.executablePath();
-    return typeof p === "string" && p.length > 0;
+    return typeof p === "string" && p.length > 0 && existsSync(p);
   } catch {
     return false;
   }
@@ -88,6 +209,7 @@ async function cliOverDaemon(
 async function startDaemon(opts: {
   publicBaseUrl: string;
   workspaceRoot?: string;
+  deliverySink?: { write(line: string): void };
 }): Promise<DaemonHandle> {
   const sock = join(scratch("gla-daemon-sock-"), "gla.sock");
   const handle = await serve({
@@ -95,11 +217,12 @@ async function startDaemon(opts: {
     port: 0, // ephemeral gateway port (a real deploy binds 0.0.0.0:3000).
     bridgeEndpoint: sock,
     publicBaseUrl: opts.publicBaseUrl,
+    dependencyBindings: referenceWpmDependencyBindings(),
     rpID: "localhost",
     expectedOrigin: opts.publicBaseUrl,
     launcherMode: "headless",
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
-    deliverySink: { write: () => {} }, // quiet: don't print delivered links to the test's stdout.
+    deliverySink: opts.deliverySink ?? { write: () => {} }, // quiet by default; tests may capture recipient links.
     log: () => {}, // quiet in tests.
   });
   liveHandles.push(handle);
@@ -135,6 +258,78 @@ function canConnect(endpoint: string): Promise<boolean> {
     socket.once("connect", () => done(true));
     socket.once("error", () => done(false));
   });
+}
+
+function closeNetServer(server: NetServer): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()));
+}
+
+function listenNetServer(server: NetServer, endpoint: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ path: endpoint }, () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function freeLoopbackPort(): Promise<number> {
+  const server = createNetServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  await closeNetServer(server);
+  return address.port;
+}
+
+function currentUid(): number | undefined {
+  const getuid = process.getuid;
+  return typeof getuid === "function" ? getuid.call(process) : undefined;
+}
+
+function canChangeOwner(): boolean {
+  return currentUid() === 0;
+}
+
+async function createCrashedSocket(path: string): Promise<void> {
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `
+        const { createServer } = require("node:net");
+        const server = createServer();
+        server.listen(process.argv[1], () => {
+          if (process.send) process.send("ready");
+        });
+        setInterval(() => {}, 1000);
+      `,
+      path,
+    ],
+    { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+  );
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out creating stale socket")), 5000);
+    child.once("message", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.once("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+  });
+  child.kill("SIGKILL");
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  if (!existsSync(path)) {
+    throw new Error("test setup failed: crashed process did not leave a socket file");
+  }
 }
 
 describe("gla serve daemon — deployable long-running service (round-trip, gateway, public base, shutdown)", () => {
@@ -198,28 +393,64 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
 
   it("public-base-url: a link minted through the daemon (enrollInvite) uses the PUBLIC base, not loopback", async () => {
     const publicBase = "https://203.0.113.10/";
-    const handle = await startDaemon({ publicBaseUrl: publicBase });
+    const delivered: string[] = [];
+    const handle = await startDaemon({
+      publicBaseUrl: publicBase,
+      deliverySink: { write: (line) => void delivered.push(line) },
+    });
     expect(handle.publicBaseUrl).toBe(publicBase);
-    // The operator enrollment action mints an invite link built against the public base URL.
+    // The operator enrollment action returns only a redacted read model.
     const invite = await handle.enrollInvite(recipient);
-    expect(invite.link.startsWith(publicBase)).toBe(true);
-    expect(invite.link).toContain("/enroll");
-    expect(invite.link).toContain("grant=");
+    expect(invite.link).toBe("<redacted-url>");
+    expect(invite.grant).toBe("<redacted>");
+    expect(invite.nonce).toBe("<redacted>");
+    const deliveredInvite = JSON.parse(delivered[0] ?? "{}") as {
+      recipient?: string;
+      link?: string;
+    };
+    expect(deliveredInvite.recipient).toBe(recipient);
+    expect(deliveredInvite.link?.startsWith(publicBase)).toBe(true);
+    expect(deliveredInvite.link).toContain("/enroll");
+    expect(deliveredInvite.link).toContain("grant=");
     // It must NOT be a loopback link (the bug this guards: links pointing at 127.0.0.1:<port>).
-    expect(invite.link).not.toContain("127.0.0.1");
-    expect(invite.link).not.toContain("localhost");
+    expect(deliveredInvite.link).not.toContain("127.0.0.1");
+    expect(deliveredInvite.link).not.toContain("localhost");
   });
 
-  it("public-base-url over the socket: the operator `enrollInvite` daemon op returns a public-base link", async () => {
+  it("public-base-url with a path prefix mints links under that configured public base", async () => {
+    const publicBase = "https://gla.example/team-a/";
+    const delivered: string[] = [];
+    const handle = await startDaemon({
+      publicBaseUrl: publicBase,
+      deliverySink: { write: (line) => void delivered.push(line) },
+    });
+    expect(handle.publicBaseUrl).toBe(publicBase);
+    const invite = await handle.enrollInvite(recipient);
+    expect(invite.link).toBe("<redacted-url>");
+    const deliveredInvite = JSON.parse(delivered[0] ?? "{}") as { link?: string };
+    expect(deliveredInvite.link).toMatch(/^https:\/\/gla\.example\/team-a\/enroll\?grant=/);
+  });
+
+  it("public-base-url over the socket: the operator `enrollInvite` daemon op redacts readback", async () => {
     const publicBase = "https://203.0.113.10/";
-    const handle = await startDaemon({ publicBaseUrl: publicBase });
+    const delivered: string[] = [];
+    const handle = await startDaemon({
+      publicBaseUrl: publicBase,
+      deliverySink: { write: (line) => void delivered.push(line) },
+    });
     const client = await DaemonBridgeClient.connect(handle.bridgeEndpoint);
     try {
       // The operator op is reachable over the LOCAL bridge socket (a documented daemon call), distinct from
       // the agent surface — `request()` is the public arbitrary-op send.
-      const res = await client.request<{ link: string }>("enrollInvite", [recipient]);
-      expect(res.link.startsWith(publicBase)).toBe(true);
-      expect(res.link).toContain("/enroll");
+      const res = await client.request<{ link: string; grant: string; nonce: string }>(
+        "enrollInvite",
+        [recipient],
+      );
+      expect(res).toEqual({ link: "<redacted-url>", grant: "<redacted>", nonce: "<redacted>" });
+      const deliveredInvite = JSON.parse(delivered[0] ?? "{}") as { link?: string };
+      expect(deliveredInvite.link?.startsWith(publicBase)).toBe(true);
+      expect(deliveredInvite.link).toContain("/enroll");
+      expect(deliveredInvite.link).toContain("grant=");
     } finally {
       client.close();
     }
@@ -247,6 +478,431 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
         log: () => {},
       }),
     ).rejects.toThrow(/local-only|0\.0\.0\.0|LOCAL/i);
+  });
+
+  it("trusted-local Unix socket remains credential-free for the same user and is bound with private socket permissions", async () => {
+    const handle = await startDaemon({ publicBaseUrl: "https://203.0.113.10/" });
+    const ep = handle.bridgeEndpoint;
+    const socket = lstatSync(ep);
+    expect(socket.isSocket()).toBe(true);
+    expect(socket.mode & 0o077).toBe(0);
+    const uid = currentUid();
+    if (uid !== undefined) {
+      expect(socket.uid).toBe(uid);
+    }
+
+    const who = await cliOverDaemon(ep, ["whoami"]);
+    expect(who.code, who.stderr).toBe(0);
+    expect(who.stderr).not.toMatch(/login|bearer|token|mTLS|certificate/i);
+  });
+
+  it("refuses unsafe Unix socket runtime directories before serving bridge operations", async () => {
+    const dir = scratch("gla-unsafe-runtime-");
+    chmodSync(dir, 0o777);
+    const sock = join(dir, "gla.sock");
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: sock,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/runtime directory|group\/other write|pre-create|replace/i);
+  });
+
+  it("refuses symlink, regular-file, and directory bridge endpoints instead of unlinking them", async () => {
+    const symlinkDir = scratch("gla-symlink-endpoint-");
+    const symlinkEndpoint = join(symlinkDir, "gla.sock");
+    symlinkSync(join(symlinkDir, "target.sock"), symlinkEndpoint);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: symlinkEndpoint,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/symlink/i);
+    expect(lstatSync(symlinkEndpoint).isSymbolicLink()).toBe(true);
+
+    const parentDir = scratch("gla-symlink-parent-");
+    const realParent = join(parentDir, "real-parent");
+    const linkedParent = join(parentDir, "linked-parent");
+    mkdirSync(realParent);
+    symlinkSync(realParent, linkedParent);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: join(linkedParent, "gla.sock"),
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/parent path component|symlink/i);
+
+    const regularDir = scratch("gla-regular-endpoint-");
+    const regularEndpoint = join(regularDir, "gla.sock");
+    writeFileSync(regularEndpoint, "not a socket");
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: regularEndpoint,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/not a Unix socket|regular file/i);
+    expect(readFileSync(regularEndpoint, "utf8")).toBe("not a socket");
+
+    const directoryDir = scratch("gla-directory-endpoint-");
+    const directoryEndpoint = join(directoryDir, "gla.sock");
+    mkdirSync(directoryEndpoint);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: directoryEndpoint,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/directory/i);
+    expect(lstatSync(directoryEndpoint).isDirectory()).toBe(true);
+  });
+
+  it("refuses an already-active or replaced Unix socket, but safely removes a same-owner stale socket", async () => {
+    const activeEndpoint = join(scratch("gla-active-endpoint-"), "gla.sock");
+    const holder = createNetServer();
+    await listenNetServer(holder, activeEndpoint);
+    try {
+      await expect(
+        serve({
+          host: "127.0.0.1",
+          port: 0,
+          bridgeEndpoint: activeEndpoint,
+          publicBaseUrl: "https://203.0.113.10/",
+          log: () => {},
+        }),
+      ).rejects.toThrow(/already accepts connections|owning daemon/i);
+      expect(await canConnect(activeEndpoint)).toBe(true);
+    } finally {
+      await closeNetServer(holder);
+    }
+
+    const staleEndpoint = join(scratch("gla-stale-endpoint-"), "gla.sock");
+    await createCrashedSocket(staleEndpoint);
+    const handle = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: staleEndpoint,
+      publicBaseUrl: "https://203.0.113.10/",
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: () => {},
+    });
+    liveHandles.push(handle);
+    expect(await canConnect(staleEndpoint)).toBe(true);
+    const who = await cliOverDaemon(staleEndpoint, ["whoami"]);
+    expect(who.code, who.stderr).toBe(0);
+  });
+
+  it.runIf(canChangeOwner())("refuses wrong-owner Unix socket runtime directories", async () => {
+    const dir = scratch("gla-wrong-owner-runtime-");
+    chownSync(dir, 65534, 65534);
+    chmodSync(dir, 0o700);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: join(dir, "gla.sock"),
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/owned by uid 65534|daemon uid/i);
+  });
+
+  it("refuses non-local bridge endpoints, redacts secret-shaped diagnostics, and documents loopback as dev/advanced mode", async () => {
+    const nonLocal =
+      "https://bridge.example/handoff/sess_1?grant=BRIDGE_GRANT_CANARY_090&secret=RAW_SECRET_CANARY_090";
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: nonLocal,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/non-local endpoint/i);
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: nonLocal,
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.not.toThrow(/BRIDGE_GRANT_CANARY_090|RAW_SECRET_CANARY_090/);
+
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: "10.0.0.8:7423",
+        publicBaseUrl: "https://203.0.113.10/",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/non-local endpoint|LOCAL-only/i);
+
+    const port = await freeLoopbackPort();
+    const logs: string[] = [];
+    const loopback = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: `127.0.0.1:${port}`,
+      publicBaseUrl: "https://203.0.113.10/",
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: (line) => void logs.push(line),
+    });
+    liveHandles.push(loopback);
+    expect(await canConnect(`127.0.0.1:${port}`)).toBe(true);
+    expect(logs.join("\n")).toMatch(/loopback TCP.*development\/advanced/i);
+    expect(logs.join("\n")).toMatch(/not equivalent to a private Unix socket/i);
+  });
+
+  it("invalid public base values fail before serving starts with actionable errors", async () => {
+    for (const publicBaseUrl of [
+      "gla.example/a",
+      "https:///a",
+      "https://gla.example/a?x=1",
+      "https://gla.example/a#frag",
+      "https://gla.example/a/../b",
+    ]) {
+      await expect(
+        serve({
+          host: "127.0.0.1",
+          port: 0,
+          bridgeEndpoint: join(scratch("gla-invalid-base-"), "gla.sock"),
+          publicBaseUrl,
+          log: () => {},
+        }),
+        publicBaseUrl,
+      ).rejects.toThrow(/GLA_PUBLIC_BASE_URL|query|fragment|dot-segment/i);
+    }
+  });
+
+  it("authentik redirect URI must land on the configured GLA gateway callback path", async () => {
+    const common = {
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: join(scratch("gla-authentik-base-"), "gla.sock"),
+      publicBaseUrl: "https://gla.example/team-a/",
+      authProvider: "authentik" as const,
+      authentikIssuerUrl: "https://idp.example/application/o/gla/",
+      authentikClientId: "gla-client",
+      authentikClientSecret: "secret",
+      log: () => {},
+    };
+    await expect(
+      serve({ ...common, authentikRedirectUri: "https://other.example/team-a/auth/callback" }),
+    ).rejects.toThrow(/same origin/i);
+    await expect(
+      serve({ ...common, authentikRedirectUri: "https://gla.example/auth/callback" }),
+    ).rejects.toThrow(/path prefix/i);
+    await expect(
+      serve({ ...common, authentikRedirectUri: "https://gla.example/team-a/outpost/callback" }),
+    ).rejects.toThrow(/GLA gateway callback path \/team-a\/auth\/callback/i);
+    await expect(
+      serve({
+        ...common,
+        publicBaseUrl: "https://gla.example/",
+        authentikRedirectUri: "https://gla.example/outpost.goauthentik.io/callback",
+      }),
+    ).rejects.toThrow(/GLA gateway callback path \/auth\/callback/i);
+
+    const ok = await serve({
+      ...common,
+      bridgeEndpoint: join(scratch("gla-authentik-base-ok-"), "gla.sock"),
+      authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+    });
+    liveHandles.push(ok);
+    expect(ok.publicBaseUrl).toBe("https://gla.example/team-a/");
+  });
+
+  it("authentik startup diagnostics expose repairable public config but never the client secret", async () => {
+    const logs: string[] = [];
+    const secret = "CLIENT_SECRET_CANARY_084";
+    const handle = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: join(scratch("gla-authentik-redaction-"), "gla.sock"),
+      publicBaseUrl: "https://gla.example/team-a/",
+      authProvider: "authentik",
+      authentikIssuerUrl: "https://idp.example/application/o/gla/",
+      authentikClientId: "gla-client-canary",
+      authentikClientSecret: secret,
+      authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+      authDeploymentRolesJson: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: (line) => void logs.push(line),
+    });
+    liveHandles.push(handle);
+
+    const text = logs.join("\n");
+    expect(text).toContain("https://gla.example/team-a/");
+    expect(text).toContain("https://idp.example/application/o/gla/");
+    expect(text).toContain("phishing-resistant");
+    expect(text).toMatch(/auth edge guard.*authentik.*outer guard/i);
+    expect(text).toContain("GLA still verifies handoff/enrollment grants");
+    expect(text).toContain("proxy session alone cannot bypass");
+    expect(text).not.toContain(secret);
+    expect(text).not.toContain("EDGE_TOKEN_CANARY_087");
+    expect(text).not.toContain("grant=");
+  });
+
+  it("auth diagnostics over the local daemon socket expose the declared authentik enrollment policy and edge guards", async () => {
+    const secret = "CLIENT_SECRET_CANARY_085";
+    const handle = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: join(scratch("gla-auth-diagnostics-"), "gla.sock"),
+      publicBaseUrl: "https://gla.example/team-a/",
+      authProvider: "authentik",
+      authAssuranceProfile: "phishing-resistant",
+      authentikIssuerUrl: "https://idp.example/application/o/gla/",
+      authentikClientId: "gla-client-canary",
+      authentikClientSecret: secret,
+      authentikRedirectUri: "https://gla.example/team-a/auth/callback",
+      authEnrollmentPolicyJson: AUTHENTIK_ENROLLMENT_POLICY_JSON,
+      authDeploymentRolesJson: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: () => {},
+    });
+    liveHandles.push(handle);
+
+    const diag = await cliOverDaemon(handle.bridgeEndpoint, ["auth", "diagnostics"]);
+    expect(diag.code, diag.stderr).toBe(0);
+    const body = JSON.parse(diag.stdout) as {
+      authProvider?: string;
+      concerns?: string[];
+      enrollmentPolicy?: {
+        enrollmentFlow?: string;
+        credentialSetupStages?: Array<{ method: string }>;
+        externalSources?: Array<{ kind: string; name: string }>;
+        optionalRecipientChoices?: Array<{ choices: string[] }>;
+        loginMethodProofs?: Array<{
+          method: string;
+          status: string;
+          authStrength?: string;
+          assuranceLevel?: string;
+          evidence?: Record<string, unknown>;
+          subjectStable?: boolean;
+        }>;
+      };
+      deploymentRoles?: Array<{
+        role?: string;
+        recognizedRole?: string;
+        providerEvidence?: unknown;
+      }>;
+      edgeGuard?: { summary?: string };
+      bindingSemantics?: { providerAccount?: string; glaBinding?: string };
+    };
+    expect(body.authProvider).toBe("authentik");
+    expect(body.concerns).toEqual([]);
+    expect(body.enrollmentPolicy?.enrollmentFlow).toBe("gla-invitation-enrollment");
+    expect(body.enrollmentPolicy?.credentialSetupStages?.map((s) => s.method)).toEqual([
+      "password",
+      "webauthn-passkey",
+    ]);
+    expect(body.enrollmentPolicy?.externalSources?.map((s) => `${s.kind}:${s.name}`)).toEqual([
+      "oauth:github",
+    ]);
+    expect(body.enrollmentPolicy?.optionalRecipientChoices?.[0]?.choices).toContain(
+      "webauthn-passkey",
+    );
+    expect(body.enrollmentPolicy?.loginMethodProofs?.map((p) => `${p.method}:${p.status}`)).toEqual(
+      ["password:verified", "webauthn-passkey:verified", "oauth:github:verified"],
+    );
+    const passkeyProof = body.enrollmentPolicy?.loginMethodProofs?.find(
+      (p) => p.method === "webauthn-passkey",
+    );
+    expect(passkeyProof?.authStrength).toBe("webauthn");
+    expect(passkeyProof?.assuranceLevel).toBe("phishing-resistant");
+    expect(passkeyProof?.evidence).toMatchObject({
+      amr: ["swk"],
+      gla_uv: true,
+      recipientBound: true,
+      replayResistant: true,
+    });
+    expect(
+      body.enrollmentPolicy?.loginMethodProofs?.find((p) => p.method === "oauth:github")
+        ?.subjectStable,
+    ).toBe(true);
+    expect(body.bindingSemantics?.providerAccount).toMatch(/not a GLA enrollment/i);
+    expect(body.deploymentRoles?.map((r) => r.role)).toEqual([
+      "authentik-forward-auth",
+      "gla-oidc-provider",
+    ]);
+    expect(body.deploymentRoles?.[0]?.recognizedRole).toBe("authentik-forward-auth");
+    expect(body.edgeGuard?.summary).toMatch(/GLA OIDC provider selected/i);
+    expect(diag.stdout).toContain("GLA still verifies handoff/enrollment grants");
+    expect(diag.stdout).not.toContain(secret);
+    expect(diag.stdout).not.toContain("EDGE_TOKEN_CANARY_087");
+
+    const scoped = await cliOverDaemon(handle.bridgeEndpoint, [
+      "auth",
+      "diagnostics",
+      "--recipient",
+      recipient,
+    ]);
+    expect(scoped.code, scoped.stderr).toBe(0);
+    const scopedBody = JSON.parse(scoped.stdout) as {
+      recipientBinding?: {
+        recipient?: string;
+        glaEnrolled?: boolean;
+        authStrength?: string;
+        subjectBinding?: string;
+        providerAccount?: string;
+        handoffPrecondition?: string;
+      };
+    };
+    expect(scopedBody.recipientBinding).toMatchObject({
+      recipient,
+      glaEnrolled: false,
+      authStrength: "none",
+      subjectBinding: "absent",
+      handoffPrecondition: "missing-gla-binding",
+    });
+    expect(scopedBody.recipientBinding?.providerAccount).toMatch(
+      /does not make this recipient enrolled/i,
+    );
+    expect(scoped.stdout).not.toContain(secret);
+  });
+
+  it("auth diagnostics make proxy-only authentik deployments actionable without exposing secrets", async () => {
+    const handle = await serve({
+      host: "127.0.0.1",
+      port: 0,
+      bridgeEndpoint: join(scratch("gla-auth-proxy-only-"), "gla.sock"),
+      publicBaseUrl: "https://gla.example/team-a/",
+      authProvider: "webauthn",
+      authDeploymentRolesJson: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      deliverySink: { write: () => {} },
+      log: () => {},
+    });
+    liveHandles.push(handle);
+
+    const diag = await cliOverDaemon(handle.bridgeEndpoint, ["auth", "diagnostics"]);
+    expect(diag.code, diag.stderr).toBe(0);
+    expect(diag.stdout).toMatch(/outer proxy.*does not perform GLA handoff step-up/i);
+    expect(diag.stdout).toContain("GLA_AUTH_PROVIDER=authentik");
+    expect(diag.stdout).toContain("GLA_AUTHENTIK_ISSUER_URL");
+    expect(diag.stdout).toContain("GLA_AUTHENTIK_REDIRECT_URI");
+    expect(diag.stdout).toMatch(/intentionally.*WebAuthn/i);
+    expect(diag.stdout).not.toContain("EDGE_TOKEN_CANARY_087");
   });
 
   it("graceful shutdown closes BOTH listeners (gateway HTTP + bridge socket) and is idempotent", async () => {
@@ -333,7 +989,7 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
 });
 
 describe("gla serve — argument parsing (flags layer over env; flags win)", () => {
-  it("parses --port/--host/--endpoint/--public-base-url/--launcher", () => {
+  it("parses --port/--host/--endpoint/--public-base-url/--trust-forwarded-prefix/--launcher", () => {
     const parsed = parseServeArgs(
       [
         "--port",
@@ -344,6 +1000,8 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
         "/run/gla.sock",
         "--public-base-url",
         "https://203.0.113.10/",
+        "--trust-forwarded-prefix",
+        "true",
         "--launcher",
         "headless",
       ],
@@ -355,6 +1013,7 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
       expect(parsed.options.host).toBe("0.0.0.0");
       expect(parsed.options.bridgeEndpoint).toBe("/run/gla.sock");
       expect(parsed.options.publicBaseUrl).toBe("https://203.0.113.10/");
+      expect(parsed.options.trustForwardedPrefix).toBe(true);
       expect(parsed.options.launcherMode).toBe("headless");
     }
   });
@@ -363,14 +1022,41 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
     const env = {
       GLA_PORT: "3000",
       GLA_PUBLIC_BASE_URL: "https://from-env/",
+      GLA_TRUST_FORWARDED_PREFIX: "1",
       GLA_HOST: "0.0.0.0",
     } as NodeJS.ProcessEnv;
-    const parsed = parseServeArgs(["--public-base-url", "https://from-flag/"], env);
+    const parsed = parseServeArgs(
+      ["--public-base-url", "https://from-flag/", "--trust-forwarded-prefix", "false"],
+      env,
+    );
     expect(parsed.help).toBe(false);
     if (!parsed.help) {
       expect(parsed.options.port).toBe(3000); // from env
       expect(parsed.options.host).toBe("0.0.0.0"); // from env
       expect(parsed.options.publicBaseUrl).toBe("https://from-flag/"); // flag wins
+      expect(parsed.options.trustForwardedPrefix).toBe(false); // flag wins
+    }
+  });
+
+  it("parses auth deployment roles from env and flags for auth diagnostics", () => {
+    const envParsed = parseServeArgs([], {
+      GLA_AUTH_DEPLOYMENT_ROLES_JSON: AUTHENTIK_EDGE_GUARD_ROLES_JSON,
+    } as NodeJS.ProcessEnv);
+    expect(envParsed.help).toBe(false);
+    if (!envParsed.help) {
+      expect(envParsed.options.authDeploymentRoles?.map((r) => r.role)).toEqual([
+        "authentik-forward-auth",
+        "gla-oidc-provider",
+      ]);
+    }
+
+    const flagParsed = parseServeArgs(
+      ["--auth-edge-guard-roles-json", AUTHENTIK_EDGE_GUARD_ROLES_JSON],
+      {} as NodeJS.ProcessEnv,
+    );
+    expect(flagParsed.help).toBe(false);
+    if (!flagParsed.help) {
+      expect(flagParsed.options.authDeploymentRoles?.[0]?.mode).toBe("forward-auth");
     }
   });
 
@@ -380,6 +1066,115 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
     expect(() => parseServeArgs(["--launcher", "weird"], {} as NodeJS.ProcessEnv)).toThrow(
       /launcher/i,
     );
+    expect(() =>
+      parseServeArgs(["--trust-forwarded-prefix", "maybe"], {} as NodeJS.ProcessEnv),
+    ).toThrow(/trust-forwarded-prefix/i);
+  });
+
+  it("rejects redaction and unresolved template placeholders from flags and env", () => {
+    expect(() =>
+      parseServeArgs(["--authentik-client-secret", "***"], {} as NodeJS.ProcessEnv),
+    ).toThrow(/placeholder/i);
+    expect(() =>
+      parseServeArgs(["--public-base-url", "<redacted>"], {} as NodeJS.ProcessEnv),
+    ).toThrow(/placeholder/i);
+    expect(() => parseServeArgs(["--rp-id", "<rp-id>"], {} as NodeJS.ProcessEnv)).toThrow(
+      /placeholder/i,
+    );
+    expect(() =>
+      parseServeArgs(["--authentik-client-id", "⟨client-id⟩"], {} as NodeJS.ProcessEnv),
+    ).toThrow(/placeholder/i);
+    expect(() =>
+      parseServeArgs([], {
+        GLA_PUBLIC_BASE_URL: "⟨https://your-public-host/⟩",
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/placeholder/i);
+    expect(() =>
+      parseServeArgs([], {
+        GLA_AUTHENTIK_ISSUER_URL: "<issuer-url>",
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/placeholder/i);
+    expect(() =>
+      parseServeArgs([], {
+        GLA_AUTHENTIK_CLIENT_SECRET: "<secret>",
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/placeholder/i);
+  });
+
+  it("rejects redaction and unresolved template placeholders from direct serve options before binding", async () => {
+    const endpoint = join(scratch("gla-direct-placeholder-"), "gla.sock");
+
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: endpoint,
+        publicBaseUrl: "https://gla.example/",
+        authProvider: "authentik",
+        authentikIssuerUrl: "https://idp.example/application/o/gla/",
+        authentikClientId: "gla-client",
+        authentikClientSecret: "***",
+        authentikRedirectUri: "https://gla.example/auth/callback",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/placeholder/i);
+    expect(await canConnect(endpoint)).toBe(false);
+
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: join(scratch("gla-direct-public-placeholder-"), "gla.sock"),
+        publicBaseUrl: "⟨https://your-public-host/⟩",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/placeholder/i);
+  });
+});
+
+describe("deployment templates — public base path guidance", () => {
+  it("documents root and subpath edge-proxy shapes plus separate authentik issuer/callback roles", () => {
+    const edge = readFileSync(
+      "wpm/wip/bundles/edge-proxy/payload/templates/Caddyfile.tmpl",
+      "utf8",
+    );
+    const env = readFileSync("wpm/wip/bundles/gla-core/payload/templates/gla.env.tmpl", "utf8");
+    const edgeAdvisor = readFileSync(
+      "wpm/wip/installer-skills/edge-proxy-advisor/SKILL.md",
+      "utf8",
+    );
+    const coreAdvisor = readFileSync("wpm/wip/installer-skills/gla-core-advisor/SKILL.md", "utf8");
+    const identityAdvisor = readFileSync(
+      "wpm/wip/installer-skills/identity-provider-advisor/SKILL.md",
+      "utf8",
+    );
+    const callback = readFileSync(
+      "wpm/wip/bundles/identity-provider/payload/templates/caddy-authentik-callback.snippet",
+      "utf8",
+    );
+    const standup = readFileSync("docs/architecture/authentik-service-standup.md", "utf8");
+    const integration = readFileSync("docs/architecture/authentik-integration.md", "utf8");
+    const combined = `${edge}\n${env}\n${edgeAdvisor}\n${coreAdvisor}\n${identityAdvisor}\n${callback}\n${standup}\n${integration}`;
+
+    expect(combined).toMatch(/GLA_PUBLIC_BASE_URL=https:\/\/gla\.example\//);
+    expect(combined).toMatch(/GLA_PUBLIC_BASE_URL=https:\/\/gla\.example\/team-a\//);
+    expect(combined).toMatch(/X-Forwarded-Prefix/i);
+    expect(combined).toMatch(/GLA_TRUST_FORWARDED_PREFIX=true/i);
+    expect(combined).toMatch(/sanitize|overwrites/i);
+    expect(combined).toMatch(/WebSocket/i);
+    expect(combined).toMatch(/GLA_AUTHENTIK_ISSUER_URL=https:\/\/idp\.example/i);
+    expect(combined).toMatch(
+      /GLA_AUTHENTIK_REDIRECT_URI=https:\/\/gla\.example\/team-a\/auth\/callback/i,
+    );
+    expect(combined).toMatch(/forward_auth/i);
+    expect(combined).toMatch(/\/outpost\.goauthentik\.io\/\*/i);
+    expect(combined).toMatch(/defense-in-depth/i);
+    expect(combined).toMatch(/not (a )?GLA grant/i);
+    expect(combined).toMatch(/GLA_AUTH_PROVIDER=authentik/i);
+    expect(combined).toMatch(/Agent Bridge[\s\S]*Never expose|bridge remains local-only/i);
+    expect(edge).toMatch(/Access logs are intentionally not enabled/i);
+    expect(edge).toMatch(/query strings[\s\S]*Sec-WebSocket-Protocol[\s\S]*(omitted|redacted)/i);
+    expect(edge).not.toMatch(/^\s*log\s*$/m);
   });
 });
 

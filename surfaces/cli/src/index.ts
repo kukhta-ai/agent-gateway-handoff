@@ -3,6 +3,7 @@
 // taxonomy, and a `main()` that binds them to the real process (used by bin/gla.mjs).
 
 import { AgentBridge } from "@gla/bridge";
+import { isGlaError, redactOperatorText } from "@gla/kernel";
 import { type CliServices, run } from "./cli.js";
 import { ExitCode } from "./exit-codes.js";
 import { Output, type OutputMode } from "./output.js";
@@ -50,25 +51,37 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   const endpoint = flagEndpoint ?? resolveClientEndpoint();
   if (endpoint === undefined) {
     // In-process profile (no daemon): compose a fresh bridge per invocation (the default behaviour).
-    return run(rest, out);
+    return run(rest, out, inProcessServices());
   }
   // Daemon profile: forward the command to the running `gla serve` over the local bridge socket.
   let client: DaemonBridgeClient;
   try {
     client = await DaemonBridgeClient.connect(endpoint);
   } catch (e) {
+    const diagnosticEndpoint = redactOperatorText(endpoint);
+    const diagnosticError = redactOperatorText(e instanceof Error ? e.message : String(e));
+    if (isGlaError(e) && e.code.startsWith("usage.")) {
+      out.fail({
+        code: e.code,
+        message: diagnosticError,
+        detail: { endpoint: diagnosticEndpoint },
+        skill: "interpret-gla-rejections",
+        retryable: false,
+      });
+      return ExitCode.USAGE;
+    }
     // No daemon reachable at GLA_ENDPOINT → a stable dependency error (exit 8), not a crash.
     out.fail({
       code: "dependency.unavailable",
-      message: `cannot reach the GLA daemon at ${endpoint}: ${e instanceof Error ? e.message : String(e)} (is 'gla serve' running?)`,
-      detail: { endpoint },
+      message: `cannot reach the GLA daemon at ${diagnosticEndpoint}: ${diagnosticError} (is 'gla serve' running?)`,
+      detail: { endpoint: diagnosticEndpoint },
       skill: "interpret-gla-rejections",
       retryable: true,
     });
     return ExitCode.DEPENDENCY;
   }
   try {
-    const services: CliServices = { bridge: client };
+    const services: CliServices = { bridge: client, connection: { mode: "daemon" } };
     return await run(rest, out, services);
   } finally {
     client.close();
@@ -105,7 +118,7 @@ function extractEndpointFlag(argv: readonly string[]): {
 
 /** Build the default in-process services (the in-tree reference-slice Bridge) — exported for callers/tests. */
 export function inProcessServices(): CliServices {
-  return { bridge: new AgentBridge() };
+  return { bridge: new AgentBridge(), connection: { mode: "in-process" } };
 }
 
 /** Pre-scan argv for -o/--output so the Output sink is built with the right mode up front. */

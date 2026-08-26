@@ -18,14 +18,43 @@
 // them to ports. The bridge transport protocol itself lives in the edge `surfaces/cli` package (the CLI is
 // the other end); here we only bind a `node:net` server and hand each accepted socket to that protocol.
 
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { type Server as NetServer, createServer as createIpcServer } from "node:net";
-import { dirname } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import {
+  type Server as NetServer,
+  createServer as createIpcServer,
+  createConnection as createNetConnection,
+} from "node:net";
+import { dirname, isAbsolute } from "node:path";
 import type { AgentBridge } from "@gla/bridge";
+import type { DependencyBinding } from "@gla/catalog";
 import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
-import type { OpaqueToken, RecipientRef } from "@gla/kernel";
-import { createProvisioningBridge } from "./index.js";
+import { parsePublicBaseUrl, publicPath } from "@gla/gateway";
+import {
+  AUTH_ASSURANCE_PROFILE_VALUES,
+  type AuthAssuranceProfile,
+  DEFAULT_AUTH_ASSURANCE_PROFILE,
+  type OpaqueToken,
+  type RecipientRef,
+  glaError,
+  isRedactionOrTemplatePlaceholder,
+  parseAuthAssuranceProfile,
+} from "@gla/kernel";
+import {
+  type AuthDeploymentRole,
+  type AuthDiagnostics,
+  type AuthEnrollmentMethodPolicy,
+  authEnrollmentDiagnostics,
+  parseAuthDeploymentRolesJson,
+  parseAuthEnrollmentPolicyJson,
+  withRecipientBindingDiagnostic,
+} from "./auth-enrollment-policy.js";
+import { redactDaemonState } from "./daemon-state.js";
+import { type AuthentikConfig, createProvisioningBridge } from "./index.js";
+
+const BRIDGE_SOCKET_MODE = 0o600;
+const BRIDGE_RUNTIME_DIR_MODE = 0o700;
+const BRIDGE_ENDPOINT_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
 export interface ServeOptions {
@@ -44,9 +73,47 @@ export interface ServeOptions {
    * when absent (a dev convenience), but a real deploy MUST set it to the Caddy URL.
    */
   publicBaseUrl?: string;
-  /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `localhost`. */
+  /**
+   * Trust `X-Forwarded-Prefix` for strip-prefix reverse proxies. Enable only when the edge overwrites or strips
+   * incoming client-supplied values before proxying to GLA. Prefix-preserving proxying does not need it.
+   */
+  trustForwardedPrefix?: boolean;
+  /**
+   * The auth provider to wire behind the kernel `AuthProviderPort` (authentik-integration.md §7). Default
+   * `"webauthn"` (the in-tree default — the default boot path is byte-for-byte unchanged). Set `"authentik"`
+   * to opt into the delegated OIDC provider; then the `authentik*` OIDC config below is required.
+   */
+  authProvider?: "webauthn" | "authentik";
+  /**
+   * Provider-neutral assurance policy for handoff auth. Default `phishing-resistant`; set
+   * `password-permitted` only when password-grade evidence is an intentional deployment policy.
+   */
+  authAssuranceProfile?: AuthAssuranceProfile;
+  /**
+   * Provider-extensible enrollment method policy descriptor, normally emitted by the identity-provider bundle after
+   * verifying the active flow/stages/sources. Used for operator diagnostics; runtime enforcement still uses provider
+   * evidence returned through the AuthProviderPort.
+   */
+  authEnrollmentPolicy?: AuthEnrollmentMethodPolicy;
+  /** Provider-extensible deployment-role evidence for auth diagnostics and edge-guard orientation. */
+  authDeploymentRoles?: AuthDeploymentRole[];
+  /** JSON form of {@link authDeploymentRoles}; accepted from env/flags for deployment templates. */
+  authDeploymentRolesJson?: string;
+  /** The authentik OIDC issuer (only when `authProvider=authentik`), e.g. `https://idp.example/application/o/gla/`. */
+  authentikIssuerUrl?: string;
+  /** The authentik OIDC client/application id (the id_token audience). */
+  authentikClientId?: string;
+  /** The authentik confidential-client secret (`sensitive` — never logged). */
+  authentikClientSecret?: string;
+  /** The adapter callback URL (the OIDC `redirect_uri`), fronted by the same host Caddy. */
+  authentikRedirectUri?: string;
+  /** Optional OIDC scopes (space-separated). Default `openid profile`. */
+  authentikScopes?: string;
+  /** JSON form of {@link authEnrollmentPolicy}; accepted from env/flags for deployment templates. */
+  authEnrollmentPolicyJson?: string;
+  /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `localhost`. (WebAuthn path.) */
   rpID?: string;
-  /** The human-visible RP name in the passkey UI. Default `GLA`. */
+  /** The human-visible RP name in the passkey UI. Default `GLA`. (WebAuthn path.) */
   rpName?: string;
   /**
    * The expected page ORIGIN(s) the WebAuthn ceremony runs on (scheme+host+port). Defaults to the public base
@@ -59,6 +126,15 @@ export interface ServeOptions {
   launcherMode?: "auto" | "full" | "headless";
   /** Override the workspace root (where ephemeral temp profiles are created). */
   workspaceRoot?: string;
+  /**
+   * Structured WPM dependency binding receipts. Absent means host-touching catalog providers fail closed until
+   * deployment composition supplies machine-readable WPM receipt evidence.
+   */
+  dependencyBindings?: DependencyBinding[];
+  /**
+   * Restart-safe daemon state root. Critical state is stored outside capsule workspaces with 0700/0600 permissions.
+   */
+  stateRoot?: string;
   /** A logger sink for the startup banner + doctor lines (default `process.stderr`, so stdout stays clean). */
   log?: (line: string) => void;
 }
@@ -84,6 +160,8 @@ export interface DaemonHandle {
   enrollInvite(
     recipient: RecipientRef,
   ): Promise<{ link: string; grant: OpaqueToken; nonce: string }>;
+  /** Read-only operator diagnostics for selected auth provider, enrollment method policy, and assurance fit. */
+  authDiagnostics(): AuthDiagnostics;
   /**
    * The session ids of all currently-LIVE capsules (the worker's live-capsule truth). A graceful shutdown
    * tears every one of these down; after `close()` this is empty (the no-orphan assertion). Read-only.
@@ -108,6 +186,9 @@ export function defaultBridgeEndpoint(env: NodeJS.ProcessEnv = process.env): str
 
 /** Is an endpoint LOCAL — a uds PATH, or a loopback `127.0.0.1`/`::1`/`localhost` host:port — and NOT 0.0.0.0? */
 export function endpointIsLocal(endpoint: string): boolean {
+  if (BRIDGE_ENDPOINT_URL_RE.test(endpoint)) {
+    return false;
+  }
   const m = endpoint.match(/^(\[?[^\]]*\]?|[^:]+):(\d+)$/);
   if (m === null) {
     // No `host:port` form ⇒ a unix-domain-socket path ⇒ inherently local (filesystem-scoped, not network).
@@ -118,6 +199,142 @@ export function endpointIsLocal(endpoint: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
+/** Does the endpoint use the trusted-local private Unix-socket profile rather than loopback TCP? */
+function endpointIsUnixSocket(endpoint: string): boolean {
+  return "path" in endpointToListenTarget(endpoint);
+}
+
+/** Operator-facing endpoint text, preserving repair context but redacting grant/secret-shaped material. */
+function bridgeEndpointForDiagnostic(endpoint: string): string {
+  return redactDaemonState(endpoint);
+}
+
+function authDiagnosticsInput(opts: {
+  authProvider: "webauthn" | "authentik" | undefined;
+  authAssuranceProfile: AuthAssuranceProfile | undefined;
+  authEnrollmentPolicy: AuthEnrollmentMethodPolicy | undefined;
+  authDeploymentRoles: AuthDeploymentRole[] | undefined;
+}): {
+  authProvider?: "webauthn" | "authentik";
+  authAssuranceProfile?: AuthAssuranceProfile;
+  enrollmentPolicy?: AuthEnrollmentMethodPolicy;
+  deploymentRoles?: AuthDeploymentRole[];
+} {
+  const input: {
+    authProvider?: "webauthn" | "authentik";
+    authAssuranceProfile?: AuthAssuranceProfile;
+    enrollmentPolicy?: AuthEnrollmentMethodPolicy;
+    deploymentRoles?: AuthDeploymentRole[];
+  } = {};
+  if (opts.authProvider !== undefined) {
+    input.authProvider = opts.authProvider;
+  }
+  if (opts.authAssuranceProfile !== undefined) {
+    input.authAssuranceProfile = opts.authAssuranceProfile;
+  }
+  if (opts.authEnrollmentPolicy !== undefined) {
+    input.enrollmentPolicy = opts.authEnrollmentPolicy;
+  }
+  if (opts.authDeploymentRoles !== undefined) {
+    input.deploymentRoles = opts.authDeploymentRoles;
+  }
+  return input;
+}
+
+/** Operator-facing diagnostic for whether the selected provider can satisfy the selected assurance profile. */
+export function authAssuranceProviderDiagnostic(opts: {
+  authProvider?: "webauthn" | "authentik";
+  authAssuranceProfile?: AuthAssuranceProfile;
+  authEnrollmentPolicy?: AuthEnrollmentMethodPolicy;
+  authDeploymentRoles?: AuthDeploymentRole[];
+}): string {
+  const d = authEnrollmentDiagnostics(
+    authDiagnosticsInput({
+      authProvider: opts.authProvider,
+      authAssuranceProfile: opts.authAssuranceProfile,
+      authEnrollmentPolicy: opts.authEnrollmentPolicy,
+      authDeploymentRoles: opts.authDeploymentRoles,
+    }),
+  );
+  if (d.concerns.length > 0) {
+    return `${d.summary}; concerns: ${d.concerns.join("; ")}`;
+  }
+  return `${d.summary}; satisfies the selected policy`;
+}
+
+function authDiagnosticsForRequest(
+  base: AuthDiagnostics,
+  identity: { getCredential(recipient: RecipientRef): unknown } | undefined,
+  arg: unknown,
+): AuthDiagnostics {
+  const recipient = recipientDiagnosticArg(arg);
+  if (recipient === undefined) {
+    return base;
+  }
+  const record = identity?.getCredential(recipient as RecipientRef);
+  if (record !== undefined && !authEnrollmentRecordLike(record)) {
+    throw new Error("identity enrollment record has an unexpected diagnostic shape");
+  }
+  return withRecipientBindingDiagnostic(base, recipient, record);
+}
+
+function recipientDiagnosticArg(arg: unknown): string | undefined {
+  if (arg === undefined) {
+    return undefined;
+  }
+  if (typeof arg === "string" && arg.length > 0) {
+    return arg;
+  }
+  if (typeof arg === "object" && arg !== null && !Array.isArray(arg)) {
+    const recipient = (arg as { recipient?: unknown }).recipient;
+    if (typeof recipient === "string" && recipient.length > 0) {
+      return recipient;
+    }
+  }
+  throw glaError(
+    "usage.bad_argument",
+    "auth diagnostics recipient must be a non-empty recipient ref",
+  );
+}
+
+function authEnrollmentRecordLike(record: unknown): record is {
+  userId: string;
+  authStrength: "none" | "password" | "webauthn";
+  authAssurance?: { level?: "none" | "password" | "phishing-resistant" };
+} {
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    return false;
+  }
+  const candidate = record as { userId?: unknown; authStrength?: unknown; authAssurance?: unknown };
+  if (typeof candidate.userId !== "string") {
+    return false;
+  }
+  if (
+    candidate.authStrength !== "none" &&
+    candidate.authStrength !== "password" &&
+    candidate.authStrength !== "webauthn"
+  ) {
+    return false;
+  }
+  if (candidate.authAssurance === undefined) {
+    return true;
+  }
+  if (
+    typeof candidate.authAssurance !== "object" ||
+    candidate.authAssurance === null ||
+    Array.isArray(candidate.authAssurance)
+  ) {
+    return false;
+  }
+  const level = (candidate.authAssurance as { level?: unknown }).level;
+  return (
+    level === undefined ||
+    level === "none" ||
+    level === "password" ||
+    level === "phishing-resistant"
+  );
+}
+
 /**
  * Boot the `gla serve` daemon: compose ONE shared provisioning+handoff app state, bind the Access Gateway on
  * the PUBLIC `host:port`, bind the Agent Bridge on a LOCAL endpoint, print the startup banner + the S-6 doctor
@@ -125,34 +342,76 @@ export function endpointIsLocal(endpoint: string): boolean {
  * because both listeners hold the event loop open; the caller wires SIGINT/SIGTERM → `handle.close()`.
  */
 export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
+  validateServeOptions(opts);
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const host = opts.host ?? "0.0.0.0";
   const port = opts.port ?? 3000;
   const bridgeEndpoint = opts.bridgeEndpoint ?? defaultBridgeEndpoint();
   // The public base URL: explicit wins; else derive from the gateway host:port (a dev convenience — a real
   // deploy sets it to the Caddy URL so links are reachable). 0.0.0.0 is not dialable, so loopback-ize it.
-  const publicBaseUrl =
+  const configuredPublicBaseUrl =
     opts.publicBaseUrl ?? `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
-  const expectedOrigin = opts.expectedOrigin ?? originOf(publicBaseUrl);
+  const publicBase = parsePublicBaseUrl(configuredPublicBaseUrl);
+  const publicBaseUrl = publicBase.href;
+  const expectedOrigin = opts.expectedOrigin ?? publicBase.origin;
 
   // ── S-6 guard: the bridge endpoint must NEVER be 0.0.0.0 (the agent surface is LOCAL — baseline §3). A
   //    config that asks to bind the bridge publicly is REFUSED before anything binds (fail closed, loud).
   if (!endpointIsLocal(bridgeEndpoint)) {
     throw new Error(
-      `refusing to bind the Agent Bridge on a non-local endpoint "${bridgeEndpoint}" — the bridge is LOCAL-only (baseline §3 single-public-entry). Use a unix socket or 127.0.0.1:<port>.`,
+      `refusing to bind the Agent Bridge on a non-local endpoint "${bridgeEndpointForDiagnostic(
+        bridgeEndpoint,
+      )}" — the bridge is LOCAL-only (baseline §3 single-public-entry). Use a unix socket or 127.0.0.1:<port>.`,
     );
   }
+
+  // ── Provider selection (authentik-integration.md §7): the default is the in-tree WebAuthn provider; setting
+  //    `GLA_AUTH_PROVIDER=authentik` opts into the delegated OIDC adapter, which needs its OIDC config. Build
+  //    the authentik config object only when selected (its secret is `sensitive` — passed inward, never logged).
+  const authentikConfig =
+    opts.authProvider === "authentik" ? buildAuthentikConfig(opts, publicBase) : undefined;
+  const authEnrollmentPolicy =
+    opts.authEnrollmentPolicy ??
+    (opts.authEnrollmentPolicyJson !== undefined
+      ? parseAuthEnrollmentPolicyJson(
+          opts.authEnrollmentPolicyJson,
+          opts.authProvider ?? "webauthn",
+        )
+      : undefined);
+  const authDeploymentRoles =
+    opts.authDeploymentRoles ??
+    (opts.authDeploymentRolesJson !== undefined
+      ? parseAuthDeploymentRolesJson(opts.authDeploymentRolesJson)
+      : undefined);
+  const authDiagnostics = authEnrollmentDiagnostics(
+    authDiagnosticsInput({
+      authProvider: opts.authProvider,
+      authAssuranceProfile: opts.authAssuranceProfile,
+      authEnrollmentPolicy,
+      authDeploymentRoles,
+    }),
+  );
 
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
   const stack = createProvisioningBridge({
+    ...(opts.dependencyBindings !== undefined
+      ? { dependencyBindings: opts.dependencyBindings }
+      : {}),
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
+    ...(opts.stateRoot !== undefined ? { stateRoot: opts.stateRoot } : {}),
     handoff: {
+      ...(opts.authProvider !== undefined ? { authProvider: opts.authProvider } : {}),
+      ...(opts.authAssuranceProfile !== undefined
+        ? { authAssuranceProfile: opts.authAssuranceProfile }
+        : {}),
+      ...(authentikConfig !== undefined ? { authentik: authentikConfig } : {}),
       rpID: opts.rpID ?? "localhost",
       rpName: opts.rpName ?? "GLA",
       expectedOrigin,
       publicBaseUrl,
+      trustForwardedPrefix: opts.trustForwardedPrefix ?? false,
       host,
       port,
       deliverySink: opts.deliverySink ?? deliveryToStdout,
@@ -160,11 +419,18 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       completion: {},
     },
   });
+  try {
+    await stack.ready;
+  } catch (error) {
+    await stack.close().catch(() => {});
+    throw error;
+  }
 
   // ── Bind the Access Gateway on the PUBLIC host:port (the sole public entry, behind Caddy). The provisioning
   //    bridge constructed it but did not bind it — listen here so enrollment + step-up + the WS proxy are
   //    reachable. The actual bound port is read back (ephemeral when 0 was requested, for tests).
   if (stack.gateway === undefined) {
+    await stack.close().catch(() => {});
     throw new Error(
       "internal: handoff gateway was not wired (createProvisioningBridge handoff missing)",
     );
@@ -183,21 +449,47 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   const enrollInvite = stack.enrollInvite;
   const operators: OperatorOps = {
     enrollInvite: (...args: unknown[]) => enrollInvite(args[0] as RecipientRef),
+    authDiagnostics: (...args: unknown[]) =>
+      authDiagnosticsForRequest(authDiagnostics, stack.identity, args[0]),
   };
 
   // ── Bind the Agent Bridge on the LOCAL endpoint: a node:net server that hands each accepted socket to the
   //    line-delimited JSON-RPC protocol (surfaces/cli), dispatching every op onto the SHARED bridge above (+
   //    the operator ops). The agent surface and the operator op share the LOCAL socket (both operator-trusted).
-  const ipc = await bindBridgeServer(bridgeEndpoint, stack.bridge, operators);
+  let ipc: NetServer;
+  try {
+    ipc = await bindBridgeServer(bridgeEndpoint, stack.bridge, operators);
+  } catch (error) {
+    await stack.close().catch(() => {});
+    throw error;
+  }
 
   const bridgeIsLocal = endpointIsLocal(bridgeEndpoint);
+  const bridgeProfile = endpointIsUnixSocket(bridgeEndpoint)
+    ? "private Unix socket (trusted-local profile)"
+    : "loopback TCP (development/advanced; not equivalent to a private Unix socket for cross-user isolation)";
 
   // ── Startup banner + the S-6 doctor line (so an operator can SEE the bridge is not public). ──
   log("── gla serve ──");
   log(
     `  gateway (PUBLIC) : http://${bound.host}:${bound.port}  (front with Caddy → ${publicBaseUrl})`,
   );
-  log(`  bridge  (LOCAL)  : ${bridgeEndpoint}`);
+  log(`  bridge  (LOCAL)  : ${bridgeEndpointForDiagnostic(bridgeEndpoint)}`);
+  log(`  bridge profile   : ${bridgeProfile}`);
+  log(
+    `  auth provider    : ${stack.authModule}${
+      authentikConfig !== undefined ? `  (issuer ${authentikConfig.issuerUrl})` : ""
+    }`,
+  );
+  log(`  auth assurance   : ${opts.authAssuranceProfile ?? DEFAULT_AUTH_ASSURANCE_PROFILE}`);
+  log(`  auth enrollment  : ${authDiagnostics.summary}`);
+  log(`  auth edge guard  : ${authDiagnostics.edgeGuard.summary}`);
+  for (const concern of authDiagnostics.concerns) {
+    log(`  auth concern     : ${concern}`);
+  }
+  for (const action of authDiagnostics.actions) {
+    log(`  auth action      : ${action}`);
+  }
   log(`  public base url  : ${publicBaseUrl}  (handoff/enroll links use this)`);
   log(
     `  doctor           : bridge endpoint is ${bridgeIsLocal ? "LOCAL ✓ (not 0.0.0.0)" : "NON-LOCAL ✗ — REFUSED"} (S-6 single-public-entry)`,
@@ -210,17 +502,10 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       return;
     }
     closed = true;
-    // (1) Tear down every LIVE capsule via the SAME idempotent reconciler the terminal path uses (no orphan).
-    //     `liveSessions()` is the worker's live-capsule truth; reconciling each stops the process group, reaps
-    //     the temp profile, and revokes the connector — restart-safe + idempotent.
-    for (const sessionId of stack.lifecycle.liveSessions()) {
-      await stack.reconciler.reconcile(sessionId).catch(() => {});
-    }
-    // (2) Close the connector broker (the CDP tunnel server) so no brokered socket lingers.
-    await stack.connector.close().catch(() => {});
-    // (3) Close the public gateway (severs any live proxied WS + releases the listener).
-    await stack.gateway?.close().catch(() => {});
-    // (4) Close the LOCAL bridge listener + remove the uds path so a restart can re-bind cleanly.
+    // (1) Close runtime resources owned by the provisioning stack: live capsules, connector broker,
+    //     public gateway, and daemon state-root owner lock.
+    await stack.close().catch(() => {});
+    // (2) Close the LOCAL bridge listener + remove the uds path so a restart can re-bind cleanly.
     await closeBridgeServer(ipc, bridgeEndpoint).catch(() => {});
   };
 
@@ -231,26 +516,31 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     publicBaseUrl,
     bridgeIsLocal,
     enrollInvite,
+    authDiagnostics: () => authDiagnostics,
     liveSessions: () => stack.lifecycle.liveSessions(),
     close,
   };
 }
 
 /** Bind the node:net bridge server at `endpoint` (a uds path or `host:port`), serving the JSON-RPC protocol. */
-function bindBridgeServer(
+async function bindBridgeServer(
   endpoint: string,
   bridge: AgentBridge,
   operators: OperatorOps,
 ): Promise<NetServer> {
+  let verifiedLocalBoundary = false;
   const server = createIpcServer((socket) => {
+    if (!verifiedLocalBoundary) {
+      socket.destroy();
+      return;
+    }
     serveBridgeConnection(socket, bridge, operators);
   });
   const target = endpointToListenTarget(endpoint);
   if ("path" in target) {
-    // A stale socket file from a previous (crashed) run blocks `listen` with EADDRINUSE — remove it first.
-    prepareUdsPath(target.path);
+    await prepareUdsPath(target.path);
   }
-  return new Promise<NetServer>((resolve, reject) => {
+  const listeningServer = await new Promise<NetServer>((resolve, reject) => {
     const onErr = (e: Error): void => {
       server.removeAllListeners("listening");
       reject(e);
@@ -261,6 +551,16 @@ function bindBridgeServer(
       resolve(server);
     });
   });
+  try {
+    if ("path" in target) {
+      secureBoundUdsPath(target.path);
+    }
+  } catch (error) {
+    await closeBridgeServer(listeningServer, endpoint).catch(() => {});
+    throw error;
+  }
+  verifiedLocalBoundary = true;
+  return listeningServer;
 }
 
 /** Close the bridge server + remove the uds path (idempotent) so a restart re-binds cleanly. */
@@ -270,9 +570,9 @@ function closeBridgeServer(server: NetServer, endpoint: string): Promise<void> {
       const target = endpointToListenTarget(endpoint);
       if ("path" in target && existsSync(target.path)) {
         try {
-          unlinkSync(target.path);
+          unlinkOwnedSocket(target.path);
         } catch {
-          // best-effort — a leftover socket file is harmless (the next bind removes it).
+          // best-effort — startup validates before reusing or removing any leftover path.
         }
       }
       resolve();
@@ -295,32 +595,247 @@ function endpointToListenTarget(
   return { path: endpoint };
 }
 
-/** Ensure a uds path's directory exists and any stale socket file is removed (so `listen` can bind). */
-function prepareUdsPath(path: string): void {
-  const dir = dirname(path);
-  if (dir.length > 0 && !existsSync(dir)) {
-    try {
-      mkdirSync(dir, { recursive: true });
-    } catch {
-      // If the dir cannot be created, `listen` will surface the real error — don't mask it here.
-    }
+/** Ensure a uds path is safe before listening; only verified stale socket files may be removed. */
+async function prepareUdsPath(path: string): Promise<void> {
+  if (!isAbsolute(path)) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — Unix-domain bridge endpoints must be absolute paths.`,
+    );
   }
-  if (existsSync(path)) {
-    try {
-      unlinkSync(path);
-    } catch {
-      // A leftover that cannot be removed will surface as EADDRINUSE on listen — let that be the error.
+  const dir = dirname(path);
+  assertExistingRuntimeAncestorChain(dir, path);
+  if (dir.length > 0 && !existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: BRIDGE_RUNTIME_DIR_MODE });
+    chmodSync(dir, BRIDGE_RUNTIME_DIR_MODE);
+  }
+  assertSecureRuntimeDir(dir, path);
+  if (!existsSync(path)) {
+    return;
+  }
+
+  const st = lstatSync(path);
+  assertOwnedByCurrentUid(
+    st.uid,
+    `Agent Bridge socket path "${bridgeEndpointForDiagnostic(path)}"`,
+  );
+  if (st.isSymbolicLink()) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — endpoint must not be a symlink.`,
+    );
+  }
+  if (st.isDirectory()) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — endpoint is a directory, not a Unix socket.`,
+    );
+  }
+  if (!st.isSocket()) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — endpoint is not a Unix socket; remove or move the regular file first.`,
+    );
+  }
+  if (await socketAcceptsConnections(path)) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — a bridge socket already accepts connections there; stop the owning daemon first.`,
+    );
+  }
+  unlinkSync(path);
+}
+
+/** Lock down and verify the freshly bound Unix socket before any bridge operation can be accepted. */
+function secureBoundUdsPath(path: string): void {
+  chmodSync(path, BRIDGE_SOCKET_MODE);
+  const st = lstatSync(path);
+  assertOwnedByCurrentUid(
+    st.uid,
+    `Agent Bridge socket path "${bridgeEndpointForDiagnostic(path)}"`,
+  );
+  if (st.isSymbolicLink() || !st.isSocket()) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — bound endpoint was replaced before verification.`,
+    );
+  }
+  if ((st.mode & 0o077) !== 0) {
+    throw new Error(
+      `refusing Agent Bridge socket path "${bridgeEndpointForDiagnostic(
+        path,
+      )}" — bound socket is group/other accessible.`,
+    );
+  }
+}
+
+/** Verify the runtime dir can protect the socket from other local users replacing or pre-creating it. */
+function assertSecureRuntimeDir(dir: string, socketPath: string): void {
+  assertExistingRuntimeAncestorChain(dir, socketPath);
+  const st = lstatSync(dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(
+      `refusing Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(
+        socketPath,
+      )}" — parent must be a real directory, not a symlink or file.`,
+    );
+  }
+  assertOwnedByCurrentUid(
+    st.uid,
+    `Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(socketPath)}"`,
+  );
+  if ((st.mode & 0o022) !== 0) {
+    throw new Error(
+      `refusing Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(
+        socketPath,
+      )}" — group/other write permissions would let another local user pre-create or replace the socket.`,
+    );
+  }
+}
+
+function assertExistingRuntimeAncestorChain(dir: string, socketPath: string): void {
+  if (!isAbsolute(dir)) {
+    return;
+  }
+  const parts = dir.split("/").filter((part) => part.length > 0);
+  let current = "/";
+  for (const part of parts) {
+    current = current === "/" ? `/${part}` : `${current}/${part}`;
+    if (!existsSync(current)) {
+      assertAncestorNotReplaceable(dirname(current), socketPath);
+      return;
+    }
+    const st = lstatSync(current);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error(
+        `refusing Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(
+          socketPath,
+        )}" — parent path component "${bridgeEndpointForDiagnostic(
+          current,
+        )}" must be a real directory, not a symlink or file.`,
+      );
+    }
+    if (current !== dir) {
+      assertAncestorNotReplaceable(current, socketPath);
     }
   }
 }
 
-/** The scheme+host+port origin of a base URL (the WebAuthn expected origin), or the URL unchanged if unparseable. */
-function originOf(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).origin;
-  } catch {
-    return baseUrl;
+function assertAncestorNotReplaceable(dir: string, socketPath: string): void {
+  const st = lstatSync(dir);
+  if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) {
+    throw new Error(
+      `refusing Agent Bridge runtime directory for "${bridgeEndpointForDiagnostic(
+        socketPath,
+      )}" — writable ancestor "${bridgeEndpointForDiagnostic(
+        dir,
+      )}" is not sticky and could replace the socket directory.`,
+    );
   }
+}
+
+function assertOwnedByCurrentUid(ownerUid: number, label: string): void {
+  const getuid = process.getuid;
+  if (typeof getuid !== "function") {
+    return;
+  }
+  const uid = getuid.call(process);
+  if (ownerUid !== uid) {
+    throw new Error(`${label} is owned by uid ${ownerUid}, not the daemon uid ${uid}.`);
+  }
+}
+
+function socketAcceptsConnections(path: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createNetConnection({ path });
+    const finish = (ok: boolean): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+function unlinkOwnedSocket(path: string): void {
+  const st = lstatSync(path);
+  if (st.isSocket()) {
+    assertOwnedByCurrentUid(
+      st.uid,
+      `Agent Bridge socket path "${bridgeEndpointForDiagnostic(path)}"`,
+    );
+    unlinkSync(path);
+  }
+}
+
+/**
+ * Assemble the authentik OIDC config from the daemon options (only called when `GLA_AUTH_PROVIDER=authentik`,
+ * authentik-integration.md §7). The issuer / client id / client secret / redirect uri are all required —
+ * a missing one is a fail-loud startup error (never a silent fallback to the default provider). The secret is
+ * `sensitive`: it is carried inward to the adapter and never echoed in the banner or an error message.
+ */
+function buildAuthentikConfig(
+  opts: ServeOptions,
+  publicBase: ReturnType<typeof parsePublicBaseUrl>,
+): AuthentikConfig {
+  const missing: string[] = [];
+  if (opts.authentikIssuerUrl === undefined) {
+    missing.push("GLA_AUTHENTIK_ISSUER_URL");
+  }
+  if (opts.authentikClientId === undefined) {
+    missing.push("GLA_AUTHENTIK_CLIENT_ID");
+  }
+  if (opts.authentikClientSecret === undefined) {
+    missing.push("GLA_AUTHENTIK_CLIENT_SECRET");
+  }
+  if (opts.authentikRedirectUri === undefined) {
+    missing.push("GLA_AUTHENTIK_REDIRECT_URI");
+  }
+  if (
+    opts.authentikIssuerUrl === undefined ||
+    opts.authentikClientId === undefined ||
+    opts.authentikClientSecret === undefined ||
+    opts.authentikRedirectUri === undefined
+  ) {
+    throw new Error(
+      `GLA_AUTH_PROVIDER=authentik requires the authentik OIDC/callback config — missing: ${missing.join(", ")}. authentik proxy/forward-auth is optional outer protection and does not replace the required GLA_AUTHENTIK_* step-up config.`,
+    );
+  }
+  const redirectBase = parsePublicBaseUrl(opts.authentikRedirectUri);
+  if (redirectBase.origin !== publicBase.origin) {
+    throw new Error(
+      "GLA_AUTHENTIK_REDIRECT_URI must use the same origin as GLA_PUBLIC_BASE_URL so the callback lands on GLA's same-origin gateway page",
+    );
+  }
+  if (
+    publicBase.pathPrefix.length > 0 &&
+    redirectBase.pathPrefix !== publicBase.pathPrefix &&
+    !redirectBase.pathPrefix.startsWith(`${publicBase.pathPrefix}/`)
+  ) {
+    throw new Error(
+      "GLA_AUTHENTIK_REDIRECT_URI must be under GLA_PUBLIC_BASE_URL's path prefix so code/state return to GLA without leaking grants to authentik",
+    );
+  }
+  const expectedCallbackPath = publicPath(publicBase, "/auth/callback");
+  if (redirectBase.pathPrefix !== expectedCallbackPath) {
+    throw new Error(
+      `GLA_AUTHENTIK_REDIRECT_URI must land on the GLA gateway callback path ${expectedCallbackPath}; authentik proxy/outpost paths or arbitrary same-origin callbacks cannot complete grant-verified step-up/enrollment.`,
+    );
+  }
+  return {
+    issuerUrl: opts.authentikIssuerUrl,
+    clientId: opts.authentikClientId,
+    clientSecret: opts.authentikClientSecret,
+    redirectUri: opts.authentikRedirectUri,
+    ...(opts.authentikScopes !== undefined ? { scopes: opts.authentikScopes } : {}),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,14 +847,32 @@ const SERVE_USAGE = `gla serve — run the long-running GLA daemon (the :3000 de
 
 Usage:
   gla serve [--port <n>] [--host <h>] [--endpoint <path|host:port>] [--public-base-url <url>]
+            [--trust-forwarded-prefix <true|false>]
             [--rp-id <id>] [--rp-name <name>] [--launcher <auto|full|headless>] [--workspace-root <dir>]
+            [--state-root <dir>]
+            [--auth-provider <webauthn|authentik>] [--auth-assurance-policy <phishing-resistant|password-permitted>]
+            [--authentik-issuer-url <url>] [--authentik-client-id <id>]
+            [--authentik-client-secret <secret>] [--authentik-redirect-uri <url>] [--authentik-scopes <s>]
+            [--auth-enrollment-policy-json <json>] [--auth-deployment-roles-json <json>]
 
 Binds:
   • the Access Gateway (PUBLIC) on  host:port           default 0.0.0.0:3000   (front with Caddy)
   • the Agent Bridge   (LOCAL)  on  a unix socket        default $XDG_RUNTIME_DIR/gla.sock or /run/gla.sock
                                     (or 127.0.0.1:<port>; NEVER 0.0.0.0)
 
-Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE.
+Auth provider (--auth-provider, default webauthn): the in-tree WebAuthn passkey verifier is the default;
+  set authentik to delegate step-up to a self-hosted authentik over OIDC (then the GLA_AUTHENTIK_* config
+  below is required). The client secret is sensitive and is never logged.
+
+Auth assurance (--auth-assurance-policy, default phishing-resistant): unset demands passkey/phishing-resistant
+  evidence; password-permitted is the explicit policy that admits password-grade evidence.
+
+Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_TRUST_FORWARDED_PREFIX,
+  GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_WORKSPACE_ROOT, GLA_STATE_ROOT,
+  GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY, GLA_AUTH_ENROLLMENT_POLICY_JSON,
+  GLA_AUTH_DEPLOYMENT_ROLES_JSON, GLA_AUTH_EDGE_GUARD_ROLES_JSON,
+  GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET,
+  GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
 
 Then drive it from another shell with the daemon's bridge endpoint:
   GLA_ENDPOINT=<endpoint> gla whoami
@@ -349,8 +882,10 @@ Then drive it from another shell with the daemon's bridge endpoint:
 /**
  * Parse `gla serve` argv (after the `serve` token) into {@link ServeOptions}, layering flags over env defaults
  * (flags win). `--help`/`-h` returns `{ help: true }`. Recognized flags: `--port`, `--host`, `--endpoint`,
- * `--public-base-url`, `--rp-id`, `--rp-name`, `--launcher`, `--workspace-root`. Unknown flags are ignored
- * (forward-compatible), an invalid `--port`/`--launcher` is a stable error the caller surfaces.
+ * `--public-base-url`, `--trust-forwarded-prefix`, `--rp-id`, `--rp-name`, `--launcher`, `--workspace-root`,
+ * `--state-root`.
+ * Unknown flags are ignored (forward-compatible), an invalid `--port`/`--launcher`/boolean flag is a stable error
+ * the caller surfaces.
  */
 export function parseServeArgs(
   argv: readonly string[],
@@ -379,10 +914,27 @@ export function parseServeArgs(
   const str = (flag: string, envVar: string): string | undefined => {
     const v = flags.get(flag);
     if (typeof v === "string") {
-      return v;
+      return usableConfigValue(`--${flag}`, v);
     }
     const e = env[envVar];
-    return e !== undefined && e.length > 0 ? e : undefined;
+    return e !== undefined && e.length > 0 ? usableConfigValue(envVar, e) : undefined;
+  };
+  const bool = (flag: string, envVar: string): boolean | undefined => {
+    const v = flags.get(flag);
+    if (v === true) {
+      return true;
+    }
+    const raw = typeof v === "string" ? v : env[envVar];
+    if (raw === undefined || raw.length === 0) {
+      return undefined;
+    }
+    if (/^(1|true|yes|on)$/i.test(raw)) {
+      return true;
+    }
+    if (/^(0|false|no|off)$/i.test(raw)) {
+      return false;
+    }
+    throw new Error(`invalid --${flag} "${raw}" (expected true|false)`);
   };
 
   const options: ServeOptions = {};
@@ -406,6 +958,10 @@ export function parseServeArgs(
   if (publicBaseUrl !== undefined) {
     options.publicBaseUrl = publicBaseUrl;
   }
+  const trustForwardedPrefix = bool("trust-forwarded-prefix", "GLA_TRUST_FORWARDED_PREFIX");
+  if (trustForwardedPrefix !== undefined) {
+    options.trustForwardedPrefix = trustForwardedPrefix;
+  }
   const rpID = str("rp-id", "GLA_RP_ID");
   if (rpID !== undefined) {
     options.rpID = rpID;
@@ -413,6 +969,62 @@ export function parseServeArgs(
   const rpName = str("rp-name", "GLA_RP_NAME");
   if (rpName !== undefined) {
     options.rpName = rpName;
+  }
+  // ── Provider selection (§7): the switch + the authentik OIDC config it gates. Default `webauthn` (left
+  //    unset so the default boot path is untouched). An invalid value is a stable error the caller surfaces.
+  const authProvider = str("auth-provider", "GLA_AUTH_PROVIDER");
+  if (authProvider !== undefined) {
+    if (authProvider !== "webauthn" && authProvider !== "authentik") {
+      throw new Error(`invalid --auth-provider "${authProvider}" (expected webauthn|authentik)`);
+    }
+    options.authProvider = authProvider;
+  }
+  const authAssurancePolicy = str("auth-assurance-policy", "GLA_AUTH_ASSURANCE_POLICY");
+  if (authAssurancePolicy !== undefined) {
+    const parsed = parseAuthAssuranceProfile(authAssurancePolicy);
+    if (!parsed.ok) {
+      throw new Error(
+        `invalid --auth-assurance-policy "${parsed.value}" (expected ${AUTH_ASSURANCE_PROFILE_VALUES.join("|")})`,
+      );
+    }
+    options.authAssuranceProfile = parsed.profile;
+  }
+  const authentikIssuerUrl = str("authentik-issuer-url", "GLA_AUTHENTIK_ISSUER_URL");
+  if (authentikIssuerUrl !== undefined) {
+    options.authentikIssuerUrl = authentikIssuerUrl;
+  }
+  const authentikClientId = str("authentik-client-id", "GLA_AUTHENTIK_CLIENT_ID");
+  if (authentikClientId !== undefined) {
+    options.authentikClientId = authentikClientId;
+  }
+  const authentikClientSecret = str("authentik-client-secret", "GLA_AUTHENTIK_CLIENT_SECRET");
+  if (authentikClientSecret !== undefined) {
+    options.authentikClientSecret = authentikClientSecret;
+  }
+  const authentikRedirectUri = str("authentik-redirect-uri", "GLA_AUTHENTIK_REDIRECT_URI");
+  if (authentikRedirectUri !== undefined) {
+    options.authentikRedirectUri = authentikRedirectUri;
+  }
+  const authentikScopes = str("authentik-scopes", "GLA_AUTHENTIK_SCOPES");
+  if (authentikScopes !== undefined) {
+    options.authentikScopes = authentikScopes;
+  }
+  const authEnrollmentPolicyJson =
+    str("auth-enrollment-policy-json", "GLA_AUTH_ENROLLMENT_POLICY_JSON") ??
+    str("authentik-enrollment-policy-json", "GLA_AUTHENTIK_ENROLLMENT_POLICY_JSON");
+  if (authEnrollmentPolicyJson !== undefined) {
+    options.authEnrollmentPolicyJson = authEnrollmentPolicyJson;
+    options.authEnrollmentPolicy = parseAuthEnrollmentPolicyJson(
+      authEnrollmentPolicyJson,
+      options.authProvider ?? "webauthn",
+    );
+  }
+  const authDeploymentRolesJson =
+    str("auth-deployment-roles-json", "GLA_AUTH_DEPLOYMENT_ROLES_JSON") ??
+    str("auth-edge-guard-roles-json", "GLA_AUTH_EDGE_GUARD_ROLES_JSON");
+  if (authDeploymentRolesJson !== undefined) {
+    options.authDeploymentRolesJson = authDeploymentRolesJson;
+    options.authDeploymentRoles = parseAuthDeploymentRolesJson(authDeploymentRolesJson);
   }
   const launcher = str("launcher", "GLA_LAUNCHER_MODE");
   if (launcher !== undefined) {
@@ -425,7 +1037,59 @@ export function parseServeArgs(
   if (workspaceRoot !== undefined) {
     options.workspaceRoot = workspaceRoot;
   }
+  const stateRoot = str("state-root", "GLA_STATE_ROOT");
+  if (stateRoot !== undefined) {
+    options.stateRoot = stateRoot;
+  }
   return { help: false, options };
+}
+
+function usableConfigValue(name: string, value: string): string {
+  if (isRedactionOrTemplatePlaceholder(value)) {
+    throw new Error(
+      `${name} contains a redaction/template placeholder; provide a real value or unset it`,
+    );
+  }
+  return value;
+}
+
+function assertUsableServeOption(name: string, value: unknown): void {
+  if (typeof value === "string") {
+    usableConfigValue(name, value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      assertUsableServeOption(`${name}[${index}]`, item);
+    }
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [key, entry] of Object.entries(value)) {
+      assertUsableServeOption(`${name}.${key}`, entry);
+    }
+  }
+}
+
+function validateServeOptions(opts: ServeOptions): void {
+  assertUsableServeOption("host", opts.host);
+  assertUsableServeOption("bridgeEndpoint", opts.bridgeEndpoint);
+  assertUsableServeOption("publicBaseUrl", opts.publicBaseUrl);
+  assertUsableServeOption("authProvider", opts.authProvider);
+  assertUsableServeOption("authentikIssuerUrl", opts.authentikIssuerUrl);
+  assertUsableServeOption("authentikClientId", opts.authentikClientId);
+  assertUsableServeOption("authentikClientSecret", opts.authentikClientSecret);
+  assertUsableServeOption("authentikRedirectUri", opts.authentikRedirectUri);
+  assertUsableServeOption("authentikScopes", opts.authentikScopes);
+  assertUsableServeOption("authEnrollmentPolicyJson", opts.authEnrollmentPolicyJson);
+  assertUsableServeOption("authDeploymentRolesJson", opts.authDeploymentRolesJson);
+  assertUsableServeOption("authDeploymentRoles", opts.authDeploymentRoles);
+  assertUsableServeOption("rpID", opts.rpID);
+  assertUsableServeOption("rpName", opts.rpName);
+  assertUsableServeOption("expectedOrigin", opts.expectedOrigin);
+  assertUsableServeOption("launcherMode", opts.launcherMode);
+  assertUsableServeOption("workspaceRoot", opts.workspaceRoot);
+  assertUsableServeOption("stateRoot", opts.stateRoot);
 }
 
 /**
@@ -445,7 +1109,7 @@ export async function runServe(
   try {
     parsed = parseServeArgs(argv, env);
   } catch (e) {
-    log(`error: ${e instanceof Error ? e.message : String(e)}`);
+    log(`error: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`);
     log(SERVE_USAGE);
     return 1;
   }
@@ -458,7 +1122,9 @@ export async function runServe(
   try {
     handle = await serve({ ...parsed.options, log });
   } catch (e) {
-    log(`error: failed to start gla serve: ${e instanceof Error ? e.message : String(e)}`);
+    log(
+      `error: failed to start gla serve: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`,
+    );
     return 1;
   }
 
@@ -478,7 +1144,7 @@ export async function runServe(
           resolve(0);
         })
         .catch((e) => {
-          log(`shutdown error: ${e instanceof Error ? e.message : String(e)}`);
+          log(`shutdown error: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`);
           resolve(1);
         });
     };
