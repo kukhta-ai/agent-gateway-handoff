@@ -48,7 +48,7 @@ interface CliProposal {
 }
 
 /** Client version of the `gla` surface. Kept in lockstep with the package version. */
-export const CLI_VERSION = "0.1.0" as const;
+export const CLI_VERSION = "0.1.0-alpha.1" as const;
 
 interface ParsedArgs {
   output: OutputMode;

@@ -1,6 +1,6 @@
 {
   "name": "@gla/kernel",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "private": true,
   "type": "module",
   "description": "Pure domain: entities, ports (interfaces), error taxonomy, caveat model. Zero third-party imports.",
