@@ -13,12 +13,15 @@ backlog/.locks/
 .omc/
 .remember/
 
-# ── Your language toolchain ──────────────────────────────────────────────────
-# This template is stack-agnostic. Add your project's dependency + build output here once you pick a stack:
-#   node_modules/  dist/  *.tsbuildinfo          (Node / TypeScript)
-#   __pycache__/   .venv/  *.pyc  .pytest_cache/ (Python)
-#   target/        Cargo.lock~                   (Rust)
-#   bin/  vendor/                                (Go)
+# ── Language toolchain (Node / TypeScript — chosen stack, see docs/architecture/baseline.md) ──
+node_modules/
+dist/
+*.tsbuildinfo
+.tsbuildinfo
+# Vitest / coverage
+coverage/
+.vitest/
+tmp/
 
 # ── OS / editor cruft ────────────────────────────────────────────────────────
 .DS_Store

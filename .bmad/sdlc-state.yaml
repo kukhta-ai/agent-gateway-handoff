@@ -2,31 +2,107 @@
 # Authoritative position in the BMAD-based SDLC defined by AGENTS.md + docs/SDLC.md.
 # Re-read on every resume; update at every phase boundary.
 # (Distinct from _bmad/ — that is BMAD's own install dir; this dot-dir is our tracker.)
-#
-# This is the BLANK starting state shipped by the template. Step 0 (AGENTS.md) fills it in.
 
-phase: 1
-phase_name: "Analysis"
-branch: dev
-epic: null               # the epic in flight (e.g. the foundation epic), or null
-active_story: null       # the backlog task being built, or null
+phase: 6
+phase_name: "Epic gate — GLA-077..GLA-094 complete"
+branch: feature/authentik
+epic: authentik-hardening-077-094
+active_story: null
 review_cycle: 0
+follow_on_scope:
+  tasks: "GLA-077..GLA-094"
+  branch_base: "feature/authentik"
+  next_ready_sequence: "none"
+  note: "2026-06-12 user goal: implement backlog 077-094 according to project SDLC, architecture, and vision; GLA-077..GLA-094 are Done and merged to feature/authentik. Phase 6 noVNC readiness fix merged on 2026-06-14; root cause concluded in _bmad-output/implementation-artifacts/investigations/novnc-readiness-investigation.md; final gate passed on feature/authentik (64 files, 726 passed, 15 skipped)."
+authentik_done2: [GLA-071, GLA-072, GLA-073, GLA-075]   # 075 e2e-plan done. REMAINING: 074 hardening (in flight), 076 capstone E2E.
+# REAL-AUTHENTIK INTEROP PROVEN (rehearsal, deployer agent): real authentik 2025.10.4 stood up via GLA-074's OWN compose template
+# (Redis-free path; postgres+server+worker); GLA's REAL adapter did a REAL OIDC round-trip -> finishEnrollment+verifyAssertion ->
+# {ok:true, authStrength:"password"} against real discovery + real RS256 JWKS + real iss/aud/nonce + real sub-bind (hashed_user_id =
+# immutable sub, stable on re-auth); real negative subject_mismatch; ADAPTER UNCHANGED. KEY GOTCHA (confirms 073 §8): authentik 2025.10
+# emits amr:[] by DEFAULT -> GLA correctly floors to password (never up-maps); a DISTINGUISHING amr needs a custom OAuth2 scope mapping
+# reading the login Event's auth_method (proven recipe -> amr:["pwd"]). GLA-074 RE-OPENED to capture that recipe + a first-boot bootstrap
+# seam (the installer was operationally incomplete without them). Passkey->webauthn real round-trip stays deploy-only (authentik flow config).
+# Live authentik UP at localhost:9000 (/tmp/authentik-rehearsal/; teardown: docker compose down -v).
+# NOTE: real authentik can't be stood up in this sandbox (Docker present but /workspace disk ~457M free); 074 validated
+# structurally (wpm project validate + build dry-run) + probe LOGIC; the real host-level standup + E2E OIDC proof is the
+# hermes-1 deploy / GLA-076. Per GLA-073 §1, authentik runs Local-External at the VPS host (nested Docker broken in hermes-1).
+authentik_done: [GLA-067, GLA-068, GLA-069, GLA-070, GLA-071, GLA-072]   # 072: dual-method step-up — gateway pages generalized PROVIDER-AGNOSTICALLY (options.kind=redirect branch + sessionStorage grant + return-detection re-POST to UNCHANGED verify routes; approach (a), no new listener); /enroll/verify strength-echo fixed; DEEP security review PASS (7 probes); 1 NICE applied (readEnrolledStrength fallback->none). gate 542 tests. REMAINING: 073 standup-plan, 074 wpm authentik installer (+ the redirect_uri Caddy landing route), 075 e2e-plan, 076 capstone E2E (full browser round-trip). known env flake = capstone browser-E2E under full parallelism (passes isolated; not a regression)
+phase_note: "AUTHENTIK EPIC START (2026-06-03): feature/authentik off feature/scenario-01 (MVP complete, 66 tasks Done, 428 tests). Goal: integrate authentik as a delegated AuthProvider that covers BOTH a phishing-resistant passkey AND a typed-password fallback behind the SAME seam (AuthProviderPort in packages/kernel/src/ports.ts), so selecting it changes no gateway/core code. 10 tasks = 5 plan/impl pairs. BUILD ORDER (from `backlog sequence list`): 067 (arch plan) -> 068 adapter + {069 enroll-plan, 071 dualmethod-plan, 073 standup-plan, 075 e2e-plan} -> {070 enroll-impl, 072 dualmethod-impl, 074 wpm authentik installer} -> 076 capstone E2E. Each impl security-reviewed (separate lane) + `pnpm gate` green; commit on story sub-branch feature/authentik-task-<id> merged --no-ff. authentik is a heavy external service (server+worker+Postgres+Redis via OIDC) -> the GLA-side delegation is implemented+tested against a CONTROLLABLE OIDC issuer test-double (the way WebAuthn used a virtual authenticator + the site a stub); the wpm identity-provider bundle authors the REAL authentik standup (074); E2E (076) + deploy validated in vps-rehearsal. Default stays in-tree WebAuthn; authentik is opt-in. MVP HANDOFF (push+PR to dev) remains a separate pending user gate, NOT done."
+mvp_record: "MVP COMPLETE on feature/scenario-01: 66 tasks Done; GLA-066 cold E2E passes Phases E,0-15; 428 tests; `gla serve` on :3000; wpm installer validates; deploy validated in vps-rehearsal (Ubuntu 24.04 aarch64). Real OVH VPS unreachable from sandbox. NEXT user gates (NOT auto-done): push + PR --base dev, human merge to dev, promote to main."
+# Deploy phase (the goal's 'ready to run in VPS, installable, working on :3000'):
+# 1. deploy-daemon (NOT a numbered task; deploy enablement): app.listen()/main() are STUBS -> build `gla serve` that binds the
+#    Access Gateway on :3000 (public, behind host Caddy) + the Agent Bridge on a local socket (GLA_ENDPOINT) so the external
+#    `gla` CLI drives the running daemon's SHARED state; public-base-url config (https://203.0.113.10/) for reachable handoff links.
+# 2. GLA-007..011 = the wpm bundle-project (gla-core + browser-runtime + human-view + isolation + edge-proxy + identity) authored with
+#    the local wpm (/workspace/active/work-package-manager, npm link) per the bundle model (manifest.yml + bundles/<id>/install-backlog detect->setup->verify).
+# 3. Deploy + test in hermes-1 (LXD container on the OVH VPS, or the local vps-rehearsal): pnpm install+build, gla serve :3000, verify installable+working.
+# Slice 7 done: teardown (Phase 15) verified vs real capsule (pid gone, caps revoked cascade, host file survives, idempotent, no orphan). RUNTIME COMPLETE Phases E,0-15. 407 tests.
+# GLA-066 = the single cold capstone E2E composing all phases + asserting the 10 security invariants (test-strategy §3). Then: wpm bundles GLA-007..011 + deploy to hermes-1 (gla on :3000 behind host Caddy at https://203.0.113.10/).
+# Slice 6 done + reviewed clean: second handoff Phases 9-14 work (auth reuse, agent-blind both windows, re-open same capsule, 2nd completion /dashboard=verified). 384 tests. Runtime works Phases E,0-14.
+# Slice 7 = teardown: gla task complete -> complete task -> complete sessions -> stop+reap capsule + wipe workspace -> revoke grant/connector/task caps -> reconciler confirms NO orphan (much of the machinery exists: Slice 3 cleanup reconciler + Slice 5 close-window). Phase 15.
+# THEN: GLA-066 cold E2E capstone (full scenario-01 Phases E,0-15 in one suite, all S-1..S-10 invariants) + wpm bundles GLA-007..011 (gla-core/browser-runtime/human-view/isolation/edge-proxy/identity) + deploy to hermes-1 (listen :3000, behind host Caddy).
+# Slice 5 done + reviewed clean (2 cycles): agent-blind GENUINELY enforced (CDP broker severs the agent on window-open); completion->close loop; 381 tests. FIRST HANDOFF LOOP works Phases E,0-8.
+# Slice 6 = the second-handoff + "without rebuilding" deltas. New mechanism = AUTH REUSE on re-open (gateway doesn't re-prompt WebAuthn if the recipient's auth is still valid within the session/TTL). Everything else verifies the existing capsule/session/handoff/connector machinery handles the 2nd pass (re-open same capsule, drive-again, enter code agent-blind, 2nd completion /dashboard=verified, configure account, resume) — proven by a two-handoff E2E (Phases 9-14). Tick deltas off the E2E + per-delta tests.
+# After Slice 6: Slice 7 teardown (GLA-064/065, Phase 15); Slice 8 = GLA-066 cold E2E + wpm bundles GLA-007..011 + deploy to hermes-1.
+# Slice 4b done + reviewed clean: full handoff Phases 5-6 work (open->verify-at-edge->proxy to capsule). 346 tests. Crown-jewel WS proxy SSRF/bypass/residual-WS all closed.
+# Slice 5 builds: completion svc + detector-url (url-watcher via CDP) + agent-blind verification (human noVNC input never reaches the agent; S-2 redaction) + close-window-on-completion (unmount/revoke/force-close, session back to active) -> gla handoff wait RETURNS the completion envelope, agent resumes. Completes the FIRST handoff loop.
+# Slice 4a done + reviewed clean: gateway HTTP server (sole public entry) + real WebAuthn enrollment (single-use grant, atomic consume). 280 tests.
+# Slice 4b builds: route controller, grant mint, channel deliver (handoff open); gateway grant-verify + WebAuthn step-up (reuse 4a credential) at edge; gateway proxy authorized WS -> capsule noVNC entrypoint (reach). gla handoff open + wait (wait RETURNS in Slice 5 via completion). Real noVNC proxy gated to hermes-1; verify+step-up testable in dev (virtual authenticator).
+# Slice 3 done + reviewed clean: connector cap descends from task cap via ONE shared signer (cascade revoke), teardown revokes+unbinds. 240 tests.
+# Slice 4 split: 4a = enrollment (GLA-012/013) builds Access Gateway HTTP server (:3000) + identity enrollment (operator-discharge) + auth-webauthn (@simplewebauthn) WebAuthn registration.
+# 4b = handoff/verify/reach (GLA-032/033/034/035/038/039): route ctrl, grant, channel deliver, gateway grant-verify + WebAuthn step-up + proxy to noVNC (Phases 5-6).
+# WebAuthn testable in dev via Playwright virtual authenticator (Chromium present); real noVNC proxy gated to hermes-1.
+# Slice 2 done + security-reviewed clean (2 cycles): admission/Cedar sound to build provisioning on. 188 tests.
+# Slice 3 builds worker/spawner + launcher-process (T2: Playwright Chromium [installed] + Xvfb/x11vnc/websockify/noVNC),
+# workspace-profile, capsule, connector-cdp, entrypoint-novnc, session.provision -> gla session create (real) + connector.
+# Dev note: Playwright Chromium present (~/.cache/ms-playwright); X stack (Xvfb/x11vnc) apt-blocked (repo missing xserver pkgs)
+# -> test CDP/agent path for real, gate noVNC real-spawn test on Xvfb availability (runs in hermes-1 / wpm human-view bundle).
+# Phase-3 test architecture produced: docs/architecture/test-strategy.md (tea, docs-driven fallback) —
+# pyramid (unit/contract/E2E), scenario-01 E2E harness (virtual WebAuthn authenticator + channel-cli + stub acme site + process-tier launcher), 10 security invariants gating GLA-066.
+done: [GLA-001..006, GLA-012..065]   # foundation + Slices 1-7; 407 tests; scenario-01 RUNTIME COMPLETE Phases E,0-15 (enroll->orient->propose/admit->provision real capsule->drive->handoff1 verify+step-up+proxy->agent-blind->completion->close->inspect->handoff2 auth-reused->code agent-blind->verified->configure->teardown no-orphan). REMAINING: 007-011 (wpm bundles), 066 (cold E2E capstone).
+# Foundation artifacts: docs/architecture/{baseline,kernel-contracts,dependency-strategy}.md + the building pnpm
+# workspace skeleton (15 packages + 11 adapters + 2 surfaces). Quality gate `pnpm gate` verified green.
+# Note: backlog has a global definitionOfDone but no per-task DoD checkboxes -> DoD enforced via pnpm gate/CI, not --check-dod.
+# Rule-3 so far: bmad architecture skills load in subagents but are interactive/PRD-gated -> docs-driven fallback (recorded per task).
+# GLA-003 scaffold was a direct TS engineering task (tooling, not a BMAD story); GLA-004+ will attempt bmad-dev-story/quick-dev.
+
+# Spec-exists project: Phases 1-2 are CONFORMANCE — the committed docs/ ARE the brief/PRD/UX.
+# Phase 3 concretizes what the docs leave open: the stack, the scaffold, the quality gate, test arch.
+conformance:
+  phase_1_analysis: "design set docs/00-product-overview.md + actors-and-personas.md ARE the product brief (conformed)"
+  phase_2_planning: "design set docs/01..05 + components/ ARE the PRD/architecture (conformed); product has a UI (capsule surfaces)"
 
 # Persistent BMAD specialists: SPAWNed per-phase, RESUMEd thereafter.
 # last_skill = the BMAD skill each LAST actually invoked (AGENTS.md Rule 3 evidence).
 specialists:
-  analyst:      {spawned: false, role: "product brief / requirements",          last_skill: null}
-  pm:           {spawned: false, role: "PRD",                                   last_skill: null}
-  ux-designer:  {spawned: false, role: "UX spec (only if there is a UI)",       last_skill: null}
-  architect:    {spawned: false, role: "architecture + epics/stories",          last_skill: null}
-  tea:          {spawned: false, role: "test design / framework / ci / gate",   last_skill: null}
-  sm:           {spawned: false, role: "sprint setup + create-story",           last_skill: null}
-  worker:       {spawned: false, role: "dev-story implementation",              last_skill: null}
-  reviewer:     {spawned: false, role: "separate-lane story-automator-review",  last_skill: null}
-  investigator: {spawned: false, role: "systematic debugging at the epic gate", last_skill: null}
-  retro:        {spawned: false, role: "epic retrospective",                    last_skill: null}
+  analyst:      {spawned: true, id: "019ebe27-1609-7391-80a3-45fca1a78f9b", open: false, resumable: true, role: "product brief / requirements conformance", last_skill: "bmad-product-brief loaded; init only; no workflow run"}
+  pm:           {spawned: true, id: "019ebe27-164c-7230-bf2a-28a944582133", open: false, resumable: true, role: "PRD / plan-of-record conformance", last_skill: "bmad-prd loaded; init only; no workflow run"}
+  ux-designer:  {spawned: true, id: "019ebe27-1674-76b0-8420-f493ce2d0a6b", open: false, resumable: true, role: "UX spec for capsule/access surfaces", last_skill: "bmad-ux loaded; init only; no artifact produced"}
+  architect:    {spawned: true, id: "019ebe27-169f-78f1-b016-acea237fb1dc", open: true, resumable: true, role: "architecture baseline + epics/stories + readiness", last_skill: "GLA-094 architecture/doc contract review; CLI registry/parser boundary and docs current/future split checked; APPROVED"}
+  tea:          {spawned: true, id: "019ec12a-98e4-7a61-8cdc-2511e05b3209", open: true, resumable: true, role: "test design / trace / NFR / quality gate", last_skill: "Phase 6 noVNC readiness fix TEA/security validation; loopback-only sidecars, post-upgrade WS semantics, and gate evidence checked; PASS"}
+  sm:           {spawned: true, id: "019ebe27-1702-75a3-b8de-ab1c33162e33", open: true, resumable: true, role: "sprint setup + create-story", last_skill: "bmad-create-story loaded; task order verified; init only"}
+  worker:       {spawned: true, id: "019ec063-6ff0-7d53-937b-a10be49c6c34", open: true, resumable: true, role: "dev-story implementation + E2E generation", last_skill: "Phase 6 noVNC readiness fix implemented; launcher sidecars hardened, gateway post-upgrade cleanup fixed, focused tests and pnpm run gate passed"}
+  reviewer:     {spawned: true, id: "019ec07a-5c68-7351-acf7-7e6ed02101c5", open: true, resumable: true, role: "separate-lane story review", last_skill: "Phase 6 noVNC readiness fix review; architecture/layering and false-test risks checked; APPROVED"}
+  investigator: {spawned: true, id: "019ebe2c-d1e4-7c80-958e-dcab9457d9e4", open: true, resumable: true, role: "systematic debugging at the epic gate", last_skill: "bmad-investigate noVNC readiness case concluded; x11vnc MIT-SHM startup failure + gateway post-upgrade error path identified"}
+  retro:        {spawned: true, id: "019ebe2c-d23e-7520-85b7-3e08ad373179", open: true, resumable: true, role: "epic retrospective", last_skill: "bmad-retrospective loaded and workflow resolved; init only"}
+specialist_runtime_note: "Collaboration limit allows six open agents. Analyst/PM/UX/architect were initialized, then closed to free capacity; their IDs remain resumable."
 
 gates_pending: []
+
+# Load-bearing decisions made at orientation (see memory: gla-stack-and-build-decisions,
+# gla-deployment-target, wpm-installer-authoring). Architecture/realization are "open to
+# refinement" per AGENTS.md; goals/user-problems/style are fixed.
+decisions:
+  stack: "TypeScript/Node 22; workspaces modular monolith; Biome (lint/format+import-boundary), Vitest, tsc, Playwright"
+  capsule_launcher_default: "local-process tier (T2); Docker (T4) registered alternative (nested-docker storage broken in hermes-1)"
+  auth_provider_default: "in-tree WebAuthn (@simplewebauthn/server); authentik = managed alternative"
+  channel_default: "Telegram bot adapter + local/CLI channel fallback for testing"
+  deploy_target: "hermes-1 LXD container, GLA listens :3000, fronted by host Caddy at https://203.0.113.10/"
+
+# User directive (this session): drive the whole MVP autonomously toward a working, installable
+# scenario-01 in the Hermes env. Phase gates are surfaced as checkpoints, not hard stops, EXCEPT
+# outward/irreversible actions (push, PR, merge to dev/main, deploying to the real public VPS),
+# which are confirmed first. Local work + local rehearsal container are driven autonomously.
 
 # Pinned SDLC tooling (set by scripts/setup.sh; record exact versions for reproducibility).
 tooling:
@@ -36,6 +112,7 @@ tooling:
     bmm: "6.8.0"                 # BMad Core Module + BMad Method
     tea: "1.19.0"               # Test Architect
     automator: "main @ 51a3cbc" # BMad Automator (external module)
-  tool_target: "claude-code"
+  wpm: "0.1.0 @ /workspace/active/work-package-manager (npm link for authoring)"
+  tool_target: "codex"
 
-last_updated: "2026-06-03"
+last_updated: "2026-06-14"

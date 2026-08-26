@@ -1,0 +1,96 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "ignore": [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/*.tsbuildinfo",
+      "_bmad/**",
+      "_bmad-output/**",
+      ".bmad/**",
+      ".claude/**",
+      "backlog/**",
+      "docs/**",
+      ".github/**",
+      ".omc/**",
+      ".remember/**",
+      "tools/boundary-check/fixtures/**"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "organizeImports": {
+    "enabled": true
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true
+    }
+  },
+  "overrides": [
+    {
+      "include": [
+        "packages/kernel/**",
+        "packages/task/**",
+        "packages/session/**",
+        "packages/capability/**",
+        "packages/route/**",
+        "packages/completion/**",
+        "packages/audit/**",
+        "packages/admission/**",
+        "packages/catalog/**",
+        "packages/identity/**",
+        "packages/worker/**",
+        "packages/assembly/**",
+        "packages/gateway/**",
+        "packages/bridge/**",
+        "surfaces/**",
+        "adapters/**",
+        "tools/boundary-check/fixtures/**"
+      ],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@gla/policy-cedar": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/auth-webauthn": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/auth-authentik": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/launcher-process": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/launcher-docker": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/entrypoint-novnc": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/connector-cdp": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/workspace-profile": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/detector-url": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/channel-telegram": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter.",
+                  "@gla/channel-cli": "Boundary violation (baseline §1): only packages/app may import a concrete adapter. Depend on a kernel PORT and let app inject the adapter."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

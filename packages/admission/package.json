@@ -1,0 +1,24 @@
+{
+  "name": "@gla/admission",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Mutate→validate admission pipeline over the kernel PolicyPort (GLA-020/021).",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@gla/assembly": "workspace:*",
+    "@gla/kernel": "workspace:*"
+  }
+}

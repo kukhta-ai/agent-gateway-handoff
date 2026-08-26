@@ -1,9 +1,10 @@
 ---
 id: GLA-031
 title: Resume driving on an active session without rebuilding
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-06-03 03:31'
+updated_date: '2026-06-03 12:21'
 labels:
   - impl
   - check
@@ -26,6 +27,12 @@ Why: after a window closes the agent keeps driving the still-running capsule; re
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 With the session active and the capsule still running, the agent resumes driving using the existing capability, with no rewrite.
-- [ ] #2 The capsule's state carries across the resume; only the delta, if any, is added.
+- [x] #1 With the session active and the capsule still running, the agent resumes driving using the existing capability, with no rewrite.
+- [x] #2 The capsule's state carries across the resume; only the delta, if any, is added.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Slice 6 (second handoff + deltas, Phases 9-14): verified by the REAL two-handoff E2E (packages/app/src/two-handoff-e2e.test.ts) + per-delta tests; see docs/architecture/slice-6-second-handoff.md for per-delta verdicts. Most deltas verified-as-is (no rebuild); AUTH-REUSE on re-open + url-watcher intermediate edge-trigger + handoff-grant class=session added and reviewed CLEAN. 384 tests green.
+<!-- SECTION:NOTES:END -->

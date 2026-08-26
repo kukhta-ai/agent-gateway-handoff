@@ -1,0 +1,28 @@
+{
+  "name": "@gla/auth-authentik",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Delegated AuthProvider: authentik via OIDC (authorization-code + PKCE) behind the AuthProviderPort.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/fake-authentik.d.ts",
+      "import": "./dist/fake-authentik.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@gla/kernel": "workspace:*",
+    "jose": "^6.2.3"
+  }
+}

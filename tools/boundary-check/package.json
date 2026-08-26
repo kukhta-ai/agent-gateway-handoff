@@ -1,0 +1,10 @@
+{
+  "name": "@gla/boundary-check",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Tooling that PROVES the module-boundary rule rejects a forbidden import (GLA-003 AC#2, AC#6). Not a runtime package.",
+  "scripts": {
+    "selftest": "node selftest.mjs"
+  }
+}

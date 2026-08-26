@@ -6,11 +6,13 @@ action: block
 conditions:
   - field: file_path
     operator: regex_match
-    # Block writes to any Backlog.md root (backlog/, .backlog/, *-backlog/, etc.) EXCEPT under templates/.
-    # A path under templates/ is template CONTENT (a shipped scaffold that may carry {{placeholders}}), not a
-    # live, CLI-managed Backlog.md — those are hand-authored, so the leading negative lookahead exempts them
-    # while keeping the rule's full force for the real, CLI-managed backlog/.
-    pattern: '^(?!.*(^|/)templates/).*?(^|/)\.?[\w-]*backlog/'
+    # Block writes to any Backlog.md root (backlog/, .backlog/, *-backlog/, etc.) EXCEPT under templates/
+    # or install-backlog/. A path under templates/ is template CONTENT (a shipped scaffold with {{placeholders}}),
+    # and a path under install-backlog/ is a wpm bundle's SHIPPED RECIPE (a detect→setup→verify scaffold that
+    # Backlog.md cannot even open as a root — it discovers only `backlog/`). Both are hand-authored content, so
+    # the negative lookahead exempts them while keeping the rule's full force for the real, CLI-managed live
+    # backlogs (the GLA `backlog/` and the wpm `.authoring-backlog/backlog/`).
+    pattern: '^(?!.*(^|/)(templates|install-backlog)/).*?(^|/)\.?[\w-]*backlog/'
 ---
 
 🚫 **Manual edit of a Backlog.md file is forbidden — use the `backlog` CLI.**

@@ -12,29 +12,79 @@ the rest of the process (pre-commit, CI, the backlog Definition of Done) refers 
 
 ## Quality gate
 
-> **TODO (per project): replace the placeholders below with your stack's real commands.**
+**Stack: TypeScript / Node 22, pnpm workspaces** (see [`docs/architecture/baseline.md`](./docs/architecture/baseline.md) §1).
 
 The quality gate is the **single, named set of checks** that defines "this change is acceptable." It runs in
-three places and must be **identical** in all three — there is no separate, stricter CI-only bar:
+three places and must be **identical** in all three — there is no separate, stricter CI-only bar. The one
+documented entrypoint is the root **`pnpm gate`** script (it runs the three checks below, in order, stopping
+at the first failure):
 
-| Check | Local command | What it asserts |
-|---|---|---|
-| **Build / type-check** | `<your build/typecheck command>` | the code compiles / type-checks with no errors |
-| **Lint + format** | `<your lint/format-check command>` | style and static-analysis rules pass (including any architectural boundary rules) |
-| **Tests** | `<your test command>` | the suite is green — unit for pure logic, integration where it touches external edges |
-
-Examples by stack (delete the ones that don't apply, keep one):
-
-```text
-Node/TS : tsc --noEmit            | biome ci .            | vitest run
-Python  : mypy . / pyright        | ruff check .          | pytest
-Go      : go build ./...          | golangci-lint run     | go test ./...
-Rust    : cargo check             | cargo clippy -- -D warnings && cargo fmt --check | cargo test
+```bash
+pnpm install      # from a clean checkout, first
+pnpm gate         # typecheck + lint/format + tests — the whole gate, one command
 ```
 
-The same three commands run locally (before you push), in the **pre-commit hook** (on staged files, see
-`.husky/` or your hook manager), and in **CI** (`.github/workflows/ci.yml`, across your support matrix). Run
-them locally before opening a PR and you have already run the gate. The project **Definition of Done** in
+`pnpm gate` is exactly
+`pnpm run typecheck && biome ci . && GLA_BROWSER_E2E_MODE=required pnpm run test:e2e:preflight && GLA_BROWSER_E2E_MODE=required vitest run`.
+Its four checks:
+
+| Check | Command (also runs standalone) | What it asserts |
+|---|---|---|
+| **Build / type-check** | `pnpm run typecheck` (`tsc -b`) | every workspace package compiles / type-checks with no errors, from a clean checkout |
+| **Lint + format** | `biome ci .` (or `pnpm run lint`) | Biome style + static-analysis rules pass, **including the module-boundary rule** (`noRestrictedImports`) that forbids a core/edge package from importing a concrete adapter — only `packages/app` may (baseline §1) |
+| **Browser E2E preflight** | `pnpm run test:e2e:preflight` | Playwright Chromium is installed, executable, and launchable; full human-view binaries (`Xvfb`, `x11vnc`, `websockify`) and browser-backed E2E fixture files are present; absence is a gate failure, not a skipped pass |
+| **Tests** | `vitest run` (or `pnpm test`) | the suite is green — unit for pure logic, contract/integration tests, browser-backed E2Es, and the boundary test that proves the import-boundary rule rejects a known-bad sample |
+
+**The gate cannot be silently bypassed.** A deliberately-bad fixture
+(`tools/boundary-check/fixtures/core-importing-adapter.ts`) imports a concrete adapter from a non-`app`
+module. Pointing the boundary lint at it is a **non-zero** result, proving the guard works:
+
+```bash
+pnpm gate:selftest   # runs the boundary lint against the bad fixture; PASS (exit 0) iff it is rejected
+```
+
+`gate:selftest` is also exercised inside `vitest run` (the boundary test), so the everyday gate already
+covers it. Module boundaries are enforced **twice over** (defence in depth): (a) by the **pnpm package
+graph** — a core/edge package does not declare any adapter as a dependency, so a forbidden import does not
+resolve and `tsc -b` fails; and (b) by the **Biome `noRestrictedImports` rule** in `biome.json`.
+
+Browser-backed E2E availability is also a hard gate. If a clean checkout lacks the cached Playwright
+Chromium runtime, launch dependencies, or full human-view binaries, `pnpm gate` fails before Vitest can
+report browser scenarios as skipped. Install the runtime with:
+
+```bash
+pnpm dlx playwright@1.60.0 install chromium
+
+# On Linux CI / fresh VMs when OS launch libraries may be absent:
+pnpm dlx playwright@1.60.0 install --with-deps chromium
+
+# Full noVNC-backed human-view E2E prerequisites:
+sudo apt-get install -y xvfb x11vnc websockify
+```
+
+For fast local work that is **not** backlog DoD evidence, the explicit opt-out command is:
+
+```bash
+pnpm run gate:without-browser-e2e
+```
+
+That command sets `GLA_BROWSER_E2E_MODE=optional`, keeps the opt-out visible through
+`test:e2e:preflight:optional`, and lets the browser-backed tests report skipped branches instead of pretending
+they passed. It may be useful during local iteration, but it must not be used to close a backlog task whose
+acceptance criteria require browser-level evidence.
+
+To prove the full gate includes browser-backed E2E assertions, run the controlled canary:
+
+```bash
+pnpm run gate:browser-canary
+```
+
+That command temporarily sets `GLA_BROWSER_E2E_CANARY_FAIL=1`, runs the real `pnpm gate`, and succeeds only
+if the full gate fails for the deliberate assertion inside a browser-backed E2E file.
+
+The same gate runs locally (before you push), in the **pre-commit hook** (on staged files, see `.husky/` or
+your hook manager), and in **CI** (`.github/workflows/ci.yml`, across the support matrix) as `pnpm gate`. Run
+it locally before opening a PR and you have already run the gate. The project **Definition of Done** in
 [`backlog/config.yml`](./backlog/config.yml) is this same gate, declared once so every task carries it.
 
 ## Branching model

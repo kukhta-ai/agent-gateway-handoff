@@ -1,0 +1,44 @@
+---
+id: {{bundle-id}}-3
+title: Verify the capability and confirm the receipt
+status: To Do
+assignee: []
+created_date: '2026-01-01 00:00'
+labels:
+  - 'kind:state'
+  - 'step:verify'
+dependencies:
+  - {{bundle-id}}-2
+ordinal: 3000
+---
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 the bundle's acceptance criteria hold now — the agent reasons about real success and hands off to the user where a check needs them — and the receipt entries written during setup are re-read and confirmed
+<!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Effect verified against the task acceptance criteria (verify before record)
+- [ ] #2 Files placed or modified are recorded via --ref and their checksum journaled in the notes
+- [ ] #3 Ownership recorded in the notes: installed by us vs adopted from the user's machine
+- [ ] #4 Inverse op recorded in the notes: the uninstall step plus the condition under which it runs
+- [ ] #5 Decisions and their rationale recorded (notes, or --final for a pinned decision)
+- [ ] #6 Non-file effects recorded in the notes: services started, registrations made, artifacts built
+<!-- DOD:END -->
+
+## Description
+
+The VERIFY step that closes this bundle's uniform loop (detect → setup → verify), and a `kind:state` task. The
+Definition of Done *gates* recording; this task *confirms* it — the two are complementary (doc 07).
+
+1. **Verify** the bundle's acceptance criteria actually hold now. A task is not done because the setup commands
+   ran; it is done because the result is genuinely correct. Reason about real success rather than trusting an
+   exit code, and **hand off to the user** where confirmation needs them — ⟨e.g. a version prints, a smoke test
+   passes, the user confirms a sample⟩.
+2. **Re-read** the receipt entries `{{bundle-id}}-2` wrote (ownership, the inverse op, checksums, decisions) and
+   confirm they are present and accurate — this is the enforcement-by-checklist's confirmation half.
+3. **Record** the verification outcome. If verification fails, return to setup rather than marking Done; on a
+   handoff, mark the task `Blocked`, note what is awaited, and resume from the record after the human acts.
+
+Contain any failure to this bundle, and leave the sibling bundles intact.

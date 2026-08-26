@@ -1,0 +1,2 @@
+# Install-time tooling that runs DURING install (detection probes, smoke tests) — NOT delivered to the
+# environment. Bespoke per project, so not templated; this file just preserves the slot (doc 06/07).

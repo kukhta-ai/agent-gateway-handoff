@@ -45,6 +45,16 @@ The Bridge is the agent's enforcement *point*, exactly as the Access Gateway is 
 
 The substance — whether to authenticate at all, the credential types (mTLS / signed token), `auth_strength`, and the four triggers that make authentication necessary — lives in `identity-and-auth.md`. This component only performs *trigger → admit → anchor*.
 
+### Trusted-local bridge profile
+
+The reference profile deliberately keeps the local agent path credential-free: a same-user CLI or MCP client connects to the Agent Bridge without `gla auth login`, bearer tokens, mTLS, or per-call credentials. That is safe only because the endpoint is a verified local OS boundary, not because path possession is treated as a universal identity proof.
+
+For the default Unix-domain socket profile, the daemon must refuse to serve until the runtime directory and socket path are owned by the daemon user and permissioned so other local users cannot pre-create, replace, or open the socket. Symlinks, regular files, directories, wrong-owner paths, unsafe writable parents, and already-active sockets are startup failures. A same-owner stale socket left by a crashed daemon may be removed only after it no longer accepts connections.
+
+Loopback TCP (`127.0.0.1:<port>`, `[::1]:<port>`, or `localhost:<port>`) is a development/advanced fallback. It is local in the network sense and still must never be exposed through Caddy, authentik, or `0.0.0.0`, but it is not equivalent to a private Unix socket for cross-user isolation because the filesystem permission boundary is absent.
+
+This profile does **not** defend against a compromised process running as the same UID as the daemon/agent. Same-UID compromise, remote Bridge access, multiple agent principals, hostile co-tenants, multi-tenant operation, per-agent audit attribution, and per-agent revocation require a separate authenticated-agent profile in Identity + Auth.
+
 ## Failure modes
 
 A malformed proposal is rejected by Admission with a stable reason that the Bridge merely relays. The Bridge being unreachable blocks the agent (but it is never publicly exposed, so this is an internal-availability concern, not a security one). MCP/CLI surface drift is caught by the parity test suite.

@@ -46,23 +46,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # TODO: set up your language toolchain, e.g.:
-      #   - uses: actions/setup-node@v4   with: { node-version: 22, cache: npm }
-      #   - uses: actions/setup-python@v5 with: { python-version: '3.12' }
-      #   - uses: actions/setup-go@v5     with: { go-version: '1.23' }
+      # Toolchain: TypeScript / Node 22 + pnpm (docs/architecture/baseline.md §1).
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
 
-      # TODO: install dependencies (e.g. `npm ci`, `pip install -e '.[dev]'`, `go mod download`).
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
 
-      # The quality gate, in order, failing the job on the first non-zero exit. These MUST be the same three
-      # checks as CONTRIBUTING.md > "Quality gate". Replace the failing placeholders with your real commands.
-      - name: Build / type-check
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install human-view E2E runtime
         run: |
-          echo "::error::Configure the build/type-check step (CONTRIBUTING.md > Quality gate)"; exit 1
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc websockify
 
-      - name: Lint + format check
-        run: |
-          echo "::error::Configure the lint/format step (CONTRIBUTING.md > Quality gate)"; exit 1
+      # Browser-backed E2Es are part of the Definition of Done. Install the Playwright Chromium
+      # runtime and Linux launch dependencies before the single gate entrypoint runs, so missing
+      # browser support is a red CI check rather than a silently skipped E2E.
+      - name: Install browser E2E runtime
+        run: pnpm dlx playwright@1.60.0 install --with-deps chromium
 
-      - name: Test
-        run: |
-          echo "::error::Configure the test step (CONTRIBUTING.md > Quality gate)"; exit 1
+      # The quality gate — the SAME single entrypoint a contributor runs locally and the pre-commit
+      # hook runs (CONTRIBUTING.md > "Quality gate"). `pnpm gate` runs, in order, failing on the first
+      # non-zero exit: tsc -b (build/type-check) -> biome ci . (lint/format + module-boundary rule) ->
+      # browser E2E preflight -> vitest run (tests, incl. the boundary-violation guard test).
+      - name: Quality gate
+        run: pnpm gate
+
+      # Belt-and-braces: prove the gate cannot be silently bypassed — the boundary lint rejects a
+      # known-bad sample as a non-zero result (this is green only when the guard is healthy).
+      - name: Boundary-guard selftest
+        run: pnpm gate:selftest

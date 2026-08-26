@@ -1,0 +1,13 @@
+id: edge-proxy
+version: 0.1.0
+summary: "Front GLA with Caddy: reverse-proxy the public HTTPS URL to GLA's
+  :3000 so recipients reach handoffs over TLS. Edits the host reverse proxy."
+confirmation: dangerous
+requires: { gla-core: ^0.1.0 }
+payload:
+  files: []
+  templates:
+    - Caddyfile.tmpl
+  scripts: []
+  skills: []
+installerSkills: []

@@ -1,0 +1,5 @@
+# Delivered runtime products → the agent's scanned skill scope at install: the bundle's PAYLOAD skills, each a
+# namespaced `<name>/SKILL.md` (doc 06/07). Empty by default — a fresh `bundle new` ships NO payload skill;
+# add one on demand with `wpm bundle <id> skills add <name>`, which scaffolds the stub AND registers it in
+# bundle.yml. This `.keep` just preserves the slot so the delivery surface is uniform with payload/files and
+# payload/templates (a bundle that delivers no runtime skill simply leaves it empty).

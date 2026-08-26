@@ -1,0 +1,38 @@
+# {{bundle-id}} — bundle scope notes
+
+These are **scope notes for the `{{bundle-id}}` bundle** of the `{{project-name}}` project (version
+`{{version}}`). They are not a second front door: the project root `AGENTS.md` and its install loop still
+govern. By the agents' **closest-wins** rule, this file *refines* the root instructions while `{{bundle-id}}`
+is your working directory, and any skills under this bundle's `installer-skills/` light up **in addition to**
+the root's (a union) for the duration (doc 06, "Self-similar surfaces").
+
+## What this bundle is
+
+`{{bundle-id}}` is one independent, installable unit. Its parts:
+
+- **`bundle.yml`** — the bundle's identity: its stable `id`, current `version`, user-facing `summary` (the menu
+  line), `confirmation` level, and its `requires` map (the dependency contract). This is the structural source
+  of truth; the operation writes it.
+- **`install-backlog/`** — the **recipe**: a pre-initialized Backlog.md whose tasks walk
+  **detect → setup → verify**, idempotently. Re-running it is Repair. Its `config.yml` carries a
+  **Definition of Done** that makes recording the receipt a precondition for marking any task Done.
+- **`payload/`** — everything the bundle delivers: `files/` and `templates/` placed into the environment, and
+  `agent-skills/` (the runtime product, copied into the agent's scope at install).
+- **`installer-skills/`** — optional install-time *helpers*, active only while this bundle is in focus (not
+  pull-UX advisors — those stay at the project root).
+- **`installer-scripts/`** — install-time tooling (probes, smoke tests) that runs during install; not delivered.
+
+## How to work it
+
+Work this bundle with `{{bundle-id}}/` as your working directory, walking `install-backlog/`'s tasks in
+dependency order under the uniform loop — **detect → setup → verify → record**:
+
+- **detect** whether the task's intent is already satisfied here (idempotent; skip if so);
+- **setup** the step, honoring this bundle's `confirmation` level;
+- **verify** the task's acceptance criteria actually hold (handing off to the user where a step needs them);
+- **record** the receipt into the task **before** marking it Done — the install-backlog's Definition of Done
+  gates this, so you cannot progress without it.
+
+Record only what inspection cannot recover (installed-vs-adopted, the inverse op, an overwritten file, a chosen
+value); the exact mechanics live in the project root installer skill's `references/journaling.md`. Contain any
+failure to this bundle — never reach into another bundle's state, and never assume an undeclared prerequisite.

@@ -1,0 +1,25 @@
+id: identity-provider
+version: 0.1.0
+summary: Configure the WebAuthn/passkey provider. GLA's in-tree @simplewebauthn
+  provider is the default (just sets the RP id); authentik is the heavyweight
+  alternative — stood up or adopted over OIDC only when
+  GLA_AUTH_PROVIDER=authentik.
+confirmation: safe
+requires: { gla-core: ^0.1.0 }
+payload:
+  files: []
+  templates:
+    - amr-scope-mapping.md
+    - amr-scope-mapping.py
+    - authentik-compose.yml.tmpl
+    - caddy-authentik-callback.snippet
+    - dependency-binding.example.json
+    - oidc-app-and-flow.outcomes.md
+  scripts:
+    - check-nested-docker.sh
+    - probe-authentik.mjs
+    - smoke-amr-strength.mjs
+  skills: []
+installerSkills:
+  - name: authentik-standup
+    path: installer-skills/authentik-standup/SKILL.md

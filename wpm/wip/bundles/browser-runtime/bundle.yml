@@ -1,0 +1,12 @@
+id: browser-runtime
+version: 0.1.0
+summary: "Install the in-capsule browser runtime: Chromium + Playwright on the
+  host, so the agent can drive a real headless browser (the CDP connector)."
+confirmation: dangerous
+requires: { gla-core: ^0.1.0 }
+payload:
+  files: []
+  templates: []
+  scripts: []
+  skills: []
+installerSkills: []

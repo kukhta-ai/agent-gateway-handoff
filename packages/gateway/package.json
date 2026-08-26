@@ -1,0 +1,26 @@
+{
+  "name": "@gla/gateway",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Access Gateway: the sole public entry — stateless grant verify + (Phase E) enrollment fronting.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@gla/kernel": "workspace:*"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.60.0"
+  }
+}

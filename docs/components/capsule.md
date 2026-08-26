@@ -10,6 +10,10 @@
 
 A capsule is a lightweight, temporary, scoped working shell — here, a browser — around whatever must be worked on. It is *not* "a Docker container"; a container is merely one way to isolate one. What makes it a capsule is that it presents two interfaces onto the same live state: a **Human Entrypoint** (the user-facing protocol — a noVNC stream, a form, a document editor) and an **Agent Connector** (the agent-side handle — a CDP endpoint, a filesystem path, a `secret_ref`). The agent connector is attached continuously; the human entrypoint is opened only inside recipient-bound handoff windows.
 
+The Human Entrypoint binding is two-part: browser-client metadata (what the recipient page loads) and reverse-proxy
+transport (how the gateway reaches the live surface after authorization). noVNC is the reference RFB client/provider
+for the browser-stream surface, not a capsule/session/auth primitive.
+
 ## Responsibilities (owns)
 
 - Hold the live working state (here, the browser, its tab, its cookies) for the duration of the task.

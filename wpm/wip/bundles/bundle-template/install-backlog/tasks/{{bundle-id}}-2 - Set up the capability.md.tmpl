@@ -1,0 +1,49 @@
+---
+id: {{bundle-id}}-2
+title: Set up the capability
+status: To Do
+assignee: []
+created_date: '2026-01-01 00:00'
+labels:
+  - 'kind:state'
+  - 'step:setup'
+dependencies:
+  - {{bundle-id}}-1
+ordinal: 2000
+---
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 the capability is installed (or the user's existing one is adopted), honoring the bundle's confirmation level, and what was placed or changed is captured for the receipt
+<!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Effect verified against the task acceptance criteria (verify before record)
+- [ ] #2 Files placed or modified are recorded via --ref and their checksum journaled in the notes
+- [ ] #3 Ownership recorded in the notes: installed by us vs adopted from the user's machine
+- [ ] #4 Inverse op recorded in the notes: the uninstall step plus the condition under which it runs
+- [ ] #5 Decisions and their rationale recorded (notes, or --final for a pinned decision)
+- [ ] #6 Non-file effects recorded in the notes: services started, registrations made, artifacts built
+<!-- DOD:END -->
+
+## Description
+
+The SETUP step of this bundle's uniform loop (detect → setup → verify), and a `kind:state` task — idempotent
+and reconciling, so it re-runs safely under Repair/Update and may be edited across versions to describe the
+current desired state.
+
+1. **Detect first** (honor `{{bundle-id}}-1`): if the intent is already satisfied, skip the work — this is what
+   protects a tool the user already had and makes re-runs safe.
+2. **Plan** the concrete actions for *this* environment. If this bundle's `confirmation` level is `dangerous`,
+   surface the plan and get consent before changing anything; pause at any handoff.
+3. **Do** the setup — ⟨place `payload/files/` and `payload/templates/`, run an `installer-scripts/` step, build
+   on the target where placement is not possible, register the `payload/agent-skills/` skill, …⟩ — honoring the
+   confirmation level.
+4. **Record** the receipt before this task may be Done: the files placed (`--ref`) and their checksums; whether
+   each was **installed by us or adopted** from the user's machine; the **inverse op** (with its condition); any
+   **non-file effect** (a service, a registration, a built artifact); and any decision worth pinning. The
+   Definition of Done makes this recording a precondition for Done — you cannot advance without it, because the
+   step erases its own evidence and the next iteration reads only the receipt.
+
+Never touch a sibling bundle's state, and never assume an undeclared prerequisite.

@@ -1,0 +1,55 @@
+{
+  "name": "@gla/app",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "COMPOSITION ROOT · wires ports→adapters, boots the :3000 process; the only place adapters are imported.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "gla": "./bin/gla.mjs"
+  },
+  "files": ["dist", "bin"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "serve": "node ./bin/gla.mjs serve"
+  },
+  "dependencies": {
+    "@gla/admission": "workspace:*",
+    "@gla/assembly": "workspace:*",
+    "@gla/audit": "workspace:*",
+    "@gla/auth-authentik": "workspace:*",
+    "@gla/auth-webauthn": "workspace:*",
+    "@gla/bridge": "workspace:*",
+    "@gla/capability": "workspace:*",
+    "@gla/catalog": "workspace:*",
+    "@gla/channel-cli": "workspace:*",
+    "@gla/channel-telegram": "workspace:*",
+    "@gla/cli": "workspace:*",
+    "@gla/completion": "workspace:*",
+    "@gla/connector-cdp": "workspace:*",
+    "@gla/detector-url": "workspace:*",
+    "@gla/entrypoint-novnc": "workspace:*",
+    "@gla/gateway": "workspace:*",
+    "@gla/identity": "workspace:*",
+    "@gla/kernel": "workspace:*",
+    "@gla/launcher-process": "workspace:*",
+    "@gla/mcp": "workspace:*",
+    "@gla/policy-cedar": "workspace:*",
+    "@gla/route": "workspace:*",
+    "@gla/session": "workspace:*",
+    "@gla/task": "workspace:*",
+    "@gla/worker": "workspace:*",
+    "@gla/workspace-profile": "workspace:*"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.49.1"
+  }
+}
