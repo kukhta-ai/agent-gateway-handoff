@@ -71,6 +71,8 @@ context:
 
 ## Spec Change Log
 
+- 2026-08-26 CI follow-up: the required gate showed HTML autofocus reactivating the field during handoff setup, so the fixture attribute was removed and explicit setup became the only pre-handoff focus source; the just-in-time blurred-state guard remains blocking.
+
 ## Design Notes
 
 Explicitly focusing the field is limited to arranging the test's precondition. The test immediately blurs it and confirms the blurred state; therefore the later noVNC pointer click still supplies the behavior under test and cannot pass because of the setup focus.
@@ -86,6 +88,9 @@ Explicitly focusing the field is limited to arranging the test's precondition. T
 ## Suggested Review Order
 
 **Deterministic setup**
+
+- Removing fixture autofocus prevents window activation from preempting the pointer proof.
+  [`novnc-handoff-client-e2e.test.ts:285`](../../packages/app/src/novnc-handoff-client-e2e.test.ts#L285)
 
 - Explicit focus replaces unreliable HTML autofocus while retaining an observable setup check.
   [`novnc-handoff-client-e2e.test.ts:291`](../../packages/app/src/novnc-handoff-client-e2e.test.ts#L291)
