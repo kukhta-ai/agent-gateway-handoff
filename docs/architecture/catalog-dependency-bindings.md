@@ -22,6 +22,11 @@ Provider manifests contain static `DependencyRequirement` entries:
 - whether the dependency is host-touching;
 - deterministic WPM bundle metadata, such as bundle id/version and declared prerequisites.
 
+Capsule templates may also contain static `DependencyRequirement` entries for infrastructure that is required by
+the assembled experience but not owned by a single provider. The reference `browser-handoff` template uses this for
+`edge-proxy`: Caddy/nginx/Traefik evidence proves public transport/base-path reachability, while Access Gateway
+grant verification, recipient checks, revocation, and auth assurance remain GLA gateway responsibilities.
+
 WPM supplies dynamic `DependencyBinding` entries:
 
 - `source: "wpm-receipt"`;
@@ -60,4 +65,6 @@ Catalog and template details report two separate health questions:
 - **Runtime health now:** the current GLA probe result.
 
 Admission consumes the catalog's derived `available` bit through `toAdmissionCatalog`; it does not reimplement a
-second availability rule.
+second availability rule. For templates, Admission also consumes template-level dependency diagnostics and rejects an
+unknown, disabled, or unavailable required provider or missing template-level dependency before a task, session, route,
+or capsule is created.

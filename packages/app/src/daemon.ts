@@ -14,9 +14,10 @@
 // tearing down every live capsule via the SAME idempotent Cleanup Reconciler the terminal path uses (no
 // orphan), then closing the connector broker, the gateway, and the bridge listener.
 //
-// Boundary: this file is in the composition root (`app`) — the ONE package that may import adapters and wire
-// them to ports. The bridge transport protocol itself lives in the edge `surfaces/cli` package (the CLI is
-// the other end); here we only bind a `node:net` server and hand each accepted socket to that protocol.
+// Boundary: this file is in the composition root (`app`), but provider-family adapters are resolved through
+// Provider Host provider sets. The bridge transport protocol itself lives in the edge `surfaces/cli` package
+// (the CLI is the other end); here we only bind a `node:net` server and hand each accepted socket to that
+// protocol.
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import {
@@ -27,7 +28,6 @@ import {
 import { dirname, isAbsolute } from "node:path";
 import type { AgentBridge } from "@gla/bridge";
 import type { DependencyBinding } from "@gla/catalog";
-import { type DeliverySink, deliveryToStdout } from "@gla/channel-cli";
 import { type OperatorOps, serveBridgeConnection } from "@gla/cli";
 import { parsePublicBaseUrl, publicPath } from "@gla/gateway";
 import {
@@ -49,15 +49,24 @@ import {
   parseAuthEnrollmentPolicyJson,
   withRecipientBindingDiagnostic,
 } from "./auth-enrollment-policy.js";
+import {
+  type AuthProviderConfig,
+  type AuthProviderKind,
+  type DeliverySink,
+  type ProviderCompositionOptions,
+  createProvisioningBridge,
+} from "./composition.js";
 import { redactDaemonState } from "./daemon-state.js";
-import { type AuthentikConfig, createProvisioningBridge } from "./index.js";
 
 const BRIDGE_SOCKET_MODE = 0o600;
 const BRIDGE_RUNTIME_DIR_MODE = 0o700;
 const BRIDGE_ENDPOINT_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const deliveryToStdout: DeliverySink = {
+  write: (line) => void process.stdout.write(`${line}\n`),
+};
 
 /** Options for {@link serve} (each has an env/flag default; see {@link parseServeArgs}). */
-export interface ServeOptions {
+export interface ServeOptions extends ProviderCompositionOptions {
   /** The Access Gateway bind host — the PUBLIC entry. Default `0.0.0.0` (hermes-1, behind Caddy). */
   host?: string;
   /** The Access Gateway bind port. Default `3000` (the deploy target); tests pass `0` for an ephemeral port. */
@@ -79,11 +88,13 @@ export interface ServeOptions {
    */
   trustForwardedPrefix?: boolean;
   /**
-   * The auth provider to wire behind the kernel `AuthProviderPort` (authentik-integration.md §7). Default
-   * `"webauthn"` (the in-tree default — the default boot path is byte-for-byte unchanged). Set `"authentik"`
-   * to opt into the delegated OIDC provider; then the `authentik*` OIDC config below is required.
+   * Opaque auth-provider id to wire behind the kernel `AuthProviderPort`. Default `"webauthn"`.
    */
-  authProvider?: "webauthn" | "authentik";
+  authProvider?: AuthProviderKind;
+  /** Provider-owned auth config object, validated by the selected provider's Provider Host schema. */
+  authProviderConfig?: AuthProviderConfig;
+  /** JSON form of {@link authProviderConfig}; accepted from env/flags for deployment templates. */
+  authProviderConfigJson?: string;
   /**
    * Provider-neutral assurance policy for handoff auth. Default `phishing-resistant`; set
    * `password-permitted` only when password-grade evidence is an intentional deployment policy.
@@ -99,16 +110,6 @@ export interface ServeOptions {
   authDeploymentRoles?: AuthDeploymentRole[];
   /** JSON form of {@link authDeploymentRoles}; accepted from env/flags for deployment templates. */
   authDeploymentRolesJson?: string;
-  /** The authentik OIDC issuer (only when `authProvider=authentik`), e.g. `https://idp.example/application/o/gla/`. */
-  authentikIssuerUrl?: string;
-  /** The authentik OIDC client/application id (the id_token audience). */
-  authentikClientId?: string;
-  /** The authentik confidential-client secret (`sensitive` — never logged). */
-  authentikClientSecret?: string;
-  /** The adapter callback URL (the OIDC `redirect_uri`), fronted by the same host Caddy. */
-  authentikRedirectUri?: string;
-  /** Optional OIDC scopes (space-separated). Default `openid profile`. */
-  authentikScopes?: string;
   /** JSON form of {@link authEnrollmentPolicy}; accepted from env/flags for deployment templates. */
   authEnrollmentPolicyJson?: string;
   /** The Relying-Party ID the passkey is bound to (no scheme/port). Default `localhost`. (WebAuthn path.) */
@@ -131,6 +132,8 @@ export interface ServeOptions {
    * deployment composition supplies machine-readable WPM receipt evidence.
    */
   dependencyBindings?: DependencyBinding[];
+  /** JSON form of {@link dependencyBindings}; accepted from env/flags for WPM receipt handoff. */
+  dependencyBindingsJson?: string;
   /**
    * Restart-safe daemon state root. Critical state is stored outside capsule workspaces with 0700/0600 permissions.
    */
@@ -210,18 +213,18 @@ function bridgeEndpointForDiagnostic(endpoint: string): string {
 }
 
 function authDiagnosticsInput(opts: {
-  authProvider: "webauthn" | "authentik" | undefined;
+  authProvider: AuthProviderKind | undefined;
   authAssuranceProfile: AuthAssuranceProfile | undefined;
   authEnrollmentPolicy: AuthEnrollmentMethodPolicy | undefined;
   authDeploymentRoles: AuthDeploymentRole[] | undefined;
 }): {
-  authProvider?: "webauthn" | "authentik";
+  authProvider?: AuthProviderKind;
   authAssuranceProfile?: AuthAssuranceProfile;
   enrollmentPolicy?: AuthEnrollmentMethodPolicy;
   deploymentRoles?: AuthDeploymentRole[];
 } {
   const input: {
-    authProvider?: "webauthn" | "authentik";
+    authProvider?: AuthProviderKind;
     authAssuranceProfile?: AuthAssuranceProfile;
     enrollmentPolicy?: AuthEnrollmentMethodPolicy;
     deploymentRoles?: AuthDeploymentRole[];
@@ -243,7 +246,7 @@ function authDiagnosticsInput(opts: {
 
 /** Operator-facing diagnostic for whether the selected provider can satisfy the selected assurance profile. */
 export function authAssuranceProviderDiagnostic(opts: {
-  authProvider?: "webauthn" | "authentik";
+  authProvider?: AuthProviderKind;
   authAssuranceProfile?: AuthAssuranceProfile;
   authEnrollmentPolicy?: AuthEnrollmentMethodPolicy;
   authDeploymentRoles?: AuthDeploymentRole[];
@@ -260,6 +263,10 @@ export function authAssuranceProviderDiagnostic(opts: {
     return `${d.summary}; concerns: ${d.concerns.join("; ")}`;
   }
   return `${d.summary}; satisfies the selected policy`;
+}
+
+function selectedServeAuthProvider(opts: ServeOptions): AuthProviderKind | undefined {
+  return opts.authProvider ?? opts.providerProfile?.auth ?? opts.providerSet?.profile.auth;
 }
 
 function authDiagnosticsForRequest(
@@ -365,17 +372,16 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
     );
   }
 
-  // ── Provider selection (authentik-integration.md §7): the default is the in-tree WebAuthn provider; setting
-  //    `GLA_AUTH_PROVIDER=authentik` opts into the delegated OIDC adapter, which needs its OIDC config. Build
-  //    the authentik config object only when selected (its secret is `sensitive` — passed inward, never logged).
-  const authentikConfig =
-    opts.authProvider === "authentik" ? buildAuthentikConfig(opts, publicBase) : undefined;
+  // ── Provider selection: default is WebAuthn. Provider-owned config and WPM dependency evidence are parsed
+  //    generically, then Provider Host performs provider-specific schema/dependency validation.
+  const authProviderConfig = resolveAuthProviderConfig(opts, publicBase);
+  const dependencyBindings = resolveDependencyBindings(opts);
   const authEnrollmentPolicy =
     opts.authEnrollmentPolicy ??
     (opts.authEnrollmentPolicyJson !== undefined
       ? parseAuthEnrollmentPolicyJson(
           opts.authEnrollmentPolicyJson,
-          opts.authProvider ?? "webauthn",
+          selectedServeAuthProvider(opts) ?? "webauthn",
         )
       : undefined);
   const authDeploymentRoles =
@@ -385,7 +391,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       : undefined);
   const authDiagnostics = authEnrollmentDiagnostics(
     authDiagnosticsInput({
-      authProvider: opts.authProvider,
+      authProvider: selectedServeAuthProvider(opts),
       authAssuranceProfile: opts.authAssuranceProfile,
       authEnrollmentPolicy,
       authDeploymentRoles,
@@ -395,9 +401,10 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
   const stack = createProvisioningBridge({
-    ...(opts.dependencyBindings !== undefined
-      ? { dependencyBindings: opts.dependencyBindings }
-      : {}),
+    ...(opts.providerSet !== undefined ? { providerSet: opts.providerSet } : {}),
+    ...(opts.providerHost !== undefined ? { providerHost: opts.providerHost } : {}),
+    ...(opts.providerProfile !== undefined ? { providerProfile: opts.providerProfile } : {}),
+    ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
     ...(opts.stateRoot !== undefined ? { stateRoot: opts.stateRoot } : {}),
@@ -406,7 +413,7 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
       ...(opts.authAssuranceProfile !== undefined
         ? { authAssuranceProfile: opts.authAssuranceProfile }
         : {}),
-      ...(authentikConfig !== undefined ? { authentik: authentikConfig } : {}),
+      ...(authProviderConfig !== undefined ? { authProviderConfig } : {}),
       rpID: opts.rpID ?? "localhost",
       rpName: opts.rpName ?? "GLA",
       expectedOrigin,
@@ -476,10 +483,10 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   );
   log(`  bridge  (LOCAL)  : ${bridgeEndpointForDiagnostic(bridgeEndpoint)}`);
   log(`  bridge profile   : ${bridgeProfile}`);
+  const authIssuer =
+    typeof authProviderConfig?.issuerUrl === "string" ? authProviderConfig.issuerUrl : undefined;
   log(
-    `  auth provider    : ${stack.authModule}${
-      authentikConfig !== undefined ? `  (issuer ${authentikConfig.issuerUrl})` : ""
-    }`,
+    `  auth provider    : ${stack.authModule}${authIssuer !== undefined ? `  (issuer ${authIssuer})` : ""}`,
   );
   log(`  auth assurance   : ${opts.authAssuranceProfile ?? DEFAULT_AUTH_ASSURANCE_PROFILE}`);
   log(`  auth enrollment  : ${authDiagnostics.summary}`);
@@ -775,43 +782,72 @@ function unlinkOwnedSocket(path: string): void {
   }
 }
 
-/**
- * Assemble the authentik OIDC config from the daemon options (only called when `GLA_AUTH_PROVIDER=authentik`,
- * authentik-integration.md §7). The issuer / client id / client secret / redirect uri are all required —
- * a missing one is a fail-loud startup error (never a silent fallback to the default provider). The secret is
- * `sensitive`: it is carried inward to the adapter and never echoed in the banner or an error message.
- */
-function buildAuthentikConfig(
+function parseJsonRecord(json: string, label: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+  assertUsableServeOption(label, value);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseDependencyBindingsJson(json: string): DependencyBinding[] {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    throw new Error("dependency bindings JSON is not valid JSON");
+  }
+  assertUsableServeOption("dependency bindings JSON", value);
+  if (!Array.isArray(value)) {
+    throw new Error("dependency bindings JSON must be an array of WPM DependencyBinding records");
+  }
+  return value as DependencyBinding[];
+}
+
+function resolveDependencyBindings(opts: ServeOptions): DependencyBinding[] | undefined {
+  if (opts.dependencyBindings !== undefined) {
+    return opts.dependencyBindings;
+  }
+  if (opts.dependencyBindingsJson !== undefined) {
+    return parseDependencyBindingsJson(opts.dependencyBindingsJson);
+  }
+  return undefined;
+}
+
+function resolveAuthProviderConfig(
   opts: ServeOptions,
   publicBase: ReturnType<typeof parsePublicBaseUrl>,
-): AuthentikConfig {
-  const missing: string[] = [];
-  if (opts.authentikIssuerUrl === undefined) {
-    missing.push("GLA_AUTHENTIK_ISSUER_URL");
+): AuthProviderConfig | undefined {
+  const config =
+    opts.authProviderConfig ??
+    (opts.authProviderConfigJson !== undefined
+      ? parseJsonRecord(opts.authProviderConfigJson, "auth provider config JSON")
+      : undefined);
+  if (config === undefined) {
+    return undefined;
   }
-  if (opts.authentikClientId === undefined) {
-    missing.push("GLA_AUTHENTIK_CLIENT_ID");
+  validateProviderRedirectUri(config, publicBase);
+  return config;
+}
+
+function validateProviderRedirectUri(
+  config: AuthProviderConfig,
+  publicBase: ReturnType<typeof parsePublicBaseUrl>,
+): void {
+  const redirectUri = config.redirectUri;
+  if (typeof redirectUri !== "string") {
+    return;
   }
-  if (opts.authentikClientSecret === undefined) {
-    missing.push("GLA_AUTHENTIK_CLIENT_SECRET");
-  }
-  if (opts.authentikRedirectUri === undefined) {
-    missing.push("GLA_AUTHENTIK_REDIRECT_URI");
-  }
-  if (
-    opts.authentikIssuerUrl === undefined ||
-    opts.authentikClientId === undefined ||
-    opts.authentikClientSecret === undefined ||
-    opts.authentikRedirectUri === undefined
-  ) {
-    throw new Error(
-      `GLA_AUTH_PROVIDER=authentik requires the authentik OIDC/callback config — missing: ${missing.join(", ")}. authentik proxy/forward-auth is optional outer protection and does not replace the required GLA_AUTHENTIK_* step-up config.`,
-    );
-  }
-  const redirectBase = parsePublicBaseUrl(opts.authentikRedirectUri);
+  const redirectBase = parsePublicBaseUrl(redirectUri);
   if (redirectBase.origin !== publicBase.origin) {
     throw new Error(
-      "GLA_AUTHENTIK_REDIRECT_URI must use the same origin as GLA_PUBLIC_BASE_URL so the callback lands on GLA's same-origin gateway page",
+      'auth provider config field "redirectUri" must use the same origin as GLA_PUBLIC_BASE_URL so the callback lands on GLA\'s same-origin gateway page',
     );
   }
   if (
@@ -820,22 +856,15 @@ function buildAuthentikConfig(
     !redirectBase.pathPrefix.startsWith(`${publicBase.pathPrefix}/`)
   ) {
     throw new Error(
-      "GLA_AUTHENTIK_REDIRECT_URI must be under GLA_PUBLIC_BASE_URL's path prefix so code/state return to GLA without leaking grants to authentik",
+      'auth provider config field "redirectUri" must be under GLA_PUBLIC_BASE_URL\'s path prefix so code/state return to GLA without leaking grants to the auth provider',
     );
   }
   const expectedCallbackPath = publicPath(publicBase, "/auth/callback");
   if (redirectBase.pathPrefix !== expectedCallbackPath) {
     throw new Error(
-      `GLA_AUTHENTIK_REDIRECT_URI must land on the GLA gateway callback path ${expectedCallbackPath}; authentik proxy/outpost paths or arbitrary same-origin callbacks cannot complete grant-verified step-up/enrollment.`,
+      `auth provider config field "redirectUri" must land on the GLA gateway callback path ${expectedCallbackPath}; provider proxy/outpost paths or arbitrary same-origin callbacks cannot complete grant-verified step-up/enrollment.`,
     );
   }
-  return {
-    issuerUrl: opts.authentikIssuerUrl,
-    clientId: opts.authentikClientId,
-    clientSecret: opts.authentikClientSecret,
-    redirectUri: opts.authentikRedirectUri,
-    ...(opts.authentikScopes !== undefined ? { scopes: opts.authentikScopes } : {}),
-  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -850,29 +879,28 @@ Usage:
             [--trust-forwarded-prefix <true|false>]
             [--rp-id <id>] [--rp-name <name>] [--launcher <auto|full|headless>] [--workspace-root <dir>]
             [--state-root <dir>]
-            [--auth-provider <webauthn|authentik>] [--auth-assurance-policy <phishing-resistant|password-permitted>]
-            [--authentik-issuer-url <url>] [--authentik-client-id <id>]
-            [--authentik-client-secret <secret>] [--authentik-redirect-uri <url>] [--authentik-scopes <s>]
+            [--auth-provider <provider-id>] [--auth-provider-config-json <json>]
+            [--auth-assurance-policy <phishing-resistant|password-permitted>]
             [--auth-enrollment-policy-json <json>] [--auth-deployment-roles-json <json>]
+            [--dependency-bindings-json <json>]
 
 Binds:
   • the Access Gateway (PUBLIC) on  host:port           default 0.0.0.0:3000   (front with Caddy)
   • the Agent Bridge   (LOCAL)  on  a unix socket        default $XDG_RUNTIME_DIR/gla.sock or /run/gla.sock
                                     (or 127.0.0.1:<port>; NEVER 0.0.0.0)
 
-Auth provider (--auth-provider, default webauthn): the in-tree WebAuthn passkey verifier is the default;
-  set authentik to delegate step-up to a self-hosted authentik over OIDC (then the GLA_AUTHENTIK_* config
-  below is required). The client secret is sensitive and is never logged.
+Auth provider (--auth-provider, default webauthn): provider ids are resolved through Provider Host. Provider-owned
+  config is supplied as JSON via --auth-provider-config-json / GLA_AUTH_PROVIDER_CONFIG_JSON and validated against
+  the selected provider's schema. Secret-bearing values are redacted from diagnostics.
 
 Auth assurance (--auth-assurance-policy, default phishing-resistant): unset demands passkey/phishing-resistant
   evidence; password-permitted is the explicit policy that admits password-grade evidence.
 
 Env (flags win): GLA_PORT, GLA_HOST, GLA_ENDPOINT, GLA_PUBLIC_BASE_URL, GLA_TRUST_FORWARDED_PREFIX,
   GLA_RP_ID, GLA_RP_NAME, GLA_LAUNCHER_MODE, GLA_WORKSPACE_ROOT, GLA_STATE_ROOT,
-  GLA_AUTH_PROVIDER, GLA_AUTH_ASSURANCE_POLICY, GLA_AUTH_ENROLLMENT_POLICY_JSON,
+  GLA_AUTH_PROVIDER, GLA_AUTH_PROVIDER_CONFIG_JSON, GLA_AUTH_ASSURANCE_POLICY, GLA_AUTH_ENROLLMENT_POLICY_JSON,
   GLA_AUTH_DEPLOYMENT_ROLES_JSON, GLA_AUTH_EDGE_GUARD_ROLES_JSON,
-  GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET,
-  GLA_AUTHENTIK_REDIRECT_URI, GLA_AUTHENTIK_SCOPES.
+  GLA_DEPENDENCY_BINDINGS_JSON.
 
 Then drive it from another shell with the daemon's bridge endpoint:
   GLA_ENDPOINT=<endpoint> gla whoami
@@ -970,14 +998,19 @@ export function parseServeArgs(
   if (rpName !== undefined) {
     options.rpName = rpName;
   }
-  // ── Provider selection (§7): the switch + the authentik OIDC config it gates. Default `webauthn` (left
-  //    unset so the default boot path is untouched). An invalid value is a stable error the caller surfaces.
+  // ── Provider selection (§7): keep the id opaque. Unknown providers are diagnosed by Provider Host at
+  //    composition time instead of being rejected by an app-local enum.
   const authProvider = str("auth-provider", "GLA_AUTH_PROVIDER");
   if (authProvider !== undefined) {
-    if (authProvider !== "webauthn" && authProvider !== "authentik") {
-      throw new Error(`invalid --auth-provider "${authProvider}" (expected webauthn|authentik)`);
-    }
     options.authProvider = authProvider;
+  }
+  const authProviderConfigJson = str("auth-provider-config-json", "GLA_AUTH_PROVIDER_CONFIG_JSON");
+  if (authProviderConfigJson !== undefined) {
+    options.authProviderConfigJson = authProviderConfigJson;
+    options.authProviderConfig = parseJsonRecord(
+      authProviderConfigJson,
+      "auth provider config JSON",
+    );
   }
   const authAssurancePolicy = str("auth-assurance-policy", "GLA_AUTH_ASSURANCE_POLICY");
   if (authAssurancePolicy !== undefined) {
@@ -989,29 +1022,10 @@ export function parseServeArgs(
     }
     options.authAssuranceProfile = parsed.profile;
   }
-  const authentikIssuerUrl = str("authentik-issuer-url", "GLA_AUTHENTIK_ISSUER_URL");
-  if (authentikIssuerUrl !== undefined) {
-    options.authentikIssuerUrl = authentikIssuerUrl;
-  }
-  const authentikClientId = str("authentik-client-id", "GLA_AUTHENTIK_CLIENT_ID");
-  if (authentikClientId !== undefined) {
-    options.authentikClientId = authentikClientId;
-  }
-  const authentikClientSecret = str("authentik-client-secret", "GLA_AUTHENTIK_CLIENT_SECRET");
-  if (authentikClientSecret !== undefined) {
-    options.authentikClientSecret = authentikClientSecret;
-  }
-  const authentikRedirectUri = str("authentik-redirect-uri", "GLA_AUTHENTIK_REDIRECT_URI");
-  if (authentikRedirectUri !== undefined) {
-    options.authentikRedirectUri = authentikRedirectUri;
-  }
-  const authentikScopes = str("authentik-scopes", "GLA_AUTHENTIK_SCOPES");
-  if (authentikScopes !== undefined) {
-    options.authentikScopes = authentikScopes;
-  }
-  const authEnrollmentPolicyJson =
-    str("auth-enrollment-policy-json", "GLA_AUTH_ENROLLMENT_POLICY_JSON") ??
-    str("authentik-enrollment-policy-json", "GLA_AUTHENTIK_ENROLLMENT_POLICY_JSON");
+  const authEnrollmentPolicyJson = str(
+    "auth-enrollment-policy-json",
+    "GLA_AUTH_ENROLLMENT_POLICY_JSON",
+  );
   if (authEnrollmentPolicyJson !== undefined) {
     options.authEnrollmentPolicyJson = authEnrollmentPolicyJson;
     options.authEnrollmentPolicy = parseAuthEnrollmentPolicyJson(
@@ -1025,6 +1039,11 @@ export function parseServeArgs(
   if (authDeploymentRolesJson !== undefined) {
     options.authDeploymentRolesJson = authDeploymentRolesJson;
     options.authDeploymentRoles = parseAuthDeploymentRolesJson(authDeploymentRolesJson);
+  }
+  const dependencyBindingsJson = str("dependency-bindings-json", "GLA_DEPENDENCY_BINDINGS_JSON");
+  if (dependencyBindingsJson !== undefined) {
+    options.dependencyBindingsJson = dependencyBindingsJson;
+    options.dependencyBindings = parseDependencyBindingsJson(dependencyBindingsJson);
   }
   const launcher = str("launcher", "GLA_LAUNCHER_MODE");
   if (launcher !== undefined) {
@@ -1076,14 +1095,13 @@ function validateServeOptions(opts: ServeOptions): void {
   assertUsableServeOption("bridgeEndpoint", opts.bridgeEndpoint);
   assertUsableServeOption("publicBaseUrl", opts.publicBaseUrl);
   assertUsableServeOption("authProvider", opts.authProvider);
-  assertUsableServeOption("authentikIssuerUrl", opts.authentikIssuerUrl);
-  assertUsableServeOption("authentikClientId", opts.authentikClientId);
-  assertUsableServeOption("authentikClientSecret", opts.authentikClientSecret);
-  assertUsableServeOption("authentikRedirectUri", opts.authentikRedirectUri);
-  assertUsableServeOption("authentikScopes", opts.authentikScopes);
+  assertUsableServeOption("authProviderConfig", opts.authProviderConfig);
+  assertUsableServeOption("authProviderConfigJson", opts.authProviderConfigJson);
   assertUsableServeOption("authEnrollmentPolicyJson", opts.authEnrollmentPolicyJson);
   assertUsableServeOption("authDeploymentRolesJson", opts.authDeploymentRolesJson);
   assertUsableServeOption("authDeploymentRoles", opts.authDeploymentRoles);
+  assertUsableServeOption("dependencyBindings", opts.dependencyBindings);
+  assertUsableServeOption("dependencyBindingsJson", opts.dependencyBindingsJson);
   assertUsableServeOption("rpID", opts.rpID);
   assertUsableServeOption("rpName", opts.rpName);
   assertUsableServeOption("expectedOrigin", opts.expectedOrigin);
@@ -1103,6 +1121,7 @@ function validateServeOptions(opts: ServeOptions): void {
 export async function runServe(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
+  compositionDefaults: ProviderCompositionOptions = {},
 ): Promise<number> {
   const log = (line: string): void => void process.stderr.write(`${line}\n`);
   let parsed: { help: true } | { help: false; options: ServeOptions };
@@ -1120,7 +1139,7 @@ export async function runServe(
 
   let handle: DaemonHandle;
   try {
-    handle = await serve({ ...parsed.options, log });
+    handle = await serve({ ...compositionDefaults, ...parsed.options, log });
   } catch (e) {
     log(
       `error: failed to start gla serve: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`,

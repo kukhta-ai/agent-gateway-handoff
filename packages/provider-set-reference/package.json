@@ -1,0 +1,33 @@
+{
+  "name": "@gla/provider-set-reference",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Trusted reference provider set: current in-tree adapters packaged as Provider Host modules.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@gla/auth-authentik": "workspace:*",
+    "@gla/auth-webauthn": "workspace:*",
+    "@gla/catalog": "workspace:*",
+    "@gla/channel-cli": "workspace:*",
+    "@gla/connector-cdp": "workspace:*",
+    "@gla/detector-url": "workspace:*",
+    "@gla/entrypoint-novnc": "workspace:*",
+    "@gla/kernel": "workspace:*",
+    "@gla/launcher-process": "workspace:*",
+    "@gla/provider-host": "workspace:*",
+    "@gla/workspace-profile": "workspace:*"
+  }
+}

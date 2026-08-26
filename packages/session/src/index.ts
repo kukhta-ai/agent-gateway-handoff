@@ -148,6 +148,11 @@ export interface ProvisionDeps {
   capability: ConnectorCapabilityPort;
   connector: SessionConnectorPort;
   /**
+   * Select the connector port for this session's immutable assembly. The session stays provider-neutral: app
+   * decides how a `PartRef.use` maps to a concrete Provider Host port. When omitted, {@link connector} is used.
+   */
+  connectorFor?: (spec: ResolvedAssemblySpec) => SessionConnectorPort;
+  /**
    * Resolve the **task/session capability id** the connector descends from (for the lineage-revocation
    * cascade — revoking the task cap revokes the connector). Called with the session id AND its task id
    * (the session knows its task), so the wiring can map the task → its `taskCapabilityRef`. Returning
@@ -236,6 +241,11 @@ export interface HandoffDeps {
   capability: HandoffCapabilityPort;
   route: HandoffRoutePort;
   entrypoint: HandoffEntrypointPort;
+  /**
+   * Select the human-entrypoint port for this session's immutable assembly. The session does not inspect provider
+   * ids; app maps the admitted part reference to a Provider Host port. When omitted, {@link entrypoint} is used.
+   */
+  entrypointFor?: (spec: ResolvedAssemblySpec) => HandoffEntrypointPort;
   channel: HandoffChannelPort;
   /**
    * Build the public handoff link from the route path + the grant token (the gateway's `handoffLink`). Injected so
@@ -286,6 +296,11 @@ export interface CompletionPort {
  * Both operations are idempotent + best-effort (a suspend/resume failure must not break the saga).
  */
 export interface ConnectorControlPort {
+  /**
+   * Optional fail-closed precondition. When present, openHandoff calls this before minting a public grant or
+   * programming a route so providers that cannot enforce agent-blind channel control fail with no public residue.
+   */
+  assertControllable?(sessionId: SessionId): void;
   /** SEVER the agent connector for a session's live capsule (no channel while a window is open). */
   suspend(sessionId: SessionId): void;
   /** RESUME the agent connector for a session's live capsule (the window closed; the agent re-attaches). */
@@ -324,6 +339,11 @@ export interface CompletionDeps {
    * matched signal drives the close automatically.
    */
   detector?: SessionDetectorPort;
+  /**
+   * Select the watch-capable detector for this session's immutable assembly. Returning undefined leaves completion
+   * to external delivery or TTL expiry. When omitted, {@link detector} is used.
+   */
+  detectorFor?: (spec: ResolvedAssemblySpec) => SessionDetectorPort | undefined;
   /** The params the detector watches with (the session's declared `complete_on`/`intermediate`). */
   detectorParamsFor?: (sessionId: SessionId) => Record<string, unknown>;
   /**
@@ -600,6 +620,7 @@ export class SessionService {
       );
     }
     const session = this.get(id); // throws state.not_found (→ exit 5) if unknown
+    const connectorPort = deps.connectorFor?.(session.spec) ?? deps.connector;
     if (session.state !== "issued") {
       // Provision is only legal from `issued`; a re-provision or a live session is a conflict (exit 7).
       throw glaError(
@@ -628,7 +649,7 @@ export class SessionService {
       spawned = await deps.worker.spawn(id, session.spec);
 
       // ── Step 3 — attach the connector: resolve the provider resource, bind the agent-blind secret_ref, attach.
-      const probe = await deps.connector.attach(spawned.runtime);
+      const probe = await connectorPort.attach(spawned.runtime);
       const connectorResourceId = probe.resourceId;
       if (connectorResourceId.length === 0) {
         throw glaError(
@@ -639,10 +660,10 @@ export class SessionService {
           },
         );
       }
-      deps.connector.bindSecretRef(connectorResourceId, minted.secretRef);
+      connectorPort.bindSecretRef(connectorResourceId, minted.secretRef);
       boundConnectorResourceId = connectorResourceId;
       // Re-attach now that the secret_ref is bound, so the returned connector carries it (agent-blind).
-      const connector = await deps.connector.attach(spawned.runtime);
+      const connector = await connectorPort.attach(spawned.runtime);
 
       // ── Step 4 — advance issued → active and pin the runtime handle on the session.
       session.state = sessionTransition(session.state, "active");
@@ -678,7 +699,7 @@ export class SessionService {
       // narrowing survives into the compensation closures.)
       const resourceToUnbind = boundConnectorResourceId;
       if (resourceToUnbind !== undefined) {
-        safeSync(() => deps.connector.unbindSecretRef(resourceToUnbind));
+        safeSync(() => connectorPort.unbindSecretRef(resourceToUnbind));
       }
       const capToRevoke = connectorCapId;
       if (capToRevoke !== undefined) {
@@ -721,7 +742,8 @@ export class SessionService {
         },
       );
     }
-    const connector = await deps.connector.attach(runtime);
+    const connectorPort = deps.connectorFor?.(session.spec) ?? deps.connector;
+    const connector = await connectorPort.attach(runtime);
     return {
       session_id: id,
       state: session.state,
@@ -811,6 +833,7 @@ export class SessionService {
     let grant: MintedSessionGrantRef | undefined;
     let routeProgrammed = false;
     try {
+      this.completionDeps?.connectorControl?.assertControllable?.(sessionId);
       // ── Step 1 — MINT the recipient-bound grant (attenuated from the session/task cap; never widened).
       const parentToken = deps.parentTokenFor?.(sessionId, session.taskId);
       const mintReq: {
@@ -831,7 +854,8 @@ export class SessionService {
       grant = await deps.capability.mintSessionGrant(mintReq);
 
       // ── Step 2 — resolve the capsule's human entrypoint + PROGRAM the grant-bound route (no partial route).
-      const entry = await deps.entrypoint.open(session.runtime);
+      const entrypointPort = deps.entrypointFor?.(session.spec) ?? deps.entrypoint;
+      const entry = await entrypointPort.open(session.runtime);
       const route = await deps.route.program(
         { id: handoffId, sessionId },
         grant.grantId,
@@ -1052,12 +1076,15 @@ export class SessionService {
     runtime: RuntimeHandle,
   ): void {
     const deps = this.completionDeps;
-    if (deps?.detector === undefined) {
+    const session = this.sessions.get(sessionId);
+    const detector =
+      session !== undefined ? (deps?.detectorFor?.(session.spec) ?? deps?.detector) : undefined;
+    if (detector === undefined) {
       return; // no detector wired — completion is delivered externally (or the window TTL-expires).
     }
     const abort = { aborted: false };
     this.watchAborts.set(windowId, abort);
-    void this.watchForCompletion(windowId, sessionId, runtime, deps.detector, abort);
+    void this.watchForCompletion(windowId, sessionId, runtime, detector, abort);
   }
 
   /**

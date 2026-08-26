@@ -316,7 +316,7 @@ machinery, with the two acceptance properties observable. Concrete steps:
    (`packages/app`) and that a deployment can set `password-permitted` (permit the fallback) or leave
    `phishing-resistant` (demand passkey-grade evidence). `requiredAuthStrength` remains only a compatibility
    translation layer.
-5. **Tests (the acceptance evidence)** — with `FakeAuthentik` (`see adapters/auth-authentik/src/fake-authentik.ts`)
+5. **Tests (the acceptance evidence)** — with `FakeAuthentik` (`see adapters/auth-authentik/test/fixtures/fake-authentik.ts`)
    minting `id_token`s with chosen `amr` and `gla_uv`:
    - **Both methods independently satisfy a step-up:** a passkey `amr` (`["swk"]`) plus `gla_uv:true` →
      `webauthn` → authorized;
@@ -426,4 +426,4 @@ the `:592` enroll-response, the `:752` handoff-response) ·
 `adapters/auth-authentik/src/index.ts` (`challenge`/`verifyAssertion`, the `RedirectChallenge`) ·
 `adapters/auth-authentik/src/oidc.ts` (`buildAuthorizeUrl`/`resolveEndpoints` — the redirect-target integrity) ·
 `adapters/auth-authentik/src/strength.ts` (the method→strength map) ·
-`adapters/auth-authentik/src/fake-authentik.ts` (the deterministic test seam GLA-072 uses).
+`adapters/auth-authentik/test/fixtures/fake-authentik.ts` (the deterministic test seam GLA-072 uses).

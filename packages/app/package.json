@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "COMPOSITION ROOT · wires ports→adapters, boots the :3000 process; the only place adapters are imported.",
+  "description": "COMPOSITION ROOT · boots the :3000 process and wires deployable ports through provider sets.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -25,31 +25,27 @@
     "@gla/admission": "workspace:*",
     "@gla/assembly": "workspace:*",
     "@gla/audit": "workspace:*",
-    "@gla/auth-authentik": "workspace:*",
-    "@gla/auth-webauthn": "workspace:*",
     "@gla/bridge": "workspace:*",
     "@gla/capability": "workspace:*",
     "@gla/catalog": "workspace:*",
-    "@gla/channel-cli": "workspace:*",
-    "@gla/channel-telegram": "workspace:*",
     "@gla/cli": "workspace:*",
     "@gla/completion": "workspace:*",
-    "@gla/connector-cdp": "workspace:*",
-    "@gla/detector-url": "workspace:*",
-    "@gla/entrypoint-novnc": "workspace:*",
     "@gla/gateway": "workspace:*",
     "@gla/identity": "workspace:*",
     "@gla/kernel": "workspace:*",
-    "@gla/launcher-process": "workspace:*",
     "@gla/mcp": "workspace:*",
     "@gla/policy-cedar": "workspace:*",
+    "@gla/provider-host": "workspace:*",
+    "@gla/provider-set-reference": "workspace:*",
     "@gla/route": "workspace:*",
     "@gla/session": "workspace:*",
     "@gla/task": "workspace:*",
-    "@gla/worker": "workspace:*",
-    "@gla/workspace-profile": "workspace:*"
+    "@gla/worker": "workspace:*"
   },
   "devDependencies": {
+    "@gla/auth-authentik": "workspace:*",
+    "@gla/auth-webauthn": "workspace:*",
+    "@gla/launcher-process": "workspace:*",
     "playwright-core": "^1.49.1"
   }
 }

@@ -9,8 +9,12 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -b",
-    "typecheck": "tsc -b",
+    "build": "pnpm run clean:dist && tsc -b",
+    "typecheck": "pnpm run clean:dist && tsc -b && pnpm run typecheck:tests && pnpm run check:source-layout && pnpm run check:dist-layout",
+    "typecheck:tests": "tsc -p tsconfig.tests.json --noEmit",
+    "clean:dist": "node tools/clean-dist.mjs",
+    "check:source-layout": "node tools/source-layout.mjs",
+    "check:dist-layout": "node tools/check-dist-layout.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",

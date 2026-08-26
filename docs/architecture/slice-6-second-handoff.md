@@ -42,7 +42,7 @@ Scenario-01 deliberately reuses one capsule, one session, and one connector acro
 Decisions: "Multiple human pauses are re-opened windows, not extra sessions"). So the second pass is, by design, the
 SAME machinery exercised a second time. The job is to **prove** each delta works as-is, and to add the **minimal**
 mechanism only where the first end-to-end exercise of the second pass reveals a real gap. The headline evidence is a
-**single REAL two-handoff E2E** (`packages/app/src/two-handoff-e2e.test.ts`, real Chromium + a stub
+**single REAL two-handoff E2E** (`packages/app/test/e2e/two-handoff-e2e.test.ts`, real Chromium + a stub
 `/register→/verify→/dashboard` site) that runs window 1 (submitted) AND window 2 (verified, auth reused) end-to-end —
 it is the proving test for most deltas below.
 

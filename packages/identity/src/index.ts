@@ -18,7 +18,7 @@
 // never sees credentials. auth_strength is a FACT this service reports, never an access decision.
 //
 // Boundary: this is core-adjacent — it depends on the kernel `AuthProviderPort` (a PORT), never on a concrete
-// auth adapter (`@gla/auth-webauthn`). `app` injects the WebAuthn provider; swapping the IdP changes no code
+// auth adapter. App/provider-set composition injects the selected auth provider; swapping the IdP changes no code
 // here (GLA-013 AC#5; the import-boundary lint proves it).
 
 import {

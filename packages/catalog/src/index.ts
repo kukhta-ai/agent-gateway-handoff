@@ -37,6 +37,7 @@ import {
   type OwnershipMode,
   PROVIDER_MANIFESTS,
   type ProbeResult,
+  type ProviderFamily,
   type ProviderManifest,
   type SkillManifest,
   type TemplateManifest,
@@ -509,6 +510,68 @@ function deriveAvailability(
   return "available";
 }
 
+const PART_FAMILY: Record<string, ProviderFamily> = {
+  launcher: "launcher",
+  entrypoint: "entrypoint",
+  connector: "connector",
+  workspace: "workspace",
+  detector: "detector",
+};
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
+}
+
+function providerFamilyForPart(part: string): ProviderFamily | undefined {
+  return PART_FAMILY[part];
+}
+
+function deriveCompatibleProviders(
+  template: TemplateManifest,
+  providers: Iterable<ProviderManifest>,
+): Record<string, string[]> | undefined {
+  const openParts = template.spec.openParts ?? [];
+  if (openParts.length === 0) {
+    return undefined;
+  }
+  const explicit = template.spec.compatibleProviders ?? {};
+  const providerList = [...providers];
+  const providersByName = new Map(
+    providerList.map((provider) => [provider.metadata.name, provider]),
+  );
+  const relationKeyForPart = (part: string): string => `${part}s`;
+  const requiredProviderIds = uniqueStrings(Object.values(template.spec.requiredParts));
+  const relatedFromRequiredProviders = (part: string): string[] => {
+    const relationKey = relationKeyForPart(part);
+    return requiredProviderIds.flatMap((providerId) => {
+      const compatibleWith = providersByName.get(providerId)?.spec.relations?.compatibleWith;
+      return compatibleWith?.[relationKey] ?? [];
+    });
+  };
+  const declaresTemplateCompatibility = (provider: ProviderManifest, part: string): boolean => {
+    const family = providerFamilyForPart(part);
+    if (provider.spec.family !== family) {
+      return false;
+    }
+    const compatibleWith = provider.spec.relations?.compatibleWith;
+    return compatibleWith?.templates?.includes(template.metadata.name) === true;
+  };
+  const out: Record<string, string[]> = {};
+  for (const part of openParts) {
+    const defaultProvider = template.spec.requiredParts[part];
+    const selfDeclaredProviders = providerList
+      .filter((provider) => declaresTemplateCompatibility(provider, part))
+      .map((provider) => provider.metadata.name);
+    out[part] = uniqueStrings([
+      ...(explicit[part] ?? []),
+      ...relatedFromRequiredProviders(part),
+      ...selfDeclaredProviders,
+      ...(defaultProvider !== undefined ? [defaultProvider] : []),
+    ]);
+  }
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The indexed entity — what list/show return
 // ─────────────────────────────────────────────────────────────────────────────
@@ -532,16 +595,38 @@ export interface IndexedEntity extends CatalogEntity {
   requires: IndexedDependencyBinding[];
 }
 
+/** Stable catalog/provider diagnostic surfaced by template, catalog, and admission reads. */
+export interface CatalogDiagnostic {
+  code:
+    | "provider.available"
+    | "provider.unknown"
+    | "provider.unavailable"
+    | "provider.degraded"
+    | "template.dependency_unavailable";
+  message: string;
+  provider?: string;
+  part?: string;
+  family?: string;
+  dependency?: string;
+  detail?: Record<string, unknown>;
+}
+
 /** The binding status of one required part, as `template show` reports it (GLA-017 AC#2). */
 export interface PartBinding {
   /** The part-role (launcher | entrypoint | connector | workspace | detector). */
   part: string;
   /** The provider backing the part. */
   provider: string;
+  /** The provider family backing this role, when the provider is known. */
+  family?: string;
   /** The provider's system-derived availability. */
   availability: Availability;
+  /** Boolean convenience for callers that only need an admit/list decision. */
+  available: boolean;
   /** Each backing dependency's evaluated binding diagnostics. */
   dependencies: IndexedDependencyBinding[];
+  /** Stable provider diagnostics for this template part. */
+  diagnostics: CatalogDiagnostic[];
 }
 
 /** What `templateShow` returns (GLA-017 AC#2): required parts + each backing dependency's binding. */
@@ -552,8 +637,14 @@ export interface TemplateShowResult extends TemplateDescriptor {
   openParams: ConfigSchema;
   available: boolean;
   availability: Availability;
+  /** Open-part compatibility derived from provider manifests and any explicit template narrowing. */
+  compatibleProviders?: Record<string, string[]>;
+  /** Template-level dependency diagnostics, e.g. public edge/proxy evidence. */
+  dependencies: IndexedDependencyBinding[];
   /** Per required part, the backing provider + its dependency binding status. */
   parts: PartBinding[];
+  /** Stable template-level diagnostics, including public-edge dependency failures. */
+  diagnostics: CatalogDiagnostic[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -564,6 +655,75 @@ export interface TemplateShowResult extends TemplateDescriptor {
 export interface StoreContent {
   providers: ProviderManifest[];
   templates: TemplateManifest[];
+}
+
+function providerDiagnostics(
+  provider: string,
+  ent: IndexedEntity | undefined,
+  part?: string,
+): CatalogDiagnostic[] {
+  if (ent === undefined) {
+    return [
+      {
+        code: "provider.unknown",
+        message: `unknown provider "${provider}"`,
+        provider,
+        ...(part !== undefined ? { part } : {}),
+      },
+    ];
+  }
+  if (ent.availability === "available") {
+    return [
+      {
+        code: "provider.available",
+        message: `provider "${provider}" is available`,
+        provider,
+        family: ent.family,
+        ...(part !== undefined ? { part } : {}),
+      },
+    ];
+  }
+  const code = ent.availability === "degraded" ? "provider.degraded" : "provider.unavailable";
+  return [
+    {
+      code,
+      message: `provider "${provider}" is ${ent.availability}`,
+      provider,
+      family: ent.family,
+      ...(part !== undefined ? { part } : {}),
+      detail: {
+        availability: ent.availability,
+        dependencies: ent.requires,
+      },
+    },
+  ];
+}
+
+function templateDiagnostics(
+  dependencies: IndexedDependencyBinding[],
+  parts: PartBinding[],
+): CatalogDiagnostic[] {
+  const diagnostics: CatalogDiagnostic[] = [];
+  for (const dep of dependencies) {
+    if (
+      dep.status !== "bound" ||
+      dep.diagnostics.install !== "available" ||
+      dep.diagnostics.runtime !== "available"
+    ) {
+      diagnostics.push({
+        code: "template.dependency_unavailable",
+        message: `template dependency "${dep.dependency}" is not available`,
+        dependency: dep.dependency,
+        detail: { dependency: dep },
+      });
+    }
+  }
+  for (const part of parts) {
+    diagnostics.push(
+      ...part.diagnostics.filter((diagnostic) => diagnostic.code !== "provider.available"),
+    );
+  }
+  return diagnostics;
 }
 
 /** Per-probe-name overrides for tests/wiring (flip a part's probe to prove system-derived drop). */
@@ -641,19 +801,25 @@ function ingest(
       }
     }
     templates.set(t.metadata.name, t);
-    // A template is available iff its own probe is available AND every required part is available.
-    const ownProbe = probeFor(t.spec.probe)();
-    const partsAvailable = Object.values(t.spec.requiredParts).every(
-      (provider) => entities.get(provider)?.availability === "available",
+    // A template is available iff its template-level dependencies, own probe, and every required part are available.
+    const currentProbe: DependencyProbeEvidence = { result: probeFor(t.spec.probe)() };
+    const requires = (t.spec.requires ?? []).map((requirement) =>
+      evaluateRequirement(requirement, bindingFor(bindings, requirement.dependency), currentProbe),
     );
+    const selfAvailability = deriveAvailability(requires, currentProbe);
+    const partAvailabilities = Object.values(t.spec.requiredParts).map(
+      (provider) => entities.get(provider)?.availability,
+    );
+    const missingOrUnavailablePart = partAvailabilities.some(
+      (availability) => availability === undefined || availability === "unavailable",
+    );
+    const degradedPart = partAvailabilities.some((availability) => availability === "degraded");
     const availability: Availability =
-      ownProbe === "unavailable" || !partsAvailable
-        ? Object.values(t.spec.requiredParts).some(
-            (p) => entities.get(p)?.availability === "unavailable",
-          ) || ownProbe === "unavailable"
-          ? "unavailable"
-          : "degraded"
-        : "available";
+      selfAvailability === "unavailable" || missingOrUnavailablePart
+        ? "unavailable"
+        : selfAvailability === "degraded" || degradedPart
+          ? "degraded"
+          : "available";
     entities.set(t.metadata.name, {
       name: t.metadata.name,
       kind: t.kind,
@@ -661,7 +827,7 @@ function ingest(
       summary: t.spec.capability.summary,
       availability,
       available: availability === "available",
-      requires: [],
+      requires,
     });
     registerSkills(t.spec.skills);
   }
@@ -761,6 +927,64 @@ export function referenceWpmDependencyBindings(): DependencyBinding[] {
       },
       decisionNotes: [{ note: "Managed install fixture for the reference human-view stack." }],
     },
+    {
+      dependency: "identity-provider",
+      source: "wpm-receipt",
+      ownershipMode: "local-external",
+      state: "adopted",
+      installed: true,
+      bundle: {
+        id: "identity-provider",
+        version: "0.1.0",
+        declaredRequires: { "gla-core": "^0.1.0" },
+      },
+      receipt: {
+        taskId: "identity-provider-6",
+        status: "Done",
+        recordedAt: "2026-06-13T00:00:00.000Z",
+        refs: ["wpm/wip/bundles/identity-provider/install-backlog/tasks/identity-provider-6"],
+      },
+      connection: {
+        refs: {
+          issuerUrl: { kind: "uri-ref", ref: "https://idp.example/application/o/gla/" },
+          clientId: { kind: "literal", ref: "gla-client" },
+          clientSecret: { kind: "secret-ref", ref: "secret:authentik/client-secret" },
+          redirectUri: { kind: "uri-ref", ref: "https://gla.example/auth/callback" },
+        },
+      },
+      lastProbe: { at: "2026-06-13T00:00:00.000Z", result: "available" },
+      decisionNotes: [{ note: "Reference adopted authentik identity-provider fixture." }],
+    },
+    {
+      dependency: "edge-proxy",
+      source: "wpm-receipt",
+      ownershipMode: "local-external",
+      state: "adopted",
+      installed: true,
+      bundle: {
+        id: "edge-proxy",
+        version: "0.1.0",
+        declaredRequires: { "gla-core": "^0.1.0" },
+      },
+      receipt: {
+        taskId: "edge-proxy-3",
+        status: "Done",
+        recordedAt: "2026-06-13T00:00:00.000Z",
+        refs: ["wpm/wip/bundles/edge-proxy/install-backlog/tasks/edge-proxy-3"],
+      },
+      connection: {
+        refs: {
+          publicBaseUrl: { kind: "uri-ref", ref: "https://gla.example/" },
+          gatewayUpstream: { kind: "uri-ref", ref: "http://127.0.0.1:3000" },
+        },
+      },
+      lastProbe: { at: "2026-06-13T00:00:00.000Z", result: "available" },
+      decisionNotes: [
+        {
+          note: "Reference adopted host edge proxy; GLA Access Gateway remains the grant verifier.",
+        },
+      ],
+    },
   ]);
 }
 
@@ -818,7 +1042,11 @@ export class CatalogService implements CatalogPort {
       requiredParts: show.requiredParts,
       openParams: show.openParams,
       available: show.available,
+      availability: show.availability,
+      compatibleProviders: show.compatibleProviders,
+      dependencies: show.dependencies,
       parts: show.parts,
+      diagnostics: show.diagnostics,
     };
   }
 
@@ -846,19 +1074,28 @@ export class CatalogService implements CatalogPort {
       return {
         part,
         provider,
+        ...(ent?.family !== undefined ? { family: ent.family } : {}),
         availability: ent?.availability ?? "unavailable",
+        available: ent?.availability === "available",
         dependencies: ent?.requires ?? [],
+        diagnostics: providerDiagnostics(provider, ent, part),
       };
     });
     const entity = this.index.entities.get(id);
     const availability = entity?.availability ?? "unavailable";
+    const dependencies = entity?.requires ?? [];
+    const diagnostics = templateDiagnostics(dependencies, parts);
+    const compatibleProviders = deriveCompatibleProviders(t, this.store.providers);
     return {
       id,
       requiredParts: Object.keys(t.spec.requiredParts),
       openParams: t.spec.openParams ?? {},
       available: availability === "available",
       availability,
+      ...(compatibleProviders !== undefined ? { compatibleProviders } : {}),
+      dependencies,
       parts,
+      diagnostics,
     };
   }
 
@@ -913,12 +1150,24 @@ export interface CatalogTemplateDefaults {
   openParts?: string[];
   /** Per open part-role, the compatible provider `use` names (`relations.compatibleWith`). */
   compatibleProviders?: Record<string, string[]>;
+  /** System-derived template availability at the catalog/admission seam. */
+  available?: boolean;
+  /** Three-valued template availability used for diagnostics. */
+  availability?: Availability;
+  /** Template-level dependency evidence, such as public-edge proxy bindings. */
+  dependencies?: IndexedDependencyBinding[];
+  /** Stable diagnostics for unavailable template-level dependencies or required parts. */
+  diagnostics?: CatalogDiagnostic[];
 }
 
 /** A provider's facts admission reads (availability + its typed config_schema). */
 export interface CatalogProviderInfo {
   name: string;
   available: boolean;
+  availability: Availability;
+  family: string;
+  diagnostics: CatalogDiagnostic[];
+  dependencies: IndexedDependencyBinding[];
   config_schema?: ConfigSchema;
 }
 
@@ -1004,8 +1253,17 @@ export function toAdmissionCatalog(
       if (t.spec.openParts !== undefined) {
         out.openParts = [...t.spec.openParts];
       }
-      if (t.spec.compatibleProviders !== undefined) {
-        out.compatibleProviders = structuredClone(t.spec.compatibleProviders);
+      const compatibleProviders = deriveCompatibleProviders(t, providersByName.values());
+      if (compatibleProviders !== undefined) {
+        out.compatibleProviders = compatibleProviders;
+      }
+      const show = service.templateShow(id);
+      out.available = show.available;
+      out.availability = show.availability;
+      out.dependencies = show.dependencies;
+      out.diagnostics = show.diagnostics;
+      if (show.compatibleProviders !== undefined) {
+        out.compatibleProviders = show.compatibleProviders;
       }
       return out;
     },
@@ -1015,7 +1273,14 @@ export function toAdmissionCatalog(
         return undefined;
       }
       const manifest = providersByName.get(use);
-      const info: CatalogProviderInfo = { name: use, available: entity.available };
+      const info: CatalogProviderInfo = {
+        name: use,
+        available: entity.available,
+        availability: entity.availability,
+        family: entity.family,
+        dependencies: entity.requires,
+        diagnostics: providerDiagnostics(use, entity),
+      };
       if (manifest?.spec.config_schema !== undefined) {
         info.config_schema = manifest.spec.config_schema;
       }

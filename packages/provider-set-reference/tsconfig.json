@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../adapters/auth-authentik" },
+    { "path": "../../adapters/auth-webauthn" },
+    { "path": "../catalog" },
+    { "path": "../../adapters/channel-cli" },
+    { "path": "../../adapters/connector-cdp" },
+    { "path": "../../adapters/detector-url" },
+    { "path": "../../adapters/entrypoint-novnc" },
+    { "path": "../kernel" },
+    { "path": "../../adapters/launcher-process" },
+    { "path": "../provider-host" },
+    { "path": "../../adapters/workspace-profile" }
+  ]
+}

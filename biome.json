@@ -58,6 +58,7 @@
         "packages/audit/**",
         "packages/admission/**",
         "packages/catalog/**",
+        "packages/provider-host/**",
         "packages/identity/**",
         "packages/worker/**",
         "packages/assembly/**",

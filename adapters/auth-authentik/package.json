@@ -8,10 +8,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./testing": {
-      "types": "./dist/fake-authentik.d.ts",
-      "import": "./dist/fake-authentik.js"
     }
   },
   "main": "./dist/index.js",

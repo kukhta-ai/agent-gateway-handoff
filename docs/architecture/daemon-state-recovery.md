@@ -19,10 +19,10 @@ owning their aggregates and ports; only `packages/app` imports filesystem storag
 | --- | --- | --- | --- |
 | `daemon.owner-lock` | `@gla/app` | critical operational | Prevents two daemon processes from owning the same state root. |
 | `identity.enrollments` | `@gla/identity` | sensitive | Restores provider-neutral enrollment facts before handoff step-up. |
-| `auth.webauthn.credentials` | `@gla/auth-webauthn` | sensitive | Restores passkey credential public key and counter. |
-| `auth.webauthn.challenges` | `@gla/auth-webauthn` | secret | Allows in-flight WebAuthn ceremonies to remain bounded by provider checks. |
-| `auth.authentik.subjects` | `@gla/auth-authentik` | sensitive | Restores stable `userId -> sub` binding. |
-| `auth.authentik.attempts` | `@gla/auth-authentik` | secret | Restores OIDC `state`, `nonce`, PKCE verifier, kind, user, and creation time. |
+| `provider.webauthn.credentials` | `@gla/auth-webauthn` | sensitive | Restores passkey credential public key and counter. |
+| `provider.webauthn.challenges` | `@gla/auth-webauthn` | secret | Allows in-flight WebAuthn ceremonies to remain bounded by provider checks. |
+| `provider.authentik.subjects` | `@gla/auth-authentik` | sensitive | Restores stable `userId -> sub` binding. |
+| `provider.authentik.attempts` | `@gla/auth-authentik` | secret | Restores OIDC `state`, `nonce`, PKCE verifier, kind, user, and creation time. |
 | `capability.signing-key` | `@gla/kernel` | secret | Keeps pre-restart capabilities verifiable. |
 | `capability.revocations` | `@gla/capability` | critical operational | Keeps revoked capability ids revoked across restart. |
 | `capability.spent-enrollment-nonces` | `@gla/capability` | critical operational | Keeps consumed operator-discharge grants single-use. |
@@ -38,7 +38,8 @@ must step up again on a new window.
 
 ## Recovery Rules
 
-- Identity and provider binding state is loaded before handoff/enrollment requests can reach the public gateway.
+- Identity and provider binding state is loaded from Provider Host namespaces before handoff/enrollment requests
+  can reach the public gateway.
 - Authentik pending attempts remain one-time: the adapter still claims and deletes the attempt before token exchange.
 - Expired authentik attempts are rejected by the adapter TTL check after restart; wrong-kind and wrong-recipient
 callbacks are rejected by the persisted attempt metadata.

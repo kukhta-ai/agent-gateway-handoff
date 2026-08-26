@@ -6,7 +6,7 @@ import {
   isRedactionOrTemplatePlaceholder,
   redactOperatorText,
 } from "@gla/kernel";
-import type { AuthProviderKind } from "./index.js";
+import type { AuthProviderKind } from "./composition.js";
 
 /** A provider-owned credential/setup method declared by deployment or installer verification. */
 export interface EnrollmentCredentialSetup {
@@ -496,7 +496,7 @@ export function authEnrollmentDiagnostics(opts: {
       `authentik proxy/forward-auth is declared as an optional outer proxy, but selected auth provider "${authProvider}" means the outer proxy does not perform GLA handoff step-up`,
     );
     actions.push(
-      "Set GLA_AUTH_PROVIDER=authentik with GLA_AUTHENTIK_ISSUER_URL, GLA_AUTHENTIK_CLIENT_ID, GLA_AUTHENTIK_CLIENT_SECRET, and GLA_AUTHENTIK_REDIRECT_URI for delegated OIDC/callback step-up, or intentionally keep WebAuthn and treat authentik proxy/forward-auth as defense-in-depth only.",
+      "Set GLA_AUTH_PROVIDER=authentik with GLA_AUTH_PROVIDER_CONFIG_JSON containing issuerUrl, clientId, clientSecret, and redirectUri for delegated OIDC/callback step-up, or intentionally keep WebAuthn and treat authentik proxy/forward-auth as defense-in-depth only.",
     );
   }
   if (authentikOuterGuards.length > 0 && authProvider === "authentik") {

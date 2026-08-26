@@ -126,12 +126,6 @@ importers:
       '@gla/audit':
         specifier: workspace:*
         version: link:../audit
-      '@gla/auth-authentik':
-        specifier: workspace:*
-        version: link:../../adapters/auth-authentik
-      '@gla/auth-webauthn':
-        specifier: workspace:*
-        version: link:../../adapters/auth-webauthn
       '@gla/bridge':
         specifier: workspace:*
         version: link:../bridge
@@ -141,27 +135,12 @@ importers:
       '@gla/catalog':
         specifier: workspace:*
         version: link:../catalog
-      '@gla/channel-cli':
-        specifier: workspace:*
-        version: link:../../adapters/channel-cli
-      '@gla/channel-telegram':
-        specifier: workspace:*
-        version: link:../../adapters/channel-telegram
       '@gla/cli':
         specifier: workspace:*
         version: link:../../surfaces/cli
       '@gla/completion':
         specifier: workspace:*
         version: link:../completion
-      '@gla/connector-cdp':
-        specifier: workspace:*
-        version: link:../../adapters/connector-cdp
-      '@gla/detector-url':
-        specifier: workspace:*
-        version: link:../../adapters/detector-url
-      '@gla/entrypoint-novnc':
-        specifier: workspace:*
-        version: link:../../adapters/entrypoint-novnc
       '@gla/gateway':
         specifier: workspace:*
         version: link:../gateway
@@ -171,15 +150,18 @@ importers:
       '@gla/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@gla/launcher-process':
-        specifier: workspace:*
-        version: link:../../adapters/launcher-process
       '@gla/mcp':
         specifier: workspace:*
         version: link:../../surfaces/mcp
       '@gla/policy-cedar':
         specifier: workspace:*
         version: link:../../adapters/policy-cedar
+      '@gla/provider-host':
+        specifier: workspace:*
+        version: link:../provider-host
+      '@gla/provider-set-reference':
+        specifier: workspace:*
+        version: link:../provider-set-reference
       '@gla/route':
         specifier: workspace:*
         version: link:../route
@@ -192,10 +174,16 @@ importers:
       '@gla/worker':
         specifier: workspace:*
         version: link:../worker
-      '@gla/workspace-profile':
-        specifier: workspace:*
-        version: link:../../adapters/workspace-profile
     devDependencies:
+      '@gla/auth-authentik':
+        specifier: workspace:*
+        version: link:../../adapters/auth-authentik
+      '@gla/auth-webauthn':
+        specifier: workspace:*
+        version: link:../../adapters/auth-webauthn
+      '@gla/launcher-process':
+        specifier: workspace:*
+        version: link:../../adapters/launcher-process
       playwright-core:
         specifier: ^1.49.1
         version: 1.60.0
@@ -271,6 +259,51 @@ importers:
         version: link:../kernel
 
   packages/kernel: {}
+
+  packages/provider-host:
+    dependencies:
+      '@gla/catalog':
+        specifier: workspace:*
+        version: link:../catalog
+      '@gla/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+
+  packages/provider-set-reference:
+    dependencies:
+      '@gla/auth-authentik':
+        specifier: workspace:*
+        version: link:../../adapters/auth-authentik
+      '@gla/auth-webauthn':
+        specifier: workspace:*
+        version: link:../../adapters/auth-webauthn
+      '@gla/catalog':
+        specifier: workspace:*
+        version: link:../catalog
+      '@gla/channel-cli':
+        specifier: workspace:*
+        version: link:../../adapters/channel-cli
+      '@gla/connector-cdp':
+        specifier: workspace:*
+        version: link:../../adapters/connector-cdp
+      '@gla/detector-url':
+        specifier: workspace:*
+        version: link:../../adapters/detector-url
+      '@gla/entrypoint-novnc':
+        specifier: workspace:*
+        version: link:../../adapters/entrypoint-novnc
+      '@gla/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@gla/launcher-process':
+        specifier: workspace:*
+        version: link:../../adapters/launcher-process
+      '@gla/provider-host':
+        specifier: workspace:*
+        version: link:../provider-host
+      '@gla/workspace-profile':
+        specifier: workspace:*
+        version: link:../../adapters/workspace-profile
 
   packages/route:
     dependencies:

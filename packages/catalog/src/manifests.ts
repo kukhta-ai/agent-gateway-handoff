@@ -13,12 +13,14 @@ import type { ConfigSchema } from "@gla/kernel";
 
 /** The pluggable provider families (docs/02 §3) this slice seeds. */
 export type ProviderFamily =
+  | "auth"
   | "launcher"
   | "entrypoint"
   | "connector"
   | "workspace"
   | "detector"
   | "channel"
+  | "secret-store"
   | "template";
 
 /** A dependency's binding status, written by `wpm`, read by GLA (docs/02 §6). Drives availability. */
@@ -211,6 +213,11 @@ export interface ProviderManifest {
     config_schema?: ConfigSchema;
     /** Static host dependency requirements. Dynamic binding evidence is supplied by WPM receipts. */
     requires?: DependencyRequirement[];
+    /**
+     * Provider construction config. When absent, Provider Host uses `config_schema`; detector manifests can keep
+     * `config_schema` as per-session params while exposing construction-only knobs here.
+     */
+    factory_config_schema?: ConfigSchema;
     /** The probe name resolved against the Index's probe registry (system-derived availability). */
     probe?: string;
     skills?: SkillManifest[];
@@ -232,6 +239,12 @@ export interface TemplateManifest {
     capability: { summary: string };
     /** Required part-roles → the provider name (an entry in {@link PROVIDER_MANIFESTS}) backing it. */
     requiredParts: Record<string, string>;
+    /**
+     * Template-level infrastructure requirements that are not owned by any one part provider. Public-edge
+     * exposure is modeled here: Caddy/nginx/Traefik-style proxy evidence is transport/dependency proof, not an
+     * Access Gateway or AuthProvider replacement.
+     */
+    requires?: DependencyRequirement[];
     /**
      * The part-roles the agent MAY override (docs/04 §5 the fixed/open line). A role NOT listed here
      * is **template-FIXED** (the isolation tier / launcher native base / security-bearing wiring) —
@@ -269,7 +282,16 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         mounts: { host_paths: ["file", "directory"], modes: ["ro", "rw"] },
       },
       config_schema: {
-        headless: { type: "bool", required: false, default: true },
+        mode: {
+          type: "enum",
+          required: false,
+          default: "auto",
+          enum: ["auto", "headless", "full"],
+          conflicts_with: ["headless"],
+        },
+        headless: { type: "bool", required: false, conflicts_with: ["mode"] },
+        chromiumPath: { type: "string", required: false, min: 1 },
+        startTimeoutMs: { type: "number", required: false, min: 1 },
       },
       // The browser-runtime host dependency (GLA-007 stands it up via WPM); not seeded as bound.
       requires: [
@@ -305,7 +327,29 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     metadata: { name: "entrypoint-novnc", version: "0.1.0" },
     spec: {
       family: "entrypoint",
-      capability: { summary: "noVNC live-view human entrypoint (agent-blind input path)" },
+      capability: {
+        summary: "noVNC live-view human entrypoint (agent-blind input path)",
+        client: {
+          kind: "rfb-web-client",
+          ref: "novnc",
+          bootstrap: {
+            module: "core/rfb.js",
+            scaleViewport: true,
+            resizeSession: false,
+            viewOnly: false,
+          },
+        },
+        clientAssets: [
+          {
+            ref: "novnc",
+            source: "package",
+            package: "@novnc/novnc",
+            env: "GLA_NOVNC_WEB_ROOT",
+            cacheControl: "no-cache",
+          },
+        ],
+        transport: { kind: "reverse-proxy", protocols: ["websocket"] },
+      },
       requires: [
         {
           dependency: "human-view",
@@ -329,7 +373,14 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     metadata: { name: "connector-cdp", version: "0.1.0" },
     spec: {
       family: "connector",
-      capability: { summary: "Chrome DevTools Protocol agent connector (agent-blind)" },
+      capability: {
+        summary: "Chrome DevTools Protocol agent connector (agent-blind)",
+        dto: {
+          type: "cdp",
+          providerOwnedFields: ["cdp_url"],
+          lifecycleKey: "resourceId",
+        },
+      },
       requires: [
         {
           dependency: "browser-runtime",
@@ -354,6 +405,9 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     spec: {
       family: "workspace",
       capability: { summary: "ephemeral browser-profile-temp workspace (wiped at reap)" },
+      config_schema: {
+        root: { type: "string", required: false, min: 1 },
+      },
       // In-tree, no host dependency to stand up.
       probe: "workspace-profile",
     },
@@ -369,14 +423,30 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     metadata: { name: "url-watcher", version: "0.1.0" },
     spec: {
       family: "detector",
-      capability: { summary: "url-watcher completion detector (fires on a configured URL)" },
+      capability: {
+        summary: "url-watcher completion detector (fires on a configured URL)",
+        completion: {
+          statuses: {
+            "url-intermediate": { status: "submitted", next: "email-verification" },
+            "url-complete": { status: "verified" },
+          },
+          resultSchema: {
+            url: { type: "string", required: true },
+            match: { type: "string", required: false },
+          },
+        },
+      },
       config_schema: {
         complete_on: { type: "string", required: true, pattern: "^/" },
         // An optional INTERMEDIATE URL (e.g. `/verify`) — the watcher emits an intermediate signal on its first
         // match before the terminal `complete_on` (scenario-01 Phase 8: `/verify` → submitted, next email-verification).
         intermediate: { type: "string", required: false, pattern: "^/" },
       },
+      factory_config_schema: {
+        pollMs: { type: "number", required: false, min: 1 },
+      },
       probe: "url-watcher",
+      relations: { compatibleWith: { templates: ["browser-handoff"] } },
     },
   },
 
@@ -387,8 +457,16 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
     metadata: { name: "user-done", version: "0.1.0" },
     spec: {
       family: "detector",
-      capability: { summary: "user-done completion detector (the human signals completion)" },
+      capability: {
+        summary: "user-done completion detector (the human signals completion)",
+        completion: {
+          statuses: {
+            done: { status: "verified" },
+          },
+        },
+      },
       probe: "user-done",
+      relations: { compatibleWith: { templates: ["browser-handoff"] } },
     },
   },
 };
@@ -412,17 +490,23 @@ export const BROWSER_HANDOFF_TEMPLATE: TemplateManifest = {
       workspace: "workspace-profile",
       detector: "url-watcher",
     },
+    requires: [
+      {
+        dependency: "edge-proxy",
+        hostTouching: true,
+        connectionRefs: ["publicBaseUrl", "gatewayUpstream"],
+        bundle: {
+          id: "edge-proxy",
+          version: "0.1.0",
+          declaredRequires: { "gla-core": "^0.1.0" },
+        },
+      },
+    ],
     // docs/04 §5 fixed/open line: the launcher (isolation tier / native base) and the workspace are
     // FIXED — an agent override of either is a reject. The agent MAY override the entrypoint, the
-    // connector, and the detector(s), but only with a compatible provider (below).
+    // connector, and the detector(s), but only with a compatible provider derived from the catalog's
+    // registered provider manifests.
     openParts: ["entrypoint", "connector", "detector"],
-    compatibleProviders: {
-      // From the launcher's relations.compatibleWith (docs/02 §3) — the entrypoint/connector the T2
-      // launcher can drive — plus the detectors this template recognizes.
-      entrypoint: ["entrypoint-novnc"],
-      connector: ["connector-cdp"],
-      detector: ["url-watcher", "user-done"],
-    },
     openParams: {
       recipient: { type: "string", required: true },
       ttl: { type: "string", required: false, pattern: "^[0-9]+(s|m|h|d)$" },
@@ -456,6 +540,10 @@ export const CHANNEL_CLI_MANIFEST: ProviderManifest = {
   spec: {
     family: "channel",
     capability: { summary: "local/CLI fallback channel (headless tests)" },
+    config_schema: {
+      delivery: { type: "enum", enum: ["stdout", "injected"], required: false },
+      inbound: { type: "enum", enum: ["memory", "injected"], required: false },
+    },
     probe: "channel-cli",
   },
 };
