@@ -288,6 +288,7 @@ describe("REAL noVNC handoff browser client (GLA-077)", () => {
               </body>
             </html>`)}`,
         );
+        await controlPage.locator("#remote-secret-field").focus();
         await expect
           .poll(() =>
             controlPage.evaluate(
@@ -322,6 +323,13 @@ describe("REAL noVNC handoff browser client (GLA-077)", () => {
           const rect = el.getBoundingClientRect();
           return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
         });
+        await expect
+          .poll(() =>
+            controlPage.evaluate(
+              `document.activeElement === document.getElementById("remote-secret-field")`,
+            ),
+          )
+          .toBe(false);
         await humanPage.mouse.click(box.x + Math.min(400, box.width / 2), box.y + box.height / 2);
         await expect
           .poll(() =>
