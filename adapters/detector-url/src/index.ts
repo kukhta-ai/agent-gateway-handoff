@@ -54,8 +54,13 @@ export type UrlWatcherStatus = "url-intermediate" | "url-complete";
  *   - `intermediate` (optional): a URL fragment whose first match emits a `url-intermediate` signal (e.g. `/verify`).
  */
 export const URL_WATCHER_CONTRACT: ConfigSchema = {
-  complete_on: { type: "string", required: true, min: 1 },
-  intermediate: { type: "string", required: false, min: 1 },
+  type: "object",
+  additionalProperties: false,
+  required: ["complete_on"],
+  properties: {
+    complete_on: { type: "string", minLength: 1 },
+    intermediate: { type: "string", minLength: 1 },
+  },
 };
 
 /** Options for {@link DetectorUrlAdapter}. */

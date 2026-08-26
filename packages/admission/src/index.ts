@@ -30,6 +30,7 @@ import { type AssemblyProposal, type TemplateDefaults, resolveAssembly } from "@
 import {
   type Capability,
   type ConfigSchema,
+  EMPTY_CONFIG_SCHEMA,
   type ErrorCode,
   type GlaError,
   type PartRef,
@@ -37,6 +38,7 @@ import {
   type PolicyPort,
   type RecipientRef,
   type ResolvedAssemblySpec,
+  type ResolvedCapsulePlan,
   exitCodeFor,
   glaError,
   validateConfig,
@@ -64,12 +66,16 @@ export interface ProviderInfo {
   dependencies?: unknown[];
   /** Optional stable catalog/provider diagnostics. */
   diagnostics?: unknown[];
+  /** Graph-resolved provider configuration selected before part-level params are applied. */
+  resolvedConfig?: Record<string, unknown>;
   /** The provider's typed option schema (for per-part config validation), if any. */
   config_schema?: ConfigSchema;
 }
 
 /** Template defaults plus optional catalog status evidence. */
 export interface AdmissionTemplateDefaults extends TemplateDefaults {
+  /** Capsule roles the template contract requires admission to resolve before provisioning. */
+  requiredParts?: string[];
   available?: boolean;
   availability?: string;
   dependencies?: unknown[];
@@ -168,6 +174,8 @@ export interface AdmitAccept {
   decision: "accept";
   /** The immutable resolved spec a Session pins. */
   resolved: ResolvedAssemblySpec;
+  /** The resolved capsule provider plan derived from catalog capabilities and assembly inputs. */
+  capsulePlan: ResolvedCapsulePlan;
 }
 
 /** A reject with a STABLE namespaced code → documented exit code (the agent's skill interprets it). */
@@ -221,6 +229,10 @@ function reject(code: ErrorCode, message: string, detail?: Record<string, unknow
   return { decision: "reject", code, exitCode: exitCodeFor(code), error };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Is `path` at-or-under any root in `roots`? (Path-prefix on `/`-segments; `"/"` matches everything.) */
 function underAnyRoot(path: string, roots: string[]): boolean {
   return roots.some((root) => {
@@ -260,6 +272,23 @@ function allParts(spec: ResolvedAssemblySpec): Array<{ role: string; ref: PartRe
     out.push({ role: "detector", ref: d });
   }
   return out;
+}
+
+function hasResolvedPart(spec: ResolvedAssemblySpec, part: string): boolean {
+  switch (part) {
+    case "launcher":
+      return spec.spec.launcher !== undefined;
+    case "connector":
+      return spec.spec.connector !== undefined;
+    case "workspace":
+      return spec.spec.workspace !== undefined;
+    case "entrypoint":
+      return (spec.spec.entrypoints ?? []).length > 0;
+    case "detector":
+      return (spec.spec.detectors ?? []).length > 0;
+    default:
+      return allParts(spec).some(({ role }) => role === part);
+  }
 }
 
 /**
@@ -357,6 +386,11 @@ export class AdmissionService {
     }
     const resolved = resolution.resolved;
 
+    const missingDefaultReject = this.checkRequiredDefaults(resolved, defaults);
+    if (missingDefaultReject) {
+      return missingDefaultReject;
+    }
+
     // ── VALIDATE (ordered, pure predicates; all OFFLINE) ───────────────────────
     // 1) POLICY (Cedar, forbid-wins). Forbid (or fail-closed) → reject policy.* (exit 3).
     const policyReject = this.checkPolicy(resolved, presentedCapability);
@@ -396,7 +430,52 @@ export class AdmissionService {
     }
 
     // ── ACCEPT ─────────────────────────────────────────────────────────────────
-    return { decision: "accept", resolved };
+    return { decision: "accept", resolved, capsulePlan: this.buildCapsulePlan(resolved) };
+  }
+
+  private buildCapsulePlan(resolved: ResolvedAssemblySpec): ResolvedCapsulePlan {
+    return {
+      template: resolved.spec.template,
+      providers: allParts(resolved).map(({ role, ref }) => {
+        const info = this.catalog.provider(ref.use);
+        return {
+          role,
+          providerId: ref.use,
+          config: {
+            ...(isRecord(info?.resolvedConfig) ? structuredClone(info.resolvedConfig) : {}),
+            ...(ref.params ?? {}),
+          },
+          available: info?.available === true,
+          ...(info?.availability !== undefined ? { availability: info.availability } : {}),
+          evidenceRequirements: [...(info?.dependencies ?? [])],
+          diagnostics: [...(info?.diagnostics ?? [])],
+        };
+      }),
+    };
+  }
+
+  private checkRequiredDefaults(
+    resolved: ResolvedAssemblySpec,
+    defaults: AdmissionTemplateDefaults,
+  ): AdmitReject | undefined {
+    const requiredParts = defaults.requiredParts ?? [];
+    const missing = requiredParts.filter((part) => !hasResolvedPart(resolved, part));
+    if (missing.length === 0) {
+      return undefined;
+    }
+    return reject(
+      "catalog.unavailable",
+      `template "${resolved.spec.template}" is missing required provider defaults: ${missing.join(", ")}`,
+      {
+        template: resolved.spec.template,
+        diagnostics: missing.map((part) => ({
+          code: "template.missing_default",
+          template: resolved.spec.template,
+          part,
+          message: `template "${resolved.spec.template}" does not resolve required part "${part}"`,
+        })),
+      },
+    );
   }
 
   /**
@@ -549,10 +628,7 @@ export class AdmissionService {
   private checkConfigSchemas(resolved: ResolvedAssemblySpec): AdmitReject | undefined {
     for (const { role, ref } of allParts(resolved)) {
       const info = this.catalog.provider(ref.use);
-      const schema = info?.config_schema;
-      if (schema === undefined) {
-        continue; // provider declares no options → nothing to validate
-      }
+      const schema = info?.config_schema ?? EMPTY_CONFIG_SCHEMA;
       const params = ref.params ?? {};
       const result = validateConfig(schema, params);
       if (!result.ok) {
@@ -625,4 +701,9 @@ export class AdmissionService {
 
 export type { AssemblyProposal, TemplateDefaults };
 export { glaError };
-export type { Capability, ResolvedAssemblySpec };
+export type {
+  Capability,
+  ResolvedAssemblySpec,
+  ResolvedCapsulePlan,
+  ResolvedCapsuleProviderPlan,
+} from "@gla/kernel";

@@ -5,10 +5,25 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentBridge } from "@gla/bridge";
-import { CatalogService, defaultStoreContent, referenceWpmDependencyBindings } from "@gla/catalog";
-import { glaError } from "@gla/kernel";
+import {
+  CHANNEL_CLI_MANIFEST,
+  CatalogService,
+  PROVIDER_MANIFESTS,
+  type ProviderFamily,
+  type ProviderInstallInventoryInput,
+  type ProviderInstallPackageInput,
+  type ProviderManifest,
+  type ProviderProfileManifest,
+  type StoreContent,
+  createTemplatePackageSkeleton,
+  defaultStoreContent,
+  referenceWpmDependencyBindings,
+  resolveProviderGraphProjection,
+} from "@gla/catalog";
+import { EMPTY_CONFIG_SCHEMA, glaError } from "@gla/kernel";
 import { describe, expect, it, vi } from "vitest";
 import { CLI_VERSION, type CliServices, run } from "../../src/cli.js";
+import { CLI_COMMANDS, DEFERRED_CLI_SURFACES } from "../../src/contract.js";
 import { ExitCode } from "../../src/exit-codes.js";
 import { main } from "../../src/index.js";
 import { Output, type OutputStreams } from "../../src/output.js";
@@ -46,6 +61,202 @@ function services(bridge: AgentBridge = readyBridge()): CliServices {
   return { bridge, connection: { mode: "in-process" } };
 }
 
+function provider(
+  id: string,
+  family: Exclude<ProviderFamily, "template">,
+  kind: string,
+): ProviderManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind,
+    metadata: { name: id, version: "0.1.0" },
+    spec: {
+      family,
+      capability: { summary: `${id} provider` },
+      config_schema: structuredClone(EMPTY_CONFIG_SCHEMA),
+      probe: id,
+      skills: [{ id: `use-${id}`, for: id, body: `# ${id}` }],
+    },
+  };
+}
+
+const AUTH_WEBAUTHN = provider("auth-webauthn", "auth", "AuthProvider");
+const SECRET_STORE = provider("secret-store-reference", "secret-store", "SecretStore");
+
+function trustedProviderPackage(
+  manifest: ProviderManifest,
+  opts: { signed?: boolean; verified?: boolean } = {},
+): ProviderInstallPackageInput {
+  return {
+    kind: "provider",
+    signed: opts.signed ?? true,
+    verified: opts.verified ?? true,
+    content: {
+      manifest,
+      module: {
+        providerId: manifest.metadata.name,
+        family: manifest.spec.family,
+        registersFactory: true,
+        registersProbe: true,
+      },
+      docs: [`adapters/${manifest.metadata.name}/README.md`],
+      contractTests: [
+        `adapters/${manifest.metadata.name}/test/contract/${manifest.metadata.name}.test.ts`,
+      ],
+    },
+  };
+}
+
+function trustedTemplatePackage(): ProviderInstallPackageInput {
+  return {
+    kind: "template-package",
+    signed: true,
+    verified: true,
+    content: createTemplatePackageSkeleton({
+      packageId: "cli-browser-handoff-package",
+      templateId: "browser-handoff",
+      requiredParts: {
+        launcher: "launcher-process",
+        entrypoint: "entrypoint-novnc",
+        connector: "connector-cdp",
+        workspace: "workspace-profile",
+        detector: "url-watcher",
+      },
+      openParts: ["entrypoint", "connector", "workspace", "detector"],
+      compatibleProviders: {
+        entrypoint: ["entrypoint-novnc"],
+        connector: ["connector-cdp"],
+        workspace: ["workspace-profile"],
+        detector: ["url-watcher"],
+      },
+      providerDefaults: {
+        "url-watcher": { complete_on: "/dashboard" },
+      },
+    }),
+  };
+}
+
+function providerInstallInventory(
+  overrides: Partial<ProviderInstallInventoryInput> = {},
+): ProviderInstallInventoryInput {
+  return {
+    inventoryId: "cli-reference",
+    profileId: "single-operator",
+    packages: [
+      ...Object.values(PROVIDER_MANIFESTS).map((manifest) => trustedProviderPackage(manifest)),
+      trustedProviderPackage(CHANNEL_CLI_MANIFEST),
+      trustedProviderPackage(AUTH_WEBAUTHN),
+      trustedProviderPackage(SECRET_STORE),
+      trustedTemplatePackage(),
+    ],
+    appDeployment: {
+      AuthProvider: "auth-webauthn",
+      ChannelAdapter: "channel-cli",
+      SecretStore: "secret-store-reference",
+    },
+    capsuleDefaults: {
+      Launcher: "launcher-process",
+      HumanEntrypoint: "entrypoint-novnc",
+      AgentConnector: "connector-cdp",
+      Workspace: "workspace-profile",
+      CompletionDetector: "url-watcher",
+    },
+    dependencyBindings: referenceWpmDependencyBindings(),
+    clientAssetSources: [
+      {
+        providerId: "entrypoint-novnc",
+        ref: "entrypoint-novnc.novnc",
+        source: "package",
+        package: "@novnc/novnc",
+        root: "/opt/gla/assets/novnc",
+        readOnly: true,
+        exists: true,
+        verified: true,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+const RUNTIME_REQUIRED_PARTS = {
+  launcher: "launcher-process",
+  entrypoint: "entrypoint-novnc",
+  connector: "connector-cdp",
+  workspace: "workspace-profile",
+  detector: "url-watcher",
+} as const;
+
+const RUNTIME_OPEN_PARTS = ["entrypoint", "connector", "workspace", "detector"] as const;
+
+function runtimeTemplatePackage(opts: { compatible?: boolean } = {}) {
+  const compatible = opts.compatible ?? true;
+  return createTemplatePackageSkeleton({
+    packageId: compatible ? "runtime-browser-handoff-package" : "runtime-ambiguous-package",
+    templateId: "browser-handoff",
+    requiredParts: RUNTIME_REQUIRED_PARTS,
+    openParts: [...RUNTIME_OPEN_PARTS],
+    compatibleProviders: compatible
+      ? {
+          entrypoint: ["entrypoint-novnc"],
+          connector: ["connector-cdp"],
+          workspace: ["workspace-profile"],
+          detector: ["url-watcher"],
+        }
+      : {},
+    providerDefaults: {
+      "url-watcher": { complete_on: "/dashboard" },
+    },
+  }).manifest;
+}
+
+function runtimeProviderProfile(): ProviderProfileManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "ProviderProfile",
+    metadata: { name: "runtime-reference", version: "0.1.0" },
+    spec: {
+      select: {
+        AuthProvider: "auth-webauthn",
+        ChannelAdapter: "channel-cli",
+        SecretStore: "secret-store-reference",
+        Launcher: "launcher-process",
+        HumanEntrypoint: "entrypoint-novnc",
+        AgentConnector: "connector-cdp",
+        Workspace: "workspace-profile",
+        CompletionDetector: "url-watcher",
+      },
+    },
+  };
+}
+
+function runtimeBridge(
+  opts: {
+    compatible?: boolean;
+    dependencyBindings?: ReturnType<typeof referenceWpmDependencyBindings>;
+  } = {},
+): AgentBridge {
+  const templatePackage = runtimeTemplatePackage(
+    opts.compatible === undefined ? {} : { compatible: opts.compatible },
+  );
+  const content: StoreContent = defaultStoreContent();
+  content.providers = [...content.providers, AUTH_WEBAUTHN, SECRET_STORE];
+  content.templates = structuredClone(templatePackage.spec.templates);
+  const dependencyBindings = opts.dependencyBindings ?? referenceWpmDependencyBindings();
+  const graph = resolveProviderGraphProjection({
+    providerSet: {
+      id: "runtime-reference",
+      providers: content.providers,
+    },
+    templatePackages: [templatePackage],
+    baseProfile: runtimeProviderProfile(),
+    dependencyBindings,
+    configValidationMode: "runtime",
+  });
+  return new AgentBridge({
+    catalog: new CatalogService({ content, dependencyBindings, providerGraph: graph }),
+  });
+}
+
 describe("gla exit codes", () => {
   it("`version` exits 0 and prints client version as JSON on stdout (non-TTY)", async () => {
     const c = capture(false);
@@ -79,6 +290,17 @@ describe("gla exit codes", () => {
   it("unknown/invalid flag exits 2 (usage)", async () => {
     const c = capture(false);
     expect(await run(["-o", "yaml", "version"], c.out, services())).toBe(ExitCode.USAGE);
+  });
+
+  it("command-scoped flags without a command fail instead of falling through to root help", async () => {
+    for (const argv of [["--bogus"], ["--endpoint"]]) {
+      const c = capture(false);
+      expect(await run(argv, c.out, services())).toBe(ExitCode.USAGE);
+      expect(c.stdout()).toBe("");
+      const err = JSON.parse(c.stderr()).error;
+      expect(err.code).toBe("usage.bad_flag");
+      expect(err.detail.flags).toEqual([argv[0]]);
+    }
   });
 
   it("treats `--` as end-of-options so `pnpm gla -- version` works (exit 0)", async () => {
@@ -149,6 +371,74 @@ describe("gla exit codes", () => {
       const err = JSON.parse(stderr.join("")).error;
       expect(err.code).toBe("dependency.unavailable");
       expect(err.detail.endpoint).toContain("gla-missing-");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
+      } else {
+        process.env.GLA_ENDPOINT = previous;
+      }
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("process entry reports parser usage failures before connecting to a configured daemon", async () => {
+    const previous = process.env.GLA_ENDPOINT;
+    process.env.GLA_ENDPOINT = join(tmpdir(), `gla-missing-usage-${Date.now()}.sock`);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    try {
+      const code = await main(["--bogus"]);
+      expect(code).toBe(ExitCode.USAGE);
+      expect(stdout.join("")).toBe("");
+      const err = JSON.parse(stderr.join("")).error;
+      expect(err.code).toBe("usage.bad_flag");
+      expect(err.message).not.toContain("gla-missing-usage");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
+      } else {
+        process.env.GLA_ENDPOINT = previous;
+      }
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("process entry emits local machine help before connecting to a configured daemon", async () => {
+    const previous = process.env.GLA_ENDPOINT;
+    process.env.GLA_ENDPOINT = join(tmpdir(), `gla-missing-help-${Date.now()}.sock`);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    try {
+      const code = await main(["--help"]);
+      expect(code).toBe(ExitCode.OK);
+      expect(JSON.parse(stdout.join("")).command).toBe("gla");
+      expect(stderr.join("")).toBe("");
     } finally {
       if (previous === undefined) {
         Reflect.deleteProperty(process.env, "GLA_ENDPOINT");
@@ -231,6 +521,59 @@ describe("gla JSON/TTY output contract", () => {
 });
 
 describe("gla current contract/schema/help (GLA-094)", () => {
+  it("every executable command contract has a machine-readable Commander help scope", async () => {
+    for (const spec of CLI_COMMANDS) {
+      const c = capture(false);
+      const argv = [spec.noun, spec.verb, "--help"].filter((v): v is string => v !== undefined);
+      const code = await run(argv, c.out, services());
+      expect(code, argv.join(" ")).toBe(ExitCode.OK);
+      const help = JSON.parse(c.stdout()) as {
+        command: string;
+        commands: Array<{ noun: string; verb?: string }>;
+      };
+      expect(help.command).toBe(["gla", spec.noun, spec.verb].filter(Boolean).join(" "));
+      const expectedCommand =
+        spec.verb === undefined ? { noun: spec.noun } : { noun: spec.noun, verb: spec.verb };
+      expect(help.commands).toEqual(
+        expect.arrayContaining([expect.objectContaining(expectedCommand)]),
+      );
+      expect(c.stderr()).toBe("");
+    }
+  });
+
+  it("accepts Commander long-option value syntax while preserving the JSON contract", async () => {
+    const version = capture(false);
+    expect(await run(["version", "--output=json"], version.out, services())).toBe(ExitCode.OK);
+    expect(JSON.parse(version.stdout())).toEqual({
+      client: CLI_VERSION,
+      connection: "in-process",
+    });
+
+    const catalog = capture(false);
+    expect(await run(["catalog", "list", "--kind=Launcher"], catalog.out, services())).toBe(
+      ExitCode.OK,
+    );
+    expect(JSON.parse(catalog.stdout()).map((e: { name: string }) => e.name)).toEqual([
+      "launcher-process",
+    ]);
+
+    const task = capture(false);
+    expect(
+      await run(
+        [
+          "task",
+          "create",
+          "--intent=register on acme",
+          "--recipient=tg:user:123",
+          "--fields=task_id,state",
+        ],
+        task.out,
+        services(),
+      ),
+    ).toBe(ExitCode.OK);
+    expect(Object.keys(JSON.parse(task.stdout())).sort()).toEqual(["state", "task_id"]);
+  });
+
   it("root machine help lists current executable commands separately from deferred surfaces", async () => {
     const c = capture(false);
     expect(await run(["--help"], c.out, services())).toBe(ExitCode.OK);
@@ -239,16 +582,24 @@ describe("gla current contract/schema/help (GLA-094)", () => {
       deferred_surfaces: Array<{ surface: string }>;
     };
     const commands = help.commands.map((cmd) => [cmd.noun, cmd.verb].filter(Boolean).join(" "));
+    expect(
+      help.commands.find((cmd) => cmd.noun === "session" && cmd.verb === "create"),
+    ).not.toHaveProperty("repeatableFlags");
     expect(commands).toEqual(
       expect.arrayContaining([
         "whoami",
         "version",
         "schema",
         "catalog list",
+        "catalog show",
         "template list",
         "template show",
         "skill list",
         "skill show",
+        "provider-install plan",
+        "provider-install apply",
+        "provider-install rollback",
+        "doctor provider-graph",
         "task create",
         "task get",
         "task list",
@@ -294,6 +645,54 @@ describe("gla current contract/schema/help (GLA-094)", () => {
     }
   });
 
+  it("provider and capsule UX docs name only executable commands unless explicitly deferred", () => {
+    const currentLeaves = new Set(
+      CLI_COMMANDS.map((command) => [command.noun, command.verb].filter(Boolean).join(" ")),
+    );
+    const currentNouns = new Set(CLI_COMMANDS.map((command) => command.noun));
+    const docs = [
+      "docs/04-capsule-assembly.md",
+      "docs/architecture/provider-graph-defaults-and-extension-plan.md",
+      "docs/architecture/provider-authoring-ux.md",
+      "docs/architecture/provider-install-update-ux.md",
+      "docs/architecture/provider-runtime-consumption-ux.md",
+    ];
+
+    for (const path of docs) {
+      const body = readFileSync(path, "utf8");
+      const commands = [
+        ...body.matchAll(/`(gla\s+[^`]+)`/g),
+        ...body.matchAll(/^\s*(gla\s+[^\n#]+)/gm),
+      ];
+      for (const match of commands) {
+        const raw = match[1]?.trim() ?? "";
+        const index = match.index ?? 0;
+        const context = body.slice(Math.max(0, index - 140), index + raw.length + 140);
+        if (
+          /\b(future|deferred|unsupported|does not expose|not part of the current executable)\b/i.test(
+            context,
+          )
+        ) {
+          continue;
+        }
+        const tokens = raw.replace(/\\$/, "").split(/\s+/);
+        const noun = tokens[1]?.replace(/[<[\](].*$/, "");
+        const verb =
+          noun !== "schema" &&
+          tokens[2] !== undefined &&
+          !tokens[2].startsWith("-") &&
+          !tokens[2].startsWith("<")
+            ? tokens[2].replace(/[<[\](].*$/, "")
+            : undefined;
+        const leaf = [noun, verb].filter(Boolean).join(" ");
+        expect(
+          currentLeaves.has(leaf) || (verb === undefined && currentNouns.has(leaf)),
+          `${path} documents non-executable command without a deferred/future marker: ${raw}`,
+        ).toBe(true);
+      }
+    }
+  });
+
   it("command-scoped machine help exposes noun, verb, flags, output, effect, and exit codes", async () => {
     const c = capture(false);
     expect(await run(["task", "create", "--help"], c.out, services())).toBe(ExitCode.OK);
@@ -332,9 +731,26 @@ describe("gla current contract/schema/help (GLA-094)", () => {
         flags: ["--timeout <dur>"],
       }),
     ]);
+
+    const template = capture(false);
+    expect(await run(["schema", "template", "show"], template.out, services())).toBe(ExitCode.OK);
+    const templateSchema = JSON.parse(template.stdout()) as {
+      commands: Array<{ fields?: string[] }>;
+    };
+    expect(templateSchema.commands[0]?.fields).toEqual(
+      expect.arrayContaining([
+        "availability",
+        "dependencies",
+        "compatibilityConstraints",
+        "packageProvenance",
+        "defaultSources",
+        "diagnostics",
+      ]),
+    );
   });
 
   it("deferred nouns, deferred auth login/logout, and ndjson fail with stable unsupported diagnostics", async () => {
+    const documentedSurfaces = new Set(DEFERRED_CLI_SURFACES.map((surface) => surface.surface));
     for (const argv of [
       ["policy", "mounts"],
       ["events"],
@@ -351,8 +767,565 @@ describe("gla current contract/schema/help (GLA-094)", () => {
       const err = JSON.parse(c.stderr()).error;
       expect(err.code).toBe("usage.unsupported");
       expect(err.detail.surface).toBeTruthy();
+      expect(documentedSurfaces).toContain(err.detail.surface);
       expect(err.detail.status).toBe("deferred");
     }
+  });
+
+  it("`--help` does not mask unknown or deferred command scopes", async () => {
+    const unknown = capture(false);
+    expect(await run(["frobnicate", "--help"], unknown.out, services())).toBe(ExitCode.USAGE);
+    expect(unknown.stdout()).toBe("");
+    expect(JSON.parse(unknown.stderr()).error.code).toBe("usage.unknown_command");
+
+    const doctor = capture(false);
+    expect(await run(["doctor", "provider-graph", "--help"], doctor.out, services())).toBe(
+      ExitCode.OK,
+    );
+    expect(JSON.parse(doctor.stdout()).command).toBe("gla doctor provider-graph");
+  });
+
+  it("executes provider authoring scaffold, validate, test, and inspect as a JSON-first flow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-provider-authoring-"));
+    try {
+      const scaffold = capture(false);
+      expect(
+        await run(
+          [
+            "provider",
+            "scaffold",
+            "--family",
+            "launcher",
+            "--id",
+            "launcher-cli-author",
+            "--summary",
+            "CLI authored launcher",
+          ],
+          scaffold.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      const skeleton = JSON.parse(scaffold.stdout());
+      expect(skeleton.manifest).toMatchObject({
+        kind: "Launcher",
+        metadata: { name: "launcher-cli-author", version: "0.1.0" },
+        spec: { family: "launcher", probe: "launcher-cli-author" },
+      });
+      expect(skeleton.changedFiles.join("\n")).not.toContain("packages/app/src/composition.ts");
+
+      const providerPath = join(dir, "provider.json");
+      writeFileSync(providerPath, JSON.stringify(skeleton), "utf8");
+
+      const validate = capture(false);
+      expect(await run(["provider", "validate", providerPath], validate.out, services())).toBe(
+        ExitCode.OK,
+      );
+      expect(JSON.parse(validate.stdout())).toMatchObject({
+        ok: true,
+        readiness: {
+          providerId: "launcher-cli-author",
+          family: "launcher",
+          availability: "not-evaluated",
+          nextUx: "operator-install-update",
+        },
+      });
+
+      const test = capture(false);
+      expect(await run(["provider", "test", providerPath], test.out, services())).toBe(ExitCode.OK);
+      expect(JSON.parse(test.stdout())).toMatchObject({
+        ok: true,
+        harness: "authoring-contract-preflight",
+        externalContractTests: "not-executed",
+        declaredContractTests: [
+          "adapters/launcher-cli-author/test/contract/launcher-cli-author.test.ts",
+        ],
+        tests: [{ id: "authoring-validation", status: "passed" }],
+      });
+
+      const maskedTest = capture(false);
+      expect(
+        await run(
+          [
+            "provider",
+            "test",
+            providerPath,
+            "--fields",
+            "declaredContractTests,externalContractTests",
+          ],
+          maskedTest.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(maskedTest.stdout())).toEqual({
+        declaredContractTests: [
+          "adapters/launcher-cli-author/test/contract/launcher-cli-author.test.ts",
+        ],
+        externalContractTests: "not-executed",
+      });
+
+      const inspect = capture(false);
+      expect(await run(["provider", "inspect", providerPath], inspect.out, services())).toBe(
+        ExitCode.OK,
+      );
+      expect(JSON.parse(inspect.stdout())).toMatchObject({
+        kind: "ProviderPackage",
+        providerId: "launcher-cli-author",
+        family: "launcher",
+        version: "0.1.0",
+        ok: true,
+        capability: { summary: "CLI authored launcher" },
+        configSchema: { type: "object", additionalProperties: false, properties: {} },
+        skills: [
+          expect.objectContaining({
+            id: "use-launcher-cli-author",
+            for: "launcher-cli-author",
+          }),
+        ],
+        docs: ["adapters/launcher-cli-author/README.md"],
+        contractTests: ["adapters/launcher-cli-author/test/contract/launcher-cli-author.test.ts"],
+        module: {
+          providerId: "launcher-cli-author",
+          family: "launcher",
+          registersFactory: true,
+          registersProbe: true,
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("executes template-package scaffold, validate, test, and inspect with consumed graph fields", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-template-authoring-"));
+    try {
+      const scaffold = capture(false);
+      expect(
+        await run(
+          [
+            "template-package",
+            "scaffold",
+            "--id",
+            "cli-template-package",
+            "--template",
+            "cli-template",
+          ],
+          scaffold.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      const skeleton = JSON.parse(scaffold.stdout());
+      expect(skeleton.manifest).toMatchObject({
+        kind: "TemplatePackage",
+        metadata: { name: "cli-template-package", version: "0.1.0" },
+        spec: {
+          defaults: {
+            "template.cli-template": {
+              Launcher: "launcher-process",
+              HumanEntrypoint: "entrypoint-novnc",
+              AgentConnector: "connector-cdp",
+              Workspace: "workspace-profile",
+              CompletionDetector: "url-watcher",
+            },
+          },
+          compatibility: {
+            requiredParts: ["entrypoint", "connector", "workspace", "detector"],
+          },
+        },
+      });
+      expect(skeleton.manifest.spec.defaults).not.toHaveProperty("cli-template");
+
+      const templatePath = join(dir, "template-package.json");
+      writeFileSync(templatePath, JSON.stringify(skeleton), "utf8");
+
+      const validate = capture(false);
+      expect(
+        await run(["template-package", "validate", templatePath], validate.out, services()),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(validate.stdout())).toMatchObject({
+        ok: true,
+        readiness: {
+          packageId: "cli-template-package",
+          templateIds: ["cli-template"],
+          availability: "not-evaluated",
+          nextUx: "operator-install-update",
+        },
+      });
+
+      const test = capture(false);
+      expect(await run(["template-package", "test", templatePath], test.out, services())).toBe(
+        ExitCode.OK,
+      );
+      expect(JSON.parse(test.stdout())).toMatchObject({
+        ok: true,
+        harness: "authoring-contract-preflight",
+        externalContractTests: "not-executed",
+        declaredContractTests: ["templates/cli-template/test/contract/cli-template.test.ts"],
+        tests: [{ id: "authoring-validation", status: "passed" }],
+      });
+
+      const maskedTest = capture(false);
+      expect(
+        await run(
+          [
+            "template-package",
+            "test",
+            templatePath,
+            "--fields",
+            "declaredContractTests,externalContractTests",
+          ],
+          maskedTest.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(maskedTest.stdout())).toEqual({
+        declaredContractTests: ["templates/cli-template/test/contract/cli-template.test.ts"],
+        externalContractTests: "not-executed",
+      });
+
+      const inspect = capture(false);
+      expect(
+        await run(["template-package", "inspect", templatePath], inspect.out, services()),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(inspect.stdout())).toMatchObject({
+        kind: "TemplatePackage",
+        packageId: "cli-template-package",
+        templateIds: ["cli-template"],
+        version: "0.1.0",
+        ok: true,
+        defaults: {
+          "template.cli-template": expect.any(Object),
+        },
+        compatibility: {
+          requiredParts: ["entrypoint", "connector", "workspace", "detector"],
+        },
+        templates: [
+          expect.objectContaining({
+            id: "cli-template",
+            requiredParts: expect.objectContaining({ launcher: "launcher-process" }),
+          }),
+        ],
+        docs: ["templates/cli-template/README.md"],
+        tests: ["templates/cli-template/test/contract/cli-template.test.ts"],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports duplicate provider and template authoring bundle diagnostics through the CLI", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-authoring-bundle-"));
+    try {
+      const provider = JSON.parse(
+        await (async () => {
+          const c = capture(false);
+          expect(
+            await run(
+              ["provider", "scaffold", "--family", "auth", "--id", "auth-cli-duplicate"],
+              c.out,
+              services(),
+            ),
+          ).toBe(ExitCode.OK);
+          return c.stdout();
+        })(),
+      );
+      const template = JSON.parse(
+        await (async () => {
+          const c = capture(false);
+          expect(
+            await run(
+              [
+                "template-package",
+                "scaffold",
+                "--id",
+                "cli-duplicate-template-package",
+                "--template",
+                "cli-duplicate-template",
+              ],
+              c.out,
+              services(),
+            ),
+          ).toBe(ExitCode.OK);
+          return c.stdout();
+        })(),
+      );
+      const duplicateTemplate = structuredClone(template);
+      duplicateTemplate.manifest.metadata.name = "cli-duplicate-template-package-b";
+      const bundlePath = join(dir, "bundle.json");
+      writeFileSync(
+        bundlePath,
+        JSON.stringify({
+          providers: [provider, provider],
+          templatePackages: [template, duplicateTemplate],
+        }),
+        "utf8",
+      );
+
+      const validate = capture(false);
+      expect(await run(["provider", "validate", bundlePath], validate.out, services())).toBe(
+        ExitCode.USAGE,
+      );
+      const report = JSON.parse(validate.stdout());
+      expect(report.ok).toBe(false);
+      expect(report.diagnostics.map((diagnostic: { code: string }) => diagnostic.code)).toEqual(
+        expect.arrayContaining([
+          "provider_author.duplicate_provider_id",
+          "provider_author.duplicate_provider_version",
+          "template_author.duplicate_template_id",
+        ]),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("executes provider install/update plan, apply, doctor, rejection, and rollback as an operator flow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-provider-install-"));
+    try {
+      const activeInventory = providerInstallInventory({
+        inventoryId: "active-empty",
+        profileId: "empty",
+        packages: [],
+        appDeployment: {},
+        capsuleDefaults: {},
+      });
+      const candidateInventory = providerInstallInventory({
+        inventoryId: "candidate-reference",
+        profileId: "single-operator",
+      });
+      const statePath = join(dir, "active.json");
+      const candidatePath = join(dir, "candidate.json");
+      writeFileSync(statePath, JSON.stringify(activeInventory), "utf8");
+      writeFileSync(candidatePath, JSON.stringify(candidateInventory), "utf8");
+
+      const plan = capture(false);
+      expect(
+        await run(
+          ["provider-install", "plan", candidatePath, "--state", statePath],
+          plan.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(plan.stdout())).toMatchObject({
+        ok: true,
+        status: "ready-to-apply",
+        changes: {
+          registryEntries: {
+            added: expect.arrayContaining([
+              expect.objectContaining({ id: "auth-webauthn", layer: "registry" }),
+              expect.objectContaining({
+                id: "cli-browser-handoff-package",
+                layer: "template-package",
+              }),
+            ]),
+          },
+          deploymentDefaults: {
+            AuthProvider: { to: "auth-webauthn" },
+            ChannelAdapter: { to: "channel-cli" },
+          },
+          capsuleDefaults: {
+            Launcher: { to: "launcher-process" },
+          },
+        },
+        doctor: {
+          status: "PASS",
+          selectedProviders: {
+            AuthProvider: "auth-webauthn",
+            Launcher: "launcher-process",
+          },
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              providerId: "entrypoint-novnc",
+              clientAssets: expect.arrayContaining([
+                expect.objectContaining({
+                  ref: "entrypoint-novnc.novnc",
+                  source: "package",
+                  status: "ready",
+                  states: expect.arrayContaining(["packaged", "read-only"]),
+                }),
+              ]),
+            }),
+          ]),
+        },
+        activation: {
+          rejectedAttemptsLeaveActiveUnchanged: true,
+          nextUx: "runtime-consumption",
+        },
+      });
+
+      const apply = capture(false);
+      expect(
+        await run(
+          ["provider-install", "apply", candidatePath, "--state", statePath],
+          apply.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      const applyResult = JSON.parse(apply.stdout());
+      expect(applyResult).toMatchObject({
+        ok: true,
+        activated: true,
+        activeSummary: {
+          profileId: "single-operator",
+          deploymentDefaults: { AuthProvider: "auth-webauthn" },
+          capsuleDefaults: { Launcher: "launcher-process" },
+        },
+        rollbackSnapshot: {
+          summary: { profileId: "empty" },
+        },
+      });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+        inventoryId: "candidate-reference",
+        profileId: "single-operator",
+      });
+
+      const doctor = capture(false);
+      expect(await run(["doctor", "provider-graph", statePath], doctor.out, services())).toBe(
+        ExitCode.OK,
+      );
+      expect(JSON.parse(doctor.stdout())).toMatchObject({
+        mode: "provider-graph-doctor",
+        inventory: {
+          deploymentDefaults: { AuthProvider: "auth-webauthn" },
+          capsuleDefaults: { Launcher: "launcher-process" },
+          clientAssets: expect.arrayContaining([
+            expect.objectContaining({
+              ref: "entrypoint-novnc.novnc",
+              source: "package",
+              status: "ready",
+            }),
+          ]),
+        },
+        doctor: {
+          status: "PASS",
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              providerId: "entrypoint-novnc",
+              clientAssets: expect.arrayContaining([
+                expect.objectContaining({
+                  ref: "entrypoint-novnc.novnc",
+                  source: "package",
+                  status: "ready",
+                }),
+              ]),
+            }),
+          ]),
+        },
+      });
+
+      const badCandidate = providerInstallInventory({
+        inventoryId: "bad-candidate",
+        packages: [
+          trustedProviderPackage(provider("auth-bad", "auth", "AuthProvider"), {
+            signed: false,
+            verified: false,
+          }),
+        ],
+        appDeployment: { AuthProvider: "auth-bad" },
+      });
+      const beforeBadApply = readFileSync(statePath, "utf8");
+      const badCandidatePath = join(dir, "bad-candidate.json");
+      writeFileSync(badCandidatePath, JSON.stringify(badCandidate), "utf8");
+      const badApply = capture(false);
+      expect(
+        await run(
+          ["provider-install", "apply", badCandidatePath, "--state", statePath],
+          badApply.out,
+          services(),
+        ),
+      ).toBe(ExitCode.USAGE);
+      expect(readFileSync(statePath, "utf8")).toBe(beforeBadApply);
+      const badResult = JSON.parse(badApply.stdout());
+      expect(badResult).toMatchObject({
+        ok: false,
+        activated: false,
+        activeSummary: { profileId: "single-operator" },
+      });
+      expect(
+        badResult.plan.diagnostics.map((diagnostic: { code: string }) => diagnostic.code),
+      ).toEqual(
+        expect.arrayContaining(["install.package_unsigned", "install.package_unverifiable"]),
+      );
+
+      const invalidSnapshotPath = join(dir, "invalid-rollback.json");
+      writeFileSync(invalidSnapshotPath, JSON.stringify({}), "utf8");
+      const beforeInvalidRollback = readFileSync(statePath, "utf8");
+      const invalidRollback = capture(false);
+      expect(
+        await run(
+          ["provider-install", "rollback", invalidSnapshotPath, "--state", statePath],
+          invalidRollback.out,
+          services(),
+        ),
+      ).toBe(ExitCode.USAGE);
+      expect(readFileSync(statePath, "utf8")).toBe(beforeInvalidRollback);
+      expect(JSON.parse(invalidRollback.stderr()).error).toMatchObject({
+        code: "usage.bad_argument",
+        message: "provider install rollback snapshot is invalid",
+      });
+
+      const snapshotPath = join(dir, "rollback.json");
+      writeFileSync(snapshotPath, JSON.stringify(applyResult.rollbackSnapshot), "utf8");
+      const rollback = capture(false);
+      expect(
+        await run(
+          ["provider-install", "rollback", snapshotPath, "--state", statePath],
+          rollback.out,
+          services(),
+        ),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(rollback.stdout())).toMatchObject({
+        ok: true,
+        restoredSummary: { profileId: "empty" },
+      });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+        inventoryId: "active-empty",
+        profileId: "empty",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("`gla help` is a strict root-help alias and does not mask bad inputs", async () => {
+    for (const [argv, expectedCode] of [
+      [["help", "--bogus"], "usage.bad_flag"],
+      [["help", "task", "create", "--bogus"], "usage.bad_flag"],
+      [["help", "--fields", "missing"], "usage.bad_field"],
+      [["help", "task", "create"], "usage.bad_argument"],
+    ] as const) {
+      const c = capture(false);
+      const code = await run(argv, c.out, services());
+      expect(code, argv.join(" ")).toBe(ExitCode.USAGE);
+      expect(c.stdout()).toBe("");
+      expect(JSON.parse(c.stderr()).error.code).toBe(expectedCode);
+    }
+  });
+
+  it("scoped `--help` still validates command-contract flags, fields, and extra args", async () => {
+    for (const [argv, expectedCode] of [
+      [["version", "--bogus", "--help"], "usage.bad_flag"],
+      [["task", "create", "--intent", "--help"], "usage.bad_flag"],
+      [["task", "create", "unexpected", "--help"], "usage.bad_argument"],
+      [["task", "create", "--fields", "missing", "--help"], "usage.bad_field"],
+    ] as const) {
+      const c = capture(false);
+      expect(await run(argv, c.out, services())).toBe(ExitCode.USAGE);
+      expect(c.stdout()).toBe("");
+      expect(JSON.parse(c.stderr()).error.code).toBe(expectedCode);
+    }
+
+    const help = capture(false);
+    expect(await run(["catalog", "show", "--help"], help.out, services())).toBe(ExitCode.OK);
+    expect(JSON.parse(help.stdout()).command).toBe("gla catalog show");
+  });
+
+  it("schema scoped `--help` validates field masks against the schema command contract", async () => {
+    const c = capture(false);
+    expect(
+      await run(["schema", "handoff", "wait", "--fields", "missing", "--help"], c.out, services()),
+    ).toBe(ExitCode.USAGE);
+    expect(c.stdout()).toBe("");
+    expect(JSON.parse(c.stderr()).error.code).toBe("usage.bad_field");
   });
 
   it("--fields trims successful JSON results and --quiet does not suppress results", async () => {
@@ -426,6 +1399,35 @@ describe("gla current contract/schema/help (GLA-094)", () => {
     const list = capture(false);
     await run(["task", "list"], list.out, services(bridge));
     expect(JSON.parse(list.stdout())).toEqual([]);
+  });
+
+  it("extra positional arguments fail from the command contract before changing bridge state", async () => {
+    const bridge = new AgentBridge();
+    const bad = capture(false);
+    expect(
+      await run(["task", "create", "unexpected", "--intent", "x"], bad.out, services(bridge)),
+    ).toBe(ExitCode.USAGE);
+    expect(bad.stdout()).toBe("");
+    const err = JSON.parse(bad.stderr()).error;
+    expect(err.code).toBe("usage.bad_argument");
+    expect(err.detail.command).toBe("gla task create");
+    expect(err.detail.expected).toEqual([]);
+
+    const list = capture(false);
+    await run(["task", "list"], list.out, services(bridge));
+    expect(JSON.parse(list.stdout())).toEqual([]);
+  });
+
+  it("schema scoped help rejects too many positionals from the schema command contract", async () => {
+    const c = capture(false);
+    expect(await run(["schema", "handoff", "wait", "extra"], c.out, services())).toBe(
+      ExitCode.USAGE,
+    );
+    expect(c.stdout()).toBe("");
+    const err = JSON.parse(c.stderr()).error;
+    expect(err.code).toBe("usage.bad_argument");
+    expect(err.detail.command).toBe("gla schema");
+    expect(err.detail.expected).toEqual(["[noun]", "[verb]"]);
   });
 
   it("value-bearing command flags without values fail before changing bridge state", async () => {
@@ -698,6 +1700,205 @@ describe("gla catalog list (GLA-017 AC#3)", () => {
       "launcher-process",
     ]);
   });
+
+  it("`catalog show <provider-id>` returns provider detail with graph facts", async () => {
+    const c = capture(false);
+    expect(await run(["catalog", "show", "launcher-process"], c.out, services())).toBe(ExitCode.OK);
+    const show = JSON.parse(c.stdout());
+    expect(show).toMatchObject({
+      name: "launcher-process",
+      family: "launcher",
+      available: true,
+    });
+    expect(show.config_schema).toBeDefined();
+    expect(show.requires[0]).toMatchObject({ dependency: "browser-runtime" });
+    expect(show.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "provider.available" })]),
+    );
+  });
+
+  it("`catalog show <unknown>` exits 5 with a JSON error on stderr", async () => {
+    const c = capture(false);
+    expect(await run(["catalog", "show", "does-not-exist"], c.out, services())).toBe(
+      ExitCode.NOT_FOUND,
+    );
+    expect(c.stdout()).toBe("");
+    expect(JSON.parse(c.stderr()).error.code).toBe("catalog.unknown");
+  });
+});
+
+describe("gla runtime provider consumption (GLA-110.10)", () => {
+  it("lists and inspects capsule providers, shows graph defaults, and dry-runs a capsule override", async () => {
+    const bridge = runtimeBridge();
+    const list = capture(false);
+    expect(
+      await run(["catalog", "list", "--kind", "launcher", "--available"], list.out, {
+        bridge,
+      }),
+    ).toBe(ExitCode.OK);
+    expect(JSON.parse(list.stdout())).toEqual([
+      expect.objectContaining({
+        name: "launcher-process",
+        family: "launcher",
+        defaultSource: expect.objectContaining({
+          source: "base-profile-select",
+          providerId: "launcher-process",
+        }),
+      }),
+    ]);
+
+    const provider = capture(false);
+    expect(await run(["catalog", "show", "launcher-process"], provider.out, { bridge })).toBe(
+      ExitCode.OK,
+    );
+    expect(JSON.parse(provider.stdout())).toMatchObject({
+      name: "launcher-process",
+      family: "launcher",
+      available: true,
+      defaultSource: {
+        source: "base-profile-select",
+        providerId: "launcher-process",
+      },
+      requires: [expect.objectContaining({ dependency: "browser-runtime", status: "bound" })],
+      diagnostics: [expect.objectContaining({ code: "provider.available" })],
+    });
+
+    const template = capture(false);
+    expect(await run(["template", "show", "browser-handoff"], template.out, { bridge })).toBe(
+      ExitCode.OK,
+    );
+    const templateShow = JSON.parse(template.stdout());
+    expect(templateShow.parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          part: "launcher",
+          provider: "launcher-process",
+          defaultSource: expect.objectContaining({
+            source: "template-package-default",
+            templatePackage: "runtime-browser-handoff-package",
+          }),
+        }),
+        expect.objectContaining({
+          part: "detector",
+          provider: "url-watcher",
+          defaultSource: expect.objectContaining({
+            source: "template-package-default",
+            templatePackage: "runtime-browser-handoff-package",
+          }),
+        }),
+      ]),
+    );
+    expect(templateShow.compatibleProviders.connector).toEqual(
+      expect.arrayContaining(["connector-cdp"]),
+    );
+    expect(templateShow.compatibleProviders.detector).toEqual(
+      expect.arrayContaining(["url-watcher"]),
+    );
+    expect(templateShow.defaultSources).toMatchObject({
+      launcher: { source: "template-package-default", providerId: "launcher-process" },
+      detector: { source: "template-package-default", providerId: "url-watcher" },
+    });
+
+    const dir = mkdtempSync(join(tmpdir(), "gla-runtime-provider-"));
+    try {
+      const path = specFile(dir, {
+        ...OK_ASSEMBLY,
+        spec: {
+          ...OK_ASSEMBLY.spec,
+          connector: { use: "connector-cdp" },
+          detectors: [{ use: "url-watcher", params: { complete_on: "/dashboard" } }],
+        },
+      });
+      const dryRun = capture(false);
+      expect(
+        await run(["session", "create", "-f", path, "--dry-run"], dryRun.out, { bridge }),
+      ).toBe(ExitCode.OK);
+      expect(JSON.parse(dryRun.stdout())).toMatchObject({
+        decision: "accept",
+        dry_run: true,
+        capsule_plan: {
+          providers: expect.arrayContaining([
+            expect.objectContaining({ role: "connector", providerId: "connector-cdp" }),
+            expect.objectContaining({ role: "detector", providerId: "url-watcher" }),
+          ]),
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces runtime provider diagnostics for not-installed, evidence-missing, incompatible, and ambiguous-default cases", async () => {
+    const missing = capture(false);
+    expect(
+      await run(["catalog", "show", "provider-not-installed"], missing.out, {
+        bridge: runtimeBridge(),
+      }),
+    ).toBe(ExitCode.NOT_FOUND);
+    expect(JSON.parse(missing.stderr()).error.code).toBe("catalog.unknown");
+
+    const evidence = capture(false);
+    expect(
+      await run(["catalog", "show", "launcher-process"], evidence.out, {
+        bridge: runtimeBridge({ dependencyBindings: [] }),
+      }),
+    ).toBe(ExitCode.OK);
+    const evidenceShow = JSON.parse(evidence.stdout());
+    expect(evidenceShow).toMatchObject({
+      availability: "unavailable",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.dependency_unavailable",
+          dependency: "browser-runtime",
+          dependencyStatus: "unbound",
+        }),
+      ]),
+    });
+
+    const dir = mkdtempSync(join(tmpdir(), "gla-runtime-provider-negative-"));
+    try {
+      const path = specFile(dir, {
+        ...OK_ASSEMBLY,
+        spec: {
+          ...OK_ASSEMBLY.spec,
+          detectors: [{ use: "connector-cdp" }],
+        },
+      });
+      const incompatible = capture(false);
+      expect(
+        await run(["session", "create", "-f", path, "--dry-run"], incompatible.out, {
+          bridge: runtimeBridge(),
+        }),
+      ).toBe(ExitCode.POLICY);
+      const error = JSON.parse(incompatible.stderr()).error;
+      expect(error).toMatchObject({
+        code: "policy.denied",
+        detail: {
+          part: "detector",
+          use: "connector-cdp",
+          compatibleWith: expect.arrayContaining(["url-watcher"]),
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const ambiguous = capture(false);
+    expect(
+      await run(["template", "show", "browser-handoff"], ambiguous.out, {
+        bridge: runtimeBridge({ compatible: false }),
+      }),
+    ).toBe(ExitCode.OK);
+    expect(JSON.parse(ambiguous.stdout())).toMatchObject({
+      availability: "unavailable",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.compatibility_ambiguous",
+          detail: { part: "workspace" },
+        }),
+      ]),
+    });
+  });
 });
 
 describe("gla skill", () => {
@@ -842,6 +2043,60 @@ describe("gla session create — dry-run (admission only)", () => {
       expect(code).toBe(ExitCode.POLICY); // 3
       expect(JSON.parse(c.stderr()).error.code).toBe("policy.denied");
       expect(c.stderr()).toMatch(/complete_on/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("assembly files cannot smuggle app infrastructure provider selections", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gla-cli-"));
+    try {
+      const path = specFile(dir, {
+        ...OK_ASSEMBLY,
+        spec: {
+          ...OK_ASSEMBLY.spec,
+          auth: { use: "auth-webauthn" },
+          authProvider: { use: "authentik" },
+          AuthProvider: { use: "auth-webauthn" },
+          channel: { use: "channel-cli" },
+          ChannelAdapter: { use: "channel-cli" },
+          secretStore: { use: "secret-store-reference" },
+          SecretStore: { use: "secret-store-reference" },
+        },
+      });
+      const c = capture(false);
+      const code = await run(["session", "create", "-f", path, "--dry-run"], c.out, services());
+      expect(code).toBe(ExitCode.POLICY);
+      const error = JSON.parse(c.stderr()).error;
+      expect(error.code).toBe("policy.denied");
+      expect(error.detail.defects.map((defect: { path: string }) => defect.path)).toEqual(
+        expect.arrayContaining([
+          "spec.auth",
+          "spec.authProvider",
+          "spec.AuthProvider",
+          "spec.channel",
+          "spec.ChannelAdapter",
+          "spec.secretStore",
+          "spec.SecretStore",
+        ]),
+      );
+      const flag = capture(false);
+      expect(
+        await run(
+          [
+            "session",
+            "create",
+            "--template",
+            "browser-handoff",
+            "--auth-provider",
+            "auth-webauthn",
+            "--dry-run",
+          ],
+          flag.out,
+          services(),
+        ),
+      ).toBe(ExitCode.USAGE);
+      expect(JSON.parse(flag.stderr()).error.code).toBe("usage.bad_flag");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

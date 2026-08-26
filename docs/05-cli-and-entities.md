@@ -88,16 +88,31 @@ gla
 ├── schema [<noun> [<verb>]]
 ├── version
 ├── catalog list [--kind <k>] [--available]
+├── catalog show <id>
 ├── template list [--available]
 ├── template show <id>
 ├── skill list [--for <template>]
 ├── skill show <id>
+├── provider scaffold --family <family> --id <provider-id> [--version <version>] [--summary <text>]
+├── provider validate <path>
+├── provider test <path>
+├── provider inspect <path>
+├── template-package scaffold --id <package-id> [--template <template-id>] [--launcher <id>]
+│       [--entrypoint <id>] [--connector <id>] [--workspace <id>] [--detector <id>]
+│       [--open-parts <parts>] [--version <version>] [--summary <text>]
+├── template-package validate <path>
+├── template-package test <path>
+├── template-package inspect <path>
+├── provider-install plan <path> [--state <path>]
+├── provider-install apply <path> --state <path>
+├── provider-install rollback <snapshot> --state <path>
+├── doctor provider-graph <path>
 ├── task create [--intent <label>] [--recipient <ref>]
 ├── task get <id>
 ├── task list [--state <s>]
 ├── task complete <id>
 ├── task revoke <id>
-├── session create [--task <id>] [--intent <label>] (-f <assembly.json> | --template <id> [parts...])
+├── session create [--task <id>] [--intent <label>] [--recipient <ref>] (-f <assembly.json> | --template <id> [parts...])
 │       [--mount <host>:<target>:<ro|rw> ...] [--ttl <dur>] [--dry-run]
 ├── session get <id>
 ├── session list [--task <id>] [--state <s>]
@@ -216,10 +231,11 @@ One row per leaf command. The **Group** column is blank when it carries from the
 | `self` | `gla whoami` | 1. Resolve this agent's `agent-authority` capability from the connection<br>2. Print identity, matched `AuthorityProfile`, and the allowed operation set<br>3. *Read-only* |
 |  | `gla schema [<noun> [<verb>]]` | 1. Emit the machine-readable surface — every command, its args/flags with types, output schema, and exit codes<br>2. Scope to a noun/verb when given<br>3. *Read-only*; the agent introspects instead of reading docs |
 |  | `gla version` | 1. Print the client version + the connected server's version/build<br>2. *Read-only* |
-| `catalog` | `gla catalog list [--kind <k>] [--available]` | 1. Query the Catalog index<br>2. Filter by entity `--kind`; `--available` drops entities whose dependencies are unbound<br>3. Print entities with system-derived availability<br>4. *Read-only* |
+| `catalog` | `gla catalog list [--kind <k>] [--available]` | 1. Query the Catalog index<br>2. Filter by entity kind or provider family (`launcher`, `entrypoint`, `connector`, `workspace`, `detector`, etc.); `--available` drops entities whose dependencies are unbound<br>3. Print entities with system-derived availability, dependency evidence, provenance, selected-default source, and diagnostics when graph-backed<br>4. *Read-only* |
+|  | `gla catalog show <id>` | 1. Read one provider/template catalog entity from the active graph<br>2. Print family, capability, system-derived availability, config schema, dependency evidence, provenance, selected-default source, browser-client asset provenance/readiness, compatible providers/template parts, and diagnostics<br>3. Exit 5 if unknown<br>4. *Read-only* |
 | `policy` | `gla policy mounts` | 1. Print the host-mount policy this install applies to the agent — the allowed-set (permitted roots), the catastrophic denylist, and the default mode<br>2. *Read-only*; the agent composes mounts within this bound |
 | `template` | `gla template list` | 1. List `CapsuleTemplate` entities from the Catalog index<br>2. *Read-only* |
-|  | `gla template show <id>` | 1. Resolve the template<br>2. Print its required parts (entrypoint / connector / workspace / detector options), compatible providers derived from registered provider manifests, each backing provider/family, each provider's dependency binding status, and template-level dependency evidence such as `edge-proxy`<br>3. Exit 5 if unknown<br>4. *Read-only* |
+|  | `gla template show <id>` | 1. Resolve the template<br>2. Print its required parts (entrypoint / connector / workspace / detector options), compatible providers derived from registered provider manifests, each backing provider/family, each part's default source, each provider's dependency binding status, and template-level graph diagnostics such as evidence-missing or ambiguous compatibility<br>3. Exit 5 if unknown<br>4. *Read-only* |
 | `skill` | `gla skill list [--for <template>]` | 1. List registered skills, optionally those relevant to a template<br>2. *Read-only* |
 |  | `gla skill show <id>` | 1. Resolve the skill; print the SKILL.md body to stdout<br>2. Exit 5 if unknown<br>3. *Read-only* |
 | `task` | `gla task create [--intent <label>] [--recipient <ref>]` | 1. Open a `Task`; mint its `task` capability (parent = `agent-authority`)<br>2. Record the intent label + recipient binding<br>3. Print `{task_id, state:active}`<br>4. *Mutates*; accepts an idempotency key so retries are safe |
@@ -227,7 +243,7 @@ One row per leaf command. The **Group** column is blank when it carries from the
 |  | `gla task list [--state <s>]` | 1. List tasks visible to this authority, filtered by `--state`<br>2. *Read-only* |
 |  | `gla task complete <id>` | 1. Drive the Task to `completed`<br>2. Tear down its sessions + capsules; revoke descendant capabilities<br>3. Exit 7 on an invalid state transition<br>4. *Mutates* |
 |  | `gla task revoke <id>` | 1. Abort the Task; same teardown as `complete` but a non-success terminal state<br>2. *Mutates* |
-| `session` | `gla session create [--task <id>] [--intent <label>] ( -f <spec> \| --template <id> [parts…] ) [--mount <h>:<t>:<mode> …] [--ttl <dur>] [--dry-run]` | 1. Resolve the task: use `--task`, else auto-create (or attach to) an implicit single-session task<br>2. Assemble the spec from `-f` or the part flags; collect `--mount` entries (mode default `ro`, target default `/work/<basename>`)<br>3. Submit to Admission (mutate defaults + canonicalize mount paths → validate policy / capability / catalog / identity, and each mount vs the allowed-set + denylist + mode + the launcher's mount capability — all offline)<br>4. `--dry-run`: print accept/reject and stop (exit 3 on reject)<br>5. On accept: provision the capsule via the Worker, mounting host paths as the agent's own uid; mint the `agent-connector` capability<br>6. Print `{session_id, state, capsule, connector:{type, cdp_url\|path, secret_ref}}`<br>7. Exit 3 (policy, incl. `mount.denied`) / 4 (capability) / 5 (`mount.not_found`) / 7 (`mount.conflict`) / 8 (dependency, incl. `mount.unsupported` by the launcher)<br>8. *Mutates* |
+| `session` | `gla session create [--task <id>] [--intent <label>] [--recipient <ref>] ( -f <spec> \| --template <id> [parts…] ) [--mount <h>:<t>:<mode> …] [--ttl <dur>] [--dry-run]` | 1. Resolve the task: use `--task`, else auto-create (or attach to) an implicit single-session task with the optional `--intent` and `--recipient` labels<br>2. Assemble the spec from `-f` or the capsule part flags `--launcher`, `--entrypoint`, `--connector`, `--workspace`, and `--detector`; collect `--mount` entries (mode default `ro`, target default `/work/<basename>`)<br>3. Reject app-infrastructure provider selection (`AuthProvider`, `ChannelAdapter`, `SecretStore`, or equivalent flags) from runtime session creation<br>4. Submit to Admission Resolver (mutate defaults + canonicalize mount paths → validate policy / capability / catalog / identity, and each mount vs the allowed-set + denylist + mode + the launcher's mount capability — all offline)<br>5. `--dry-run`: print accept/reject and stop (exit 3 on reject)<br>6. On accept: provision the capsule via the Worker, mounting host paths as the agent's own uid; mint the `agent-connector` capability<br>7. Print `{session_id, state, capsule_plan, capsule, connector:{type, cdp_url\|path, secret_ref}}`<br>8. Exit 3 (policy, incl. incompatible provider or `mount.denied`) / 4 (capability) / 5 (`catalog.unknown`, `mount.not_found`) / 7 (`mount.conflict`) / 8 (dependency, incl. unavailable/evidence-missing provider or `mount.unsupported` by the launcher)<br>9. *Mutates* |
 |  | `gla session get <id>` | 1. Read the Session aggregate + state<br>2. Exit 5 if unknown<br>3. *Read-only* |
 |  | `gla session list [--task <id>] [--state <s>]` | 1. List sessions, filtered<br>2. *Read-only* |
 |  | `gla session connector <id>` | 1. Re-emit the agent-connector for a live session so a crashed agent re-attaches its CDP client<br>2. Prints a `secret_ref`, never a raw secret<br>3. Exit 7 if the session has no live capsule<br>4. *Read-only* |

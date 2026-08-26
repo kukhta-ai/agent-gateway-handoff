@@ -7,6 +7,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   statSync,
@@ -77,7 +78,7 @@ export const DAEMON_PERSISTED_RECORDS: readonly PersistedRecordClassification[] 
     disposal: "delete or replace on re-enrollment/removal with redacted audit context",
   },
   {
-    kind: "provider.webauthn.credentials",
+    kind: "provider.webauthn.v1.credentials",
     owner: "@gla/auth-webauthn",
     classification: "sensitive",
     recovery: "restore credential public key/counter before WebAuthn step-up",
@@ -85,7 +86,7 @@ export const DAEMON_PERSISTED_RECORDS: readonly PersistedRecordClassification[] 
     disposal: "delete on re-enrollment/removal; never expose raw credential details in diagnostics",
   },
   {
-    kind: "provider.webauthn.challenges",
+    kind: "provider.webauthn.v1.challenges",
     owner: "@gla/auth-webauthn",
     classification: "secret",
     recovery: "unexpired challenges may complete; stale or wrong-kind challenges fail closed",
@@ -93,7 +94,7 @@ export const DAEMON_PERSISTED_RECORDS: readonly PersistedRecordClassification[] 
     disposal: "delete on claim, completion, expiry, or incident cleanup",
   },
   {
-    kind: "provider.authentik.subjects",
+    kind: "provider.authentik.v1.subjects",
     owner: "@gla/auth-authentik",
     classification: "sensitive",
     recovery: "restore stable userId-to-sub binding exactly; mismatch fails closed",
@@ -101,12 +102,21 @@ export const DAEMON_PERSISTED_RECORDS: readonly PersistedRecordClassification[] 
     disposal: "delete on re-enrollment/removal or identity binding incident",
   },
   {
-    kind: "provider.authentik.attempts",
+    kind: "provider.authentik.v1.attempts",
     owner: "@gla/auth-authentik",
     classification: "secret",
     recovery: "unexpired pending OIDC attempts may complete once; consumed/expired attempts refuse",
     retention: "attempt TTL plus replay tombstone margin",
     disposal: "delete on claim, expiry, failure, or incident cleanup",
+  },
+  {
+    kind: "provider.secret-store-reference.v1.refs",
+    owner: "@gla/provider-set-reference",
+    classification: "secret",
+    recovery: "restore opaque secret-ref bindings before any provider injects a referenced value",
+    retention:
+      "until the owning task/session/provider cleanup deletes the ref or retention expires",
+    disposal: "delete secret-ref bindings without exposing raw values in diagnostics",
   },
   {
     kind: "capability.signing-key",
@@ -311,6 +321,15 @@ export class DaemonStateRoot {
 
   recordPath(kind: string): string {
     return join(this.root, "records", `${safeKind(kind)}.json`);
+  }
+
+  /** Existing daemon record kinds, optionally filtered by prefix, for recovery preflight checks. */
+  recordKinds(prefix = ""): string[] {
+    return readdirSync(join(this.root, "records"))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => name.slice(0, -".json".length))
+      .filter((kind) => kind.startsWith(prefix))
+      .sort();
   }
 }
 

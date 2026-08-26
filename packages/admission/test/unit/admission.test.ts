@@ -9,6 +9,7 @@ import { homedir, tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import type {
   Capability,
+  ConfigSchema,
   PolicyContext,
   PolicyPort,
   RecipientRef,
@@ -29,6 +30,18 @@ import {
   glaStateDir,
 } from "../../src/index.js";
 
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
+
 // ── A controllable test catalog (so each rejection branch is reachable) ──────────────────────────
 const BROWSER_DEFAULTS: TemplateDefaults = {
   template: "browser-handoff",
@@ -46,7 +59,7 @@ const BROWSER_DEFAULTS: TemplateDefaults = {
   openParts: ["entrypoint", "connector", "detector"],
   compatibleProviders: {
     entrypoint: ["entrypoint-novnc"],
-    connector: ["connector-cdp"],
+    connector: ["connector-cdp", "connector-alt"],
     detector: ["url-watcher", "user-done"],
   },
 };
@@ -81,7 +94,9 @@ function fakeCatalog(opts: FakeCatalogOpts = {}): AdmissionCatalogPort {
     "url-watcher": {
       name: "url-watcher",
       available: true,
-      config_schema: { complete_on: { type: "string", required: true, pattern: "^/" } },
+      config_schema: objectSchema({ complete_on: { type: "string", pattern: "^/" } }, [
+        "complete_on",
+      ]),
     },
   };
   return {
@@ -177,6 +192,92 @@ describe("AdmissionService.admit — ACCEPT path (GLA-020/021)", () => {
       await agentAuthority(),
     );
     expect(res.decision).toBe("accept");
+  });
+
+  it("returns a resolved capsule plan with provider ids, config, diagnostics, and evidence", async () => {
+    const catalog = fakeCatalog({
+      providers: {
+        "connector-cdp": {
+          name: "connector-cdp",
+          available: true,
+          availability: "available",
+          resolvedConfig: { transport: "cdp", limits: { sessions: 1 } },
+          config_schema: objectSchema({
+            limits: {
+              type: "object",
+              additionalProperties: false,
+              properties: { tabs: { type: "number" } },
+            },
+          }),
+          dependencies: [{ dependency: "browser-runtime", status: "available" }],
+          diagnostics: [{ code: "graph.provider_selected", providerId: "connector-cdp" }],
+        },
+      },
+    });
+    const res = admission(policyAllowAll(), catalog).admit(
+      proposal({ connector: { use: "connector-cdp", params: { limits: { tabs: 2 } } } }),
+      await agentAuthority(),
+    );
+
+    expect(res.decision).toBe("accept");
+    if (res.decision !== "accept") return;
+    expect(res.capsulePlan.template).toBe("browser-handoff");
+    expect(res.capsulePlan.providers.map((provider) => provider.role)).toEqual(
+      expect.arrayContaining(["launcher", "workspace", "connector", "entrypoint", "detector"]),
+    );
+    expect(res.capsulePlan.providers.find((provider) => provider.role === "connector")).toEqual({
+      role: "connector",
+      providerId: "connector-cdp",
+      config: { transport: "cdp", limits: { tabs: 2 } },
+      available: true,
+      availability: "available",
+      evidenceRequirements: [{ dependency: "browser-runtime", status: "available" }],
+      diagnostics: [{ code: "graph.provider_selected", providerId: "connector-cdp" }],
+    });
+  });
+
+  it("does not let an unavailable default provider veto a compatible open-part override", async () => {
+    const catalog = fakeCatalog({
+      templateStatus: {
+        available: true,
+        availability: "available",
+        diagnostics: [
+          {
+            code: "provider.unavailable",
+            part: "connector",
+            provider: "connector-cdp",
+            family: "connector",
+          },
+        ],
+      },
+      providers: {
+        "connector-cdp": {
+          name: "connector-cdp",
+          available: false,
+          availability: "unavailable",
+          diagnostics: [{ code: "graph.dependency_unavailable", provider: "connector-cdp" }],
+        },
+        "connector-alt": {
+          name: "connector-alt",
+          available: true,
+          availability: "available",
+        },
+      },
+    });
+
+    const res = admission(policyAllowAll(), catalog).admit(
+      proposal({ connector: { use: "connector-alt" } }),
+      await agentAuthority(),
+    );
+
+    expect(res.decision).toBe("accept");
+    if (res.decision !== "accept") return;
+    expect(res.resolved.spec.connector).toEqual({ use: "connector-alt" });
+    expect(res.capsulePlan.providers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "connector", providerId: "connector-alt" }),
+      ]),
+    );
   });
 });
 
@@ -291,6 +392,17 @@ describe("AdmissionService.admit — each rejection class → its stable code + 
     expect(JSON.stringify(res.error.detail)).toMatch(/complete_on/);
   });
 
+  it("params for a provider with no config_schema are rejected by the closed empty schema", async () => {
+    const res = admission(policyAllowAll()).admit(
+      proposal({ entrypoints: [{ use: "entrypoint-novnc", params: { unexpected: true } }] }),
+      await agentAuthority(),
+    );
+    expect(res.decision).toBe("reject");
+    if (res.decision !== "reject") return;
+    expect(res.code).toBe("policy.denied");
+    expect(JSON.stringify(res.error.detail)).toMatch(/unexpected/);
+  });
+
   it("MOUNT denied (catastrophic denylist) → mount.denied → exit 3", async () => {
     const res = admission(policyAllowAll()).admit(
       proposal({ mounts: [{ host: "/var/run/docker.sock", mode: "rw" }] }),
@@ -358,6 +470,42 @@ describe("AdmissionService.admit — each rejection class → its stable code + 
     if (res.decision !== "reject") return;
     expect(res.code).toBe("catalog.unknown");
     expect(res.exitCode).toBe(5);
+  });
+
+  it("MISSING template default for a required capsule part → catalog.unavailable with a missing-default diagnostic", async () => {
+    const catalog = fakeCatalog();
+    const missingConnectorCatalog: AdmissionCatalogPort = {
+      ...catalog,
+      templateDefaults: (id) => {
+        const defaults = catalog.templateDefaults(id);
+        if (defaults === undefined) {
+          return undefined;
+        }
+        const { connector: omittedConnector, ...withoutConnector } = defaults;
+        void omittedConnector;
+        return {
+          ...withoutConnector,
+          requiredParts: ["launcher", "workspace", "connector", "entrypoint", "detector"],
+        };
+      },
+    };
+    const res = new AdmissionService({
+      policy: policyAllowAll(),
+      catalog: missingConnectorCatalog,
+    }).admit(proposal(), await agentAuthority());
+
+    expect(res.decision).toBe("reject");
+    if (res.decision !== "reject") return;
+    expect(res.code).toBe("catalog.unavailable");
+    expect(res.exitCode).toBe(8);
+    expect(res.error.detail).toMatchObject({
+      diagnostics: [
+        expect.objectContaining({
+          code: "template.missing_default",
+          part: "connector",
+        }),
+      ],
+    });
   });
 });
 

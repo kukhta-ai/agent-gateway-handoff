@@ -31,16 +31,26 @@ export const ENTRYPOINT_NOVNC_MODULE = "@gla/entrypoint-novnc" as const;
 /** Ring classification from the architecture baseline (informational). */
 export const ENTRYPOINT_NOVNC_RING = "adapter" as const;
 /** Provider-owned asset reference the gateway can mount under its generic client-asset host. */
-export const NOVNC_CLIENT_ASSET_REF = "novnc" as const;
+export const NOVNC_CLIENT_ASSET_REF = "entrypoint-novnc.novnc" as const;
 /** Browser-client kind understood by the gateway handoff page as an RFB-compatible web client. */
 export const RFB_WEB_CLIENT_KIND = "rfb-web-client" as const;
 
 /** Generic static-client asset mount consumed structurally by the gateway. */
 export interface EntrypointClientAssetMount {
+  /** Runtime provider id that owns the browser assets and namespaces the ref. */
+  readonly providerId: string;
   /** Provider-owned asset reference, used only as a same-origin URL segment. */
   readonly ref: string;
+  /** Provenance category surfaced by catalog/doctor diagnostics. */
+  readonly source?: "package" | "local-override" | "wpm-evidence";
+  /** Package that supplied packaged assets, when known. */
+  readonly package?: string;
+  /** Environment variable that selected a local override root, when applicable. */
+  readonly env?: string;
   /** Local read-only directory containing browser assets for this client. */
   readonly root: string;
+  /** Reviewed declaration that the asset root is immutable/read-only during gateway serving. */
+  readonly readOnly: true;
   /** Cache policy for these assets. noVNC docs recommend revalidation during upgrades. */
   readonly cacheControl?: string;
 }
@@ -66,19 +76,33 @@ export function novncClientDescriptor(): RuntimeClientDescriptor {
 export function novncClientAssetMounts(
   env: NodeJS.ProcessEnv = process.env,
 ): EntrypointClientAssetMount[] {
-  const roots = [...(env.GLA_NOVNC_WEB_ROOT?.split(":") ?? []), bundledNovncRoot()].flatMap(
-    (root) => {
-      const trimmed = root?.trim();
-      return trimmed === undefined || trimmed.length === 0 ? [] : [resolvePath(trimmed)];
-    },
-  );
-  return [...new Set(roots)]
-    .filter((root) => existsSync(root))
-    .map((root) => ({
-      ref: NOVNC_CLIENT_ASSET_REF,
-      root,
-      cacheControl: "no-cache",
-    }));
+  const overrideRoots = (env.GLA_NOVNC_WEB_ROOT?.split(":") ?? []).flatMap((root) => {
+    const trimmed = root.trim();
+    return trimmed.length === 0 ? [] : [resolvePath(trimmed)];
+  });
+  const uniqueOverrides = [...new Set(overrideRoots)];
+  const selectedOverride = uniqueOverrides.find((root) => existsSync(root)) ?? uniqueOverrides[0];
+  const bundledRoot = bundledNovncRoot();
+  const selected =
+    selectedOverride !== undefined
+      ? { root: selectedOverride, source: "local-override" as const, env: "GLA_NOVNC_WEB_ROOT" }
+      : bundledRoot !== undefined
+        ? { root: bundledRoot, source: "package" as const, package: "@novnc/novnc" }
+        : undefined;
+  return selected === undefined
+    ? []
+    : [
+        {
+          providerId: "entrypoint-novnc",
+          ref: NOVNC_CLIENT_ASSET_REF,
+          root: selected.root,
+          source: selected.source,
+          ...(selected.env !== undefined ? { env: selected.env } : {}),
+          ...(selected.package !== undefined ? { package: selected.package } : {}),
+          readOnly: true as const,
+          cacheControl: "no-cache",
+        },
+      ];
 }
 
 function bundledNovncRoot(): string | undefined {
@@ -134,7 +158,9 @@ export class EntrypointNovncAdapter implements HumanEntrypointPort {
       resourceId: endpoint.resourceId,
       provider: endpoint.provider,
       client:
-        endpoint.client?.kind === RFB_WEB_CLIENT_KIND ? endpoint.client : novncClientDescriptor(),
+        endpoint.client?.kind === RFB_WEB_CLIENT_KIND
+          ? { ...endpoint.client, ref: NOVNC_CLIENT_ASSET_REF }
+          : novncClientDescriptor(),
       transport: { kind: "reverse-proxy", protocol: "websocket", upstream: novnc },
     };
   }

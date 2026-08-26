@@ -266,7 +266,7 @@ export function authAssuranceProviderDiagnostic(opts: {
 }
 
 function selectedServeAuthProvider(opts: ServeOptions): AuthProviderKind | undefined {
-  return opts.authProvider ?? opts.providerProfile?.auth ?? opts.providerSet?.profile.auth;
+  return opts.authProvider ?? opts.appDeploymentConfig?.auth;
 }
 
 function authDiagnosticsForRequest(
@@ -401,9 +401,19 @@ export async function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
   // ── Compose ONE shared app state: the provisioning bridge + the handoff + completion pipeline. Every CLI
   //    call over the bridge socket runs against THIS bridge (the live capsules/grants — shared state).
   const stack = createProvisioningBridge({
-    ...(opts.providerSet !== undefined ? { providerSet: opts.providerSet } : {}),
+    ...(opts.providerRegistry !== undefined ? { providerRegistry: opts.providerRegistry } : {}),
     ...(opts.providerHost !== undefined ? { providerHost: opts.providerHost } : {}),
-    ...(opts.providerProfile !== undefined ? { providerProfile: opts.providerProfile } : {}),
+    ...(opts.appDeploymentConfig !== undefined
+      ? { appDeploymentConfig: opts.appDeploymentConfig }
+      : {}),
+    ...(opts.capsuleProviders !== undefined ? { capsuleProviders: opts.capsuleProviders } : {}),
+    ...(opts.capsuleProviderConfig !== undefined
+      ? { capsuleProviderConfig: opts.capsuleProviderConfig }
+      : {}),
+    ...(opts.entrypointClientAssets !== undefined
+      ? { entrypointClientAssets: opts.entrypointClientAssets }
+      : {}),
+    ...(opts.templateProbes !== undefined ? { templateProbes: opts.templateProbes } : {}),
     ...(dependencyBindings !== undefined ? { dependencyBindings } : {}),
     ...(opts.launcherMode !== undefined ? { launcherMode: opts.launcherMode } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
@@ -824,11 +834,16 @@ function resolveAuthProviderConfig(
   opts: ServeOptions,
   publicBase: ReturnType<typeof parsePublicBaseUrl>,
 ): AuthProviderConfig | undefined {
+  const selectedAuthProvider = selectedServeAuthProvider(opts);
+  const deploymentConfig =
+    selectedAuthProvider !== undefined
+      ? opts.appDeploymentConfig?.providerConfig?.[selectedAuthProvider]
+      : undefined;
   const config =
     opts.authProviderConfig ??
     (opts.authProviderConfigJson !== undefined
       ? parseJsonRecord(opts.authProviderConfigJson, "auth provider config JSON")
-      : undefined);
+      : deploymentConfig);
   if (config === undefined) {
     return undefined;
   }
@@ -910,14 +925,15 @@ Then drive it from another shell with the daemon's bridge endpoint:
 /**
  * Parse `gla serve` argv (after the `serve` token) into {@link ServeOptions}, layering flags over env defaults
  * (flags win). `--help`/`-h` returns `{ help: true }`. Recognized flags: `--port`, `--host`, `--endpoint`,
- * `--public-base-url`, `--trust-forwarded-prefix`, `--rp-id`, `--rp-name`, `--launcher`, `--workspace-root`,
- * `--state-root`.
+ * `--public-base-url`, `--trust-forwarded-prefix`, `--rp-id`, `--rp-name`, `--launcher`,
+ * `--workspace-root`, `--state-root`.
  * Unknown flags are ignored (forward-compatible), an invalid `--port`/`--launcher`/boolean flag is a stable error
  * the caller surfaces.
  */
 export function parseServeArgs(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
+  compositionDefaults: ProviderCompositionOptions = {},
 ): { help: true } | { help: false; options: ServeOptions } {
   const flags = new Map<string, string | true>();
   for (let i = 0; i < argv.length; i++) {
@@ -1030,7 +1046,7 @@ export function parseServeArgs(
     options.authEnrollmentPolicyJson = authEnrollmentPolicyJson;
     options.authEnrollmentPolicy = parseAuthEnrollmentPolicyJson(
       authEnrollmentPolicyJson,
-      options.authProvider ?? "webauthn",
+      selectedServeAuthProvider({ ...compositionDefaults, ...options }) ?? "webauthn",
     );
   }
   const authDeploymentRolesJson =
@@ -1126,7 +1142,7 @@ export async function runServe(
   const log = (line: string): void => void process.stderr.write(`${line}\n`);
   let parsed: { help: true } | { help: false; options: ServeOptions };
   try {
-    parsed = parseServeArgs(argv, env);
+    parsed = parseServeArgs(argv, env, compositionDefaults);
   } catch (e) {
     log(`error: ${redactDaemonState(e instanceof Error ? e.message : String(e))}`);
     log(SERVE_USAGE);

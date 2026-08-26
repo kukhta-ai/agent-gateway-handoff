@@ -4,6 +4,16 @@
 
 This is the spine for every point where GLA leans on a third party to cover a capability — the capsule runtime, channels, auth, secret stores, document editors, completion detection. They are all the same kind of thing, extended the same way, and the goal is that an operator can add a capability by *dropping in a package*, never by editing the core.
 
+The canonical realization of this model is now the **provider graph** behind the target provider-layer split: every
+runtime pluggable layer is a `ProviderFamily`, every runtime implementation including the default is a
+`ProviderPackage`, executable packages register into `ProviderRegistry`, app infrastructure defaults live in
+`AppDeploymentConfig`, capsule defaults live in catalog `TemplatePackage` / `CapsuleTemplate` data, and
+`AssemblySpec` supplies only per-session capsule deltas. `CapabilityCatalog` projects that evidence read-only, and
+the `Admission Resolver` turns a proposal into a validated plan. See
+`architecture/provider-layer-refactor-contract.md` and
+`architecture/provider-graph-defaults-and-extension-plan.md` for the default-provider rule and horizontal extension
+plan.
+
 ---
 
 ## 1. The principle: inversion of control
@@ -31,13 +41,14 @@ Adding a capability is therefore adding a *package*, not changing core code. Dis
 
 So **"self-registration" means a package describes itself so the operator's install is turnkey** (drop it in → it manifests → it's usable) — *not* an open endpoint that anything pushes code to at runtime. This is the existing GLA↔`wpm` split: `wpm` (the agent-native installer) stands the dependency up on the operator's host and writes its `DependencyBinding`; GLA reads it. Extensibility is an operator power; the runtime agent only ever consumes what's already registered. This is the line that lets GLA be maximally extensible *and* keep providers trusted — which matters most for launchers, since they run code and own security-bearing configuration (§7).
 
-In the current runtime implementation this line is enforced by **Provider Host** plus a boot-time **provider set**.
-A provider set is trusted distribution/install-time code: it imports concrete provider packages, registers their
-modules, and names the selected provider profile. Generic app composition consumes that provider set/profile and
-derives wiring and catalog views from Provider Host metadata. Runtime requests may select among already-registered
-provider ids where a surface allows it, but they cannot register executable provider code or load a new provider
-package after daemon boot. See `architecture/provider-host-extension-architecture.md` and
-`architecture/provider-author-workflow.md`.
+In the current implementation this line is enforced by a sealed `ProviderRegistry` backed by internal ProviderHost
+factory mechanics. Runtime composition accepts registry boot data, `AppDeploymentConfig`, template defaults, explicit
+probes, and client asset evidence; legacy provider-set/profile inputs are archived migration history, not supported
+runtime inputs. Runtime requests may select among already-registered capsule provider ids where a template allows it,
+but they cannot register executable provider code or load a new provider package after daemon boot. See
+`architecture/provider-layer-refactor-contract.md`,
+`architecture/provider-host-extension-architecture.md`, `architecture/provider-author-workflow.md`, and
+`architecture/provider-graph-defaults-and-extension-plan.md`.
 
 ---
 
@@ -106,22 +117,27 @@ relations:
 
 | Key | Meaning |
 |---|---|
-| `type` | `string` / `number` / `bool` / `enum` / `object` / `list` |
-| `required` / `optional` | must the agent set it, or may it |
-| `default` | value applied when the agent omits it (filled at admission-mutate) |
-| `enum` | the closed set of allowed values |
-| `min` / `max` / `pattern` | range and format constraints |
-| `conflicts_with` / `required_with` | cross-field rules |
-| `sensitive` | never echoed in `schema` / `catalog` output or logs (a secret-ref, never a literal) |
+| Root shape | a JSON Schema object with `type: "object"` and `additionalProperties: false` |
+| `properties` / `required` | the declared option fields, with required fields listed at the object root |
+| `type` | JSON Schema primitive/container types: `string`, `number`, `integer`, `boolean`, `object`, `array`, `null` |
+| `default` | explicit GLA metadata that graph defaults may read; validation itself never mutates input |
+| `enum` / `const` | closed allowed values |
+| `minimum` / `maximum` / `minLength` / `maxLength` / `pattern` / `minItems` / `maxItems` | range, length, format, and list constraints |
+| `dependencies` / `allOf` / `anyOf` / `oneOf` / `not` | conservative cross-field constraints accepted by the GLA schema profile |
+| `x-gla-sensitive` | explicit redaction metadata; it is never a literal secret and the validator ignores it |
 
 Example — a `docker` launcher's `config_schema` (the "lowered" surface; the rest of the Compose/run config stays fixed in `runtime_base`):
 
 ```jsonc
 {
-  "memory":    { "type": "string", "optional": true, "default": "512Mi", "pattern": "^[0-9]+(Mi|Gi)$" },
-  "cpus":      { "type": "number", "optional": true, "default": 1, "max": 4 },
-  "image_tag": { "type": "enum",   "optional": true,
-                 "enum": ["chromium-stable", "chromium-beta"], "default": "chromium-stable" }
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "memory":    { "type": "string", "default": "512Mi", "pattern": "^[0-9]+(Mi|Gi)$" },
+    "cpus":      { "type": "number", "default": 1, "maximum": 4 },
+    "image_tag": { "type": "string",
+                   "enum": ["chromium-stable", "chromium-beta"], "default": "chromium-stable" }
+  }
   // privileged, namespaces, seccomp, the launcher's own base mounts: NOT here — fixed by the trusted author in runtime_base
 }
 ```
@@ -129,9 +145,10 @@ Example — a `docker` launcher's `config_schema` (the "lowered" surface; the re
 Two consequences follow, and they are the whole point:
 
 - **Allowlist-by-construction.** The agent never submits arbitrary native config that GLA has to screen for safety; it can only set values that *conform to a declared typed schema*, checked offline at admission. "Validate untrusted runtime config for safety" — the hard, fragile problem — dissolves, because there is no arbitrary config to validate, only schema conformance.
-- **The trusted author draws the line.** *Which* native knobs become options, and their bounds, is decided by the provider/template author at install-time (every `required` / `optional` / `enum` / range choice). That is exactly the cognition-vs-enforcement boundary — fixed once by a trusted party, never negotiated by the runtime agent.
+- **The trusted author draws the line.** *Which* native knobs become options, and their bounds, is decided by the provider/template author at install-time (every `required` list / `enum` / range choice). That is exactly the cognition-vs-enforcement boundary — fixed once by a trusted party, never negotiated by the runtime agent.
 
-How an agent *composes* a spec against these schemas — introspect → `--set` / `-f` → `--dry-run` → submit — is the subject of `04-capsule-assembly.md`.
+How an agent *composes* a spec against these schemas — introspect → `-f` or current capsule part flags →
+`--dry-run` → submit — is the subject of `04-capsule-assembly.md`.
 
 ---
 

@@ -22,10 +22,11 @@ A channel adapter is the bilingual edge between GLA and one external channel. It
 **Receives** — from the external channel: user messages; from the Bridge/Session: handoff links and progress to send.
 **Produces** — to the agent: inbound messages + recipient binding; to the user (via the channel): links and progress.
 
-Runtime integration goes through Provider Host. A channel package supplies a `ChannelAdapter` manifest, config
-schema, probe, docs/skills, and a `registerChannel` factory. The app selects an opaque provider id such as
-`channel-cli`; it does not construct Telegram/Slack/email/CLI adapters directly. Channel secrets such as bot tokens
-must enter as secret refs or resolver inputs and must not appear in catalog output or diagnostics.
+Runtime integration goes through ProviderRegistry, with current factory execution hidden behind internal ProviderHost
+mechanics. A channel package supplies a `ChannelAdapter` manifest, config schema, probe, docs/skills, and a
+`registerChannel` factory. The app selects an opaque provider id such as `channel-cli`; it does not construct
+Telegram/Slack/email/CLI adapters directly. Channel secrets such as bot tokens must enter as secret refs or resolver
+inputs and must not appear in catalog output or diagnostics.
 
 ## What it does NOT do
 

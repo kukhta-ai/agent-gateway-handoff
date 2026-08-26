@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GLA Current Architecture And Lifecycle</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17202a;
+        --muted: #5d6a75;
+        --line: #a8b4bd;
+        --bg: #f7f9fb;
+        --panel: #ffffff;
+        --agent: #e8f2ff;
+        --edge: #eef7ef;
+        --control: #fff4dc;
+        --provider: #f2ecff;
+        --worker: #e9f7f8;
+        --danger: #ffe9e6;
+        --audit: #f2f4f7;
+        --accent: #2457a6;
+        --shadow: 0 12px 32px rgba(32, 48, 64, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.45;
+      }
+
+      main {
+        width: min(1520px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 28px 0 44px;
+      }
+
+      header {
+        display: grid;
+        gap: 12px;
+        margin-bottom: 22px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: clamp(26px, 3vw, 42px);
+        letter-spacing: 0;
+      }
+
+      h2 {
+        font-size: 22px;
+        letter-spacing: 0;
+      }
+
+      h3 {
+        font-size: 15px;
+        letter-spacing: 0;
+      }
+
+      .subtitle {
+        max-width: 920px;
+        color: var(--muted);
+        font-size: 16px;
+      }
+
+      .section {
+        margin-top: 22px;
+        padding: 20px;
+        background: var(--panel);
+        border: 1px solid #d9e1e7;
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+      }
+
+      .section-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 16px;
+      }
+
+      .section-head p {
+        max-width: 760px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .diagram-scroll {
+        overflow-x: auto;
+        border: 1px solid #dbe3ea;
+        border-radius: 8px;
+        background: #fcfdff;
+      }
+
+      svg {
+        display: block;
+        min-width: 1320px;
+        width: 100%;
+        height: auto;
+      }
+
+      .zone {
+        fill: #ffffff;
+        stroke: #d2dce4;
+        stroke-width: 1.4;
+      }
+
+      .zone-title {
+        fill: #314150;
+        font-size: 15px;
+        font-weight: 700;
+      }
+
+      .node {
+        stroke: #6d7b86;
+        stroke-width: 1.4;
+        rx: 8;
+        ry: 8;
+      }
+
+      .agent {
+        fill: var(--agent);
+      }
+
+      .edge {
+        fill: var(--edge);
+      }
+
+      .control {
+        fill: var(--control);
+      }
+
+      .provider {
+        fill: var(--provider);
+      }
+
+      .worker {
+        fill: var(--worker);
+      }
+
+      .danger {
+        fill: var(--danger);
+      }
+
+      .audit {
+        fill: var(--audit);
+      }
+
+      .node-title {
+        fill: var(--ink);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .node-sub {
+        fill: #455561;
+        font-size: 11px;
+      }
+
+      .small {
+        font-size: 10.5px;
+      }
+
+      .arrow,
+      .dashed-arrow {
+        fill: none;
+        stroke: #52616d;
+        stroke-width: 1.6;
+        marker-end: url(#arrowHead);
+      }
+
+      .dashed-arrow {
+        stroke-dasharray: 7 6;
+      }
+
+      .red-arrow {
+        fill: none;
+        stroke: #a53c2f;
+        stroke-width: 1.7;
+        marker-end: url(#redArrowHead);
+      }
+
+      .label {
+        fill: #394956;
+        font-size: 11px;
+        font-weight: 650;
+      }
+
+      .legend {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 34px;
+        color: #354552;
+        font-size: 13px;
+      }
+
+      .swatch {
+        flex: 0 0 18px;
+        width: 18px;
+        height: 18px;
+        border: 1px solid #7a8791;
+        border-radius: 4px;
+      }
+
+      .lifecycle {
+        display: grid;
+        gap: 12px;
+        min-width: 1180px;
+        padding: 12px;
+      }
+
+      .lane {
+        display: grid;
+        grid-template-columns: 168px repeat(12, minmax(74px, 1fr));
+        gap: 8px;
+        align-items: stretch;
+      }
+
+      .lane-name {
+        display: flex;
+        align-items: center;
+        min-height: 58px;
+        padding: 10px;
+        border: 1px solid #cfd9e1;
+        border-radius: 8px;
+        background: #f6f8fa;
+        color: #263542;
+        font-size: 13px;
+        font-weight: 750;
+      }
+
+      .step {
+        min-height: 58px;
+        padding: 8px;
+        border: 1px solid #c8d3dc;
+        border-radius: 8px;
+        color: #20303d;
+        font-size: 11.5px;
+      }
+
+      .step b {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 12px;
+      }
+
+      .span-2 {
+        grid-column: span 2;
+      }
+
+      .span-3 {
+        grid-column: span 3;
+      }
+
+      .span-4 {
+        grid-column: span 4;
+      }
+
+      .empty {
+        min-height: 58px;
+      }
+
+      .notes {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .note {
+        padding: 12px;
+        border: 1px solid #d7e0e8;
+        border-radius: 8px;
+        background: #fbfcfe;
+      }
+
+      .note h3 {
+        margin-bottom: 6px;
+      }
+
+      .note p {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 0.95em;
+      }
+
+      @media (max-width: 760px) {
+        main {
+          width: min(100vw - 20px, 1520px);
+          padding-top: 16px;
+        }
+
+        .section {
+          padding: 14px;
+        }
+
+        .section-head {
+          display: grid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>GLA Current Architecture And Lifecycle</h1>
+        <p class="subtitle">
+          Current implemented shape after the provider-host/provider-graph work: a narrow runtime core, a typed
+          provider graph, sealed ProviderRegistry, AppDeploymentConfig, CapsuleTemplate/AssemblySpec composition,
+          CLI/MCP agent surfaces, one public gateway, and temporary two-actor capsules, with provider authoring
+          feeding trusted install-time packages.
+        </p>
+      </header>
+
+      <section class="section" aria-labelledby="architecture-title">
+        <div class="section-head">
+          <div>
+            <h2 id="architecture-title">Component Architecture</h2>
+          </div>
+          <p>
+            Solid arrows are runtime control/data flow. Dashed arrows are install-time or read-only evidence flow.
+            The agent can inspect and consume providers through the catalog; executable provider registration
+            happens only through trusted provider packages registered into ProviderRegistry at app boot.
+          </p>
+        </div>
+
+        <div class="diagram-scroll" role="img" aria-label="GLA component architecture diagram">
+          <svg viewBox="0 0 1480 900" aria-labelledby="svg-title svg-desc">
+            <title id="svg-title">GLA component architecture</title>
+            <desc id="svg-desc">
+              Architecture diagram showing actors, surfaces, provider graph, control plane, worker plane,
+              adapters, and WPM evidence.
+            </desc>
+            <defs>
+              <marker
+                id="arrowHead"
+                markerWidth="10"
+                markerHeight="10"
+                refX="8"
+                refY="3"
+                orient="auto"
+                markerUnits="strokeWidth"
+              >
+                <path d="M0,0 L0,6 L8,3 z" fill="#52616d"></path>
+              </marker>
+              <marker
+                id="redArrowHead"
+                markerWidth="10"
+                markerHeight="10"
+                refX="8"
+                refY="3"
+                orient="auto"
+                markerUnits="strokeWidth"
+              >
+                <path d="M0,0 L0,6 L8,3 z" fill="#a53c2f"></path>
+              </marker>
+            </defs>
+
+            <rect class="zone" x="20" y="40" width="180" height="800"></rect>
+            <text class="zone-title" x="40" y="72">Actors</text>
+
+            <rect class="zone" x="225" y="40" width="215" height="800"></rect>
+            <text class="zone-title" x="245" y="72">Surfaces</text>
+
+            <rect class="zone" x="465" y="40" width="250" height="800"></rect>
+            <text class="zone-title" x="485" y="72">Provider Layer</text>
+
+            <rect class="zone" x="740" y="40" width="270" height="800"></rect>
+            <text class="zone-title" x="760" y="72">Control Plane</text>
+
+            <rect class="zone" x="1035" y="40" width="225" height="800"></rect>
+            <text class="zone-title" x="1055" y="72">Worker Plane</text>
+
+            <rect class="zone" x="1285" y="40" width="175" height="800"></rect>
+            <text class="zone-title" x="1305" y="72">Providers</text>
+
+            <rect class="node agent" x="45" y="118" width="130" height="76"></rect>
+            <text class="node-title" x="63" y="146">Agent</text>
+            <text class="node-sub" x="63" y="165">runtime</text>
+            <text class="node-sub" x="63" y="181">unprivileged</text>
+
+            <rect class="node agent" x="45" y="372" width="130" height="76"></rect>
+            <text class="node-title" x="63" y="400">User</text>
+            <text class="node-sub" x="63" y="419">recipient</text>
+
+            <rect class="node agent" x="45" y="506" width="130" height="86"></rect>
+            <text class="node-title" x="63" y="535">Provider Author</text>
+            <text class="node-sub" x="63" y="554">developer</text>
+            <text class="node-sub" x="63" y="570">or their agent</text>
+
+            <rect class="node agent" x="45" y="626" width="130" height="86"></rect>
+            <text class="node-title" x="63" y="655">Operator</text>
+            <text class="node-sub" x="63" y="674">installer agent</text>
+            <text class="node-sub" x="63" y="690">same VPS possible</text>
+
+            <rect class="node edge" x="250" y="105" width="165" height="96"></rect>
+            <text class="node-title" x="270" y="134">Agent Bridge</text>
+            <text class="node-sub" x="270" y="153">MCP + CLI</text>
+            <text class="node-sub" x="270" y="170">agent authority</text>
+            <text class="node-sub" x="270" y="187">read models</text>
+
+            <rect class="node edge" x="250" y="300" width="165" height="86"></rect>
+            <text class="node-title" x="270" y="328">Channel</text>
+            <text class="node-sub" x="270" y="347">CLI / Telegram</text>
+            <text class="node-sub" x="270" y="364">link delivery</text>
+
+            <rect class="node edge" x="250" y="425" width="165" height="102"></rect>
+            <text class="node-title" x="270" y="454">Access Gateway</text>
+            <text class="node-sub" x="270" y="473">sole public entry</text>
+            <text class="node-sub" x="270" y="490">grant verify</text>
+            <text class="node-sub" x="270" y="507">WS proxy</text>
+
+            <rect class="node edge" x="250" y="548" width="165" height="72"></rect>
+            <text class="node-title" x="270" y="576">Authoring Tools</text>
+            <text class="node-sub" x="270" y="595">scaffold helper</text>
+            <text class="node-sub" x="270" y="611">validate / test</text>
+
+            <rect class="node edge" x="250" y="640" width="165" height="90"></rect>
+            <text class="node-title" x="270" y="668">WPM Installer</text>
+            <text class="node-sub" x="270" y="687">host setup</text>
+            <text class="node-sub" x="270" y="704">receipts</text>
+
+            <rect class="node provider" x="490" y="88" width="200" height="78"></rect>
+            <text class="node-title" x="510" y="116">ProviderRegistry</text>
+            <text class="node-sub" x="510" y="135">sealed at boot</text>
+            <text class="node-sub" x="510" y="151">trusted packages</text>
+
+            <rect class="node provider" x="490" y="192" width="200" height="84"></rect>
+            <text class="node-title" x="510" y="220">AppDeploymentConfig</text>
+            <text class="node-sub" x="510" y="239">auth/channel/secret</text>
+            <text class="node-sub" x="510" y="255">boot config refs</text>
+
+            <rect class="node provider" x="490" y="310" width="200" height="98"></rect>
+            <text class="node-title" x="510" y="338">CapabilityCatalog</text>
+            <text class="node-sub" x="510" y="357">providers/templates</text>
+            <text class="node-sub" x="510" y="374">compatibility</text>
+            <text class="node-sub" x="510" y="391">availability</text>
+
+            <rect class="node provider" x="490" y="438" width="200" height="98"></rect>
+            <text class="node-title" x="510" y="466">Internal ProviderHost</text>
+            <text class="node-sub" x="510" y="485">factory runner</text>
+            <text class="node-sub" x="510" y="502">state namespaces</text>
+            <text class="node-sub" x="510" y="519">probes/assets</text>
+
+            <rect class="node provider" x="490" y="648" width="200" height="76"></rect>
+            <text class="node-title" x="510" y="676">Dependency Evidence</text>
+            <text class="node-sub" x="510" y="695">WPM bindings</text>
+            <text class="node-sub" x="510" y="711">runtime probes</text>
+
+            <rect class="node provider" x="490" y="746" width="200" height="68"></rect>
+            <text class="node-title" x="510" y="774">Provider Package</text>
+            <text class="node-sub" x="510" y="793">manifest + factories</text>
+            <text class="node-sub" x="510" y="809">templates / assets</text>
+
+            <rect class="node control" x="765" y="88" width="220" height="78"></rect>
+            <text class="node-title" x="785" y="116">App Composition</text>
+            <text class="node-sub" x="785" y="135">boot deployment config</text>
+            <text class="node-sub" x="785" y="151">wire provider ports</text>
+
+            <rect class="node control" x="765" y="198" width="220" height="78"></rect>
+            <text class="node-title" x="785" y="226">Admission Resolver</text>
+            <text class="node-sub" x="785" y="245">proposal to plan</text>
+            <text class="node-sub" x="785" y="261">policy checks</text>
+
+            <rect class="node control" x="765" y="310" width="100" height="78"></rect>
+            <text class="node-title" x="785" y="338">Task</text>
+            <text class="node-sub" x="785" y="357">intent shell</text>
+            <text class="node-sub" x="785" y="373">lifecycle</text>
+
+            <rect class="node control" x="885" y="310" width="100" height="78"></rect>
+            <text class="node-title" x="905" y="338">Session</text>
+            <text class="node-sub" x="905" y="357">capsule</text>
+            <text class="node-sub" x="905" y="373">handoffs</text>
+
+            <rect class="node control" x="765" y="420" width="100" height="82"></rect>
+            <text class="node-title" x="785" y="448">Capability</text>
+            <text class="node-sub" x="785" y="467">macaroons</text>
+            <text class="node-sub" x="785" y="484">revocation</text>
+
+            <rect class="node control" x="885" y="420" width="100" height="82"></rect>
+            <text class="node-title" x="905" y="448">Route</text>
+            <text class="node-sub" x="905" y="467">mount</text>
+            <text class="node-sub" x="905" y="484">unmount</text>
+
+            <rect class="node control" x="765" y="534" width="100" height="82"></rect>
+            <text class="node-title" x="785" y="562">Identity</text>
+            <text class="node-sub" x="785" y="581">enroll</text>
+            <text class="node-sub" x="785" y="598">step-up</text>
+
+            <rect class="node control" x="885" y="534" width="100" height="82"></rect>
+            <text class="node-title" x="905" y="562">Completion</text>
+            <text class="node-sub" x="905" y="581">detectors</text>
+            <text class="node-sub" x="905" y="598">envelope</text>
+
+            <rect class="node audit" x="765" y="648" width="220" height="76"></rect>
+            <text class="node-title" x="785" y="676">Audit + Redaction</text>
+            <text class="node-sub" x="785" y="695">append-only evidence</text>
+            <text class="node-sub" x="785" y="711">agent-blind secrets</text>
+
+            <rect class="node worker" x="1060" y="118" width="175" height="82"></rect>
+            <text class="node-title" x="1080" y="146">Worker / Launcher</text>
+            <text class="node-sub" x="1080" y="165">process / docker</text>
+            <text class="node-sub" x="1080" y="182">spawn capsule</text>
+
+            <rect class="node worker" x="1060" y="244" width="175" height="102"></rect>
+            <text class="node-title" x="1080" y="272">Capsule</text>
+            <text class="node-sub" x="1080" y="291">two-actor shell</text>
+            <text class="node-sub" x="1080" y="308">agent connector</text>
+            <text class="node-sub" x="1080" y="325">human entrypoint</text>
+
+            <rect class="node worker" x="1060" y="390" width="175" height="92"></rect>
+            <text class="node-title" x="1080" y="418">Entrypoint Client</text>
+            <text class="node-sub" x="1080" y="437">noVNC assets</text>
+            <text class="node-sub" x="1080" y="454">served by gateway</text>
+
+            <rect class="node worker" x="1060" y="526" width="175" height="82"></rect>
+            <text class="node-title" x="1080" y="554">Workspace</text>
+            <text class="node-sub" x="1080" y="573">profile / mounts</text>
+            <text class="node-sub" x="1080" y="590">cleanup</text>
+
+            <rect class="node worker" x="1060" y="648" width="175" height="82"></rect>
+            <text class="node-title" x="1080" y="676">Detector</text>
+            <text class="node-sub" x="1080" y="695">URL watcher</text>
+            <text class="node-sub" x="1080" y="712">user-done</text>
+
+            <rect class="node provider" x="1305" y="92" width="130" height="76"></rect>
+            <text class="node-title" x="1324" y="120">Auth</text>
+            <text class="node-sub" x="1324" y="139">WebAuthn</text>
+            <text class="node-sub" x="1324" y="155">authentik</text>
+
+            <rect class="node provider" x="1305" y="196" width="130" height="76"></rect>
+            <text class="node-title" x="1324" y="224">Channel</text>
+            <text class="node-sub" x="1324" y="243">CLI</text>
+            <text class="node-sub" x="1324" y="259">Telegram</text>
+
+            <rect class="node provider" x="1305" y="300" width="130" height="76"></rect>
+            <text class="node-title" x="1324" y="328">Runtime</text>
+            <text class="node-sub" x="1324" y="347">launcher</text>
+            <text class="node-sub" x="1324" y="363">workspace</text>
+
+            <rect class="node provider" x="1305" y="404" width="130" height="76"></rect>
+            <text class="node-title" x="1324" y="432">Surface</text>
+            <text class="node-sub" x="1324" y="451">noVNC</text>
+            <text class="node-sub" x="1324" y="467">CDP</text>
+
+            <rect class="node provider" x="1305" y="508" width="130" height="76"></rect>
+            <text class="node-title" x="1324" y="536">Completion</text>
+            <text class="node-sub" x="1324" y="555">URL</text>
+            <text class="node-sub" x="1324" y="571">manual</text>
+
+            <rect class="node provider" x="1305" y="612" width="130" height="76"></rect>
+            <text class="node-title" x="1324" y="640">SecretStore</text>
+            <text class="node-sub" x="1324" y="659">secret refs</text>
+            <text class="node-sub" x="1324" y="675">redacted</text>
+
+            <rect class="node danger" x="1060" y="770" width="375" height="44"></rect>
+            <text class="node-title" x="1080" y="798">No runtime-agent code registration; providers are trusted install-time code.</text>
+
+            <path class="arrow" d="M175 156 H250"></path>
+            <text class="label" x="185" y="139">CLI/MCP</text>
+
+            <path class="arrow" d="M175 410 H220 V476 H250"></path>
+            <text class="label" x="178" y="455">HTTPS/WS</text>
+
+            <path class="arrow" d="M175 549 H220 V584 H250"></path>
+            <text class="label" x="180" y="535">author</text>
+
+            <path class="arrow" d="M175 668 H250"></path>
+            <text class="label" x="184" y="652">install</text>
+
+            <path class="arrow" d="M415 145 H455 V181 H735 V127 H765"></path>
+            <text class="label" x="508" y="177">agent operations</text>
+
+            <path class="dashed-arrow" d="M415 165 H455 V359 H490"></path>
+            <text class="label" x="431" y="248">catalog/schema</text>
+
+            <path class="dashed-arrow" d="M415 685 H490"></path>
+            <text class="label" x="424" y="670">receipts</text>
+
+            <path class="dashed-arrow" d="M415 584 H455 V780 H490"></path>
+            <text class="label" x="426" y="742">scaffold + validate</text>
+
+            <path class="dashed-arrow" d="M490 794 H452 V730 H415"></path>
+            <text class="label" x="421" y="759">install package</text>
+
+            <path class="dashed-arrow" d="M590 648 V536"></path>
+            <text class="label" x="607" y="603">availability</text>
+
+            <path class="arrow" d="M590 166 V192"></path>
+            <path class="arrow" d="M590 276 V310"></path>
+            <path class="arrow" d="M590 408 V438"></path>
+
+            <path class="arrow" d="M690 127 H765"></path>
+            <text class="label" x="703" y="111">defaults</text>
+
+            <path class="arrow" d="M690 359 H725 V237 H765"></path>
+            <text class="label" x="700" y="301">resolve</text>
+
+            <path class="arrow" d="M690 487 H725 V146 H765"></path>
+            <text class="label" x="703" y="475">runtime ports</text>
+
+            <path class="arrow" d="M875 166 V198"></path>
+            <path class="arrow" d="M875 276 V296 H815 V310"></path>
+            <path class="arrow" d="M875 276 V296 H935 V310"></path>
+            <path class="arrow" d="M865 349 H885"></path>
+            <path class="arrow" d="M935 388 V420"></path>
+            <path class="arrow" d="M865 461 H885"></path>
+            <path class="arrow" d="M815 502 V534"></path>
+            <path class="arrow" d="M935 502 V534"></path>
+
+            <path class="red-arrow" d="M765 237 H742"></path>
+            <text class="label" x="742" y="223">rejects stop here</text>
+
+            <path class="arrow" d="M985 237 H1022 V159 H1060"></path>
+            <text class="label" x="997" y="145">provision</text>
+
+            <path class="arrow" d="M985 461 H1022 V436 H1060"></path>
+            <text class="label" x="998" y="450">route</text>
+
+            <path class="arrow" d="M1060 689 H1022 V575 H985"></path>
+            <text class="label" x="997" y="622">signals</text>
+
+            <path class="arrow" d="M415 476 H455 V560 H725 V516 H1022 V436 H1060"></path>
+            <text class="label" x="505" y="548">authorized proxy</text>
+
+            <path class="dashed-arrow" d="M1305 130 H1266 V66 H590 V88"></path>
+            <text class="label" x="970" y="55">provider manifests and modules</text>
+
+            <path class="arrow" d="M1305 338 H1254 V159 H1235"></path>
+            <text class="label" x="1257" y="252">runtime</text>
+
+            <path class="arrow" d="M1305 442 H1235"></path>
+            <text class="label" x="1246" y="426">surface</text>
+
+            <path class="arrow" d="M1305 546 H1254 V689 H1235"></path>
+            <text class="label" x="1259" y="623">completion</text>
+          </svg>
+        </div>
+
+        <div class="legend" aria-label="Diagram legend">
+          <div class="legend-item"><span class="swatch" style="background: var(--agent)"></span>Actors</div>
+          <div class="legend-item"><span class="swatch" style="background: var(--edge)"></span>External surfaces</div>
+          <div class="legend-item"><span class="swatch" style="background: var(--provider)"></span>Provider graph and adapters</div>
+          <div class="legend-item"><span class="swatch" style="background: var(--control)"></span>Control-plane core</div>
+          <div class="legend-item"><span class="swatch" style="background: var(--worker)"></span>Worker/capsule runtime</div>
+          <div class="legend-item"><span class="swatch" style="background: var(--danger)"></span>Security boundary</div>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="provider-creation-title">
+        <div class="section-head">
+          <div>
+            <h2 id="provider-creation-title">Provider Creation Flow</h2>
+          </div>
+          <p>
+            This is the horizontal-extension path for adding a provider to an existing layer. The authoring UX and
+            installation UX are separate even when the same physical agent on the same VPS performs both jobs.
+          </p>
+        </div>
+
+        <div class="diagram-scroll">
+          <div class="lifecycle" aria-label="Provider creation flow swimlane diagram">
+            <div class="lane">
+              <div class="lane-name">1. Author chooses layer</div>
+              <div class="step agent span-3"><b>Pick target</b>Auth, channel, runtime, surface, completion, or secret store.</div>
+              <div class="step provider span-3"><b>Read contract</b>Layer interface, manifest schema, config schema, state namespace.</div>
+              <div class="step provider span-3"><b>Check fit</b>Required open parts and compatible provider relations.</div>
+              <div class="empty span-3"></div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">2. Build package</div>
+              <div class="step edge span-2"><b>Scaffold</b>Create manifest, package metadata, tests, and examples.</div>
+              <div class="step provider span-3"><b>Implement</b>Provider factory, probes, assets, templates, or bindings.</div>
+              <div class="step provider span-2"><b>Defaults</b>Declare app config or template defaults.</div>
+              <div class="step provider span-2"><b>Relations</b>Declare required parts and compatibility.</div>
+              <div class="step audit span-3"><b>Evidence</b>Keep WPM binding and dependency proof inputs with the package.</div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">3. Validate locally</div>
+              <div class="step edge span-3"><b>Schema</b>Manifest, defaults, relations, templates, and config validate fail-closed.</div>
+              <div class="step provider span-3"><b>Graph dry run</b>Duplicate ids, duplicate versions, missing providers, and typos reject.</div>
+              <div class="step worker span-3"><b>Runtime tests</b>Factories, probes, assets, and handoff surfaces are exercised.</div>
+              <div class="step audit span-3"><b>Inspect</b>Diagnostics show what the catalog will consume before install.</div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">4. Install or publish</div>
+              <div class="step agent span-2"><b>Trust decision</b>Operator reviews source, package, evidence, and blast radius.</div>
+              <div class="step edge span-2"><b>Pin</b>WPM installs the package and records host evidence.</div>
+              <div class="step provider span-3"><b>ProviderRegistry</b>Trusted distribution registers packages at app boot.</div>
+              <div class="step audit span-2"><b>Record</b>Install receipts and redacted diagnostics become audit evidence.</div>
+              <div class="empty span-3"></div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">5. Consume at runtime</div>
+              <div class="step provider span-3"><b>Catalog graph</b>Provider, template, defaults, compatibility, and availability appear together.</div>
+              <div class="step control span-3"><b>Admission Resolver</b>Templates and proposals resolve against the updated graph.</div>
+              <div class="step worker span-3"><b>Factory runner</b>Factories create runtime ports only after graph and policy pass.</div>
+              <div class="step agent span-3"><b>User-facing UX</b>Agent can discover and select the new provider through catalog/template/session flows.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="lifecycle-title">
+        <div class="section-head">
+          <div>
+            <h2 id="lifecycle-title">Runtime Lifecycle</h2>
+          </div>
+          <p>
+            Scenario-01 lifecycle from enrollment through teardown. The same session can open multiple handoff
+            windows onto the same capsule; teardown is the terminal cleanup path.
+          </p>
+        </div>
+
+        <div class="diagram-scroll">
+          <div class="lifecycle" aria-label="GLA lifecycle swimlane diagram">
+            <div class="lane">
+              <div class="lane-name">0. Precondition</div>
+              <div class="step provider span-2"><b>Deployment config</b>Select app providers and boot config.</div>
+              <div class="step edge span-2"><b>Install evidence</b>WPM receipts and probes prove dependencies.</div>
+              <div class="step control span-3"><b>Enroll recipient</b>Identity/Auth binds credential to recipient.</div>
+              <div class="empty span-2"></div>
+              <div class="step audit span-3"><b>Invariant</b>No handoff verifies an unenrolled recipient.</div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">1. Agent orient</div>
+              <div class="step agent span-2"><b>Connect</b>Agent enters through CLI or MCP bridge.</div>
+              <div class="step control span-2"><b>Anchor</b>Bridge mints agent-authority capability.</div>
+              <div class="step provider span-3"><b>Discover</b>Catalog returns providers, templates, schemas, skills.</div>
+              <div class="step provider span-2"><b>Read-only</b>Agent can inspect graph, never register code.</div>
+              <div class="empty span-3"></div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">2. Propose</div>
+              <div class="step agent span-3"><b>Assemble</b>Agent submits a concrete session proposal or dry-run.</div>
+              <div class="step provider span-2"><b>Resolve graph</b>Template defaults pick provider subgraph.</div>
+              <div class="step control span-3"><b>Admission Resolver</b>Mutate defaults, validate policy, compatibility, config.</div>
+              <div class="step danger span-2"><b>Fail closed</b>Unknown, unavailable, or incompatible nodes reject.</div>
+              <div class="empty span-2"></div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">3. Provision</div>
+              <div class="empty span-2"></div>
+              <div class="step provider span-2"><b>Factory runner</b>Create selected runtime ports from factories.</div>
+              <div class="step control span-2"><b>Session</b>Create session aggregate and capability lineage.</div>
+              <div class="step worker span-3"><b>Worker</b>Launcher spawns capsule with workspace and connector.</div>
+              <div class="step audit span-3"><b>Evidence</b>Audit records decisions, redacted diagnostics, state.</div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">4. Agent drive</div>
+              <div class="step agent span-3"><b>Connector</b>Agent drives capsule through CDP or another connector.</div>
+              <div class="empty span-2"></div>
+              <div class="step worker span-3"><b>Capsule state</b>Agent and human surfaces share scoped runtime state.</div>
+              <div class="step danger span-2"><b>Agent blind</b>Raw user secrets never enter agent path.</div>
+              <div class="empty span-2"></div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">5. Open handoff</div>
+              <div class="step agent span-2"><b>Request</b><code>handoff open</code> names the live session.</div>
+              <div class="step control span-2"><b>Mint grant</b>Recipient-bound, scoped, short TTL capability.</div>
+              <div class="step control span-2"><b>Mount route</b>Route controller programs gateway path.</div>
+              <div class="step edge span-2"><b>Deliver</b>Channel sends link to exactly the bound recipient.</div>
+              <div class="step edge span-2"><b>Gateway</b>Only public door for the human.</div>
+              <div class="empty span-2"></div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">6. Verify and act</div>
+              <div class="empty span-2"></div>
+              <div class="step edge span-2"><b>Open link</b>User reaches Access Gateway, not capsule directly.</div>
+              <div class="step control span-2"><b>Verify</b>Grant, recipient caveat, TTL, revocation, assurance.</div>
+              <div class="step worker span-3"><b>Proxy</b>Authorized WS reaches human entrypoint, such as noVNC.</div>
+              <div class="step agent span-3"><b>Wait/live-drive</b>Agent may wait or drive the connector in parallel.</div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">7. Complete</div>
+              <div class="empty span-3"></div>
+              <div class="step worker span-2"><b>Detector fires</b>URL watcher or user-done emits signal.</div>
+              <div class="step control span-3"><b>Normalize</b>Completion service validates and returns envelope.</div>
+              <div class="step agent span-2"><b>Resume</b>Bridge returns result to agent.</div>
+              <div class="step control span-2"><b>Re-open optional</b>Same capsule can get another window.</div>
+            </div>
+
+            <div class="lane">
+              <div class="lane-name">8. Teardown</div>
+              <div class="step agent span-2"><b>Complete/revoke</b>Task or session reaches terminal command.</div>
+              <div class="step control span-2"><b>Revoke</b>Capability service revokes descendants.</div>
+              <div class="step edge span-2"><b>Unmount</b>Gateway route and live WS are closed.</div>
+              <div class="step worker span-3"><b>Reap</b>Capsule stops, workspace/profile cleanup runs.</div>
+              <div class="step audit span-3"><b>Close audit</b>No orphan capsule, no live grant, no residual route.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="current-rules-title">
+        <div class="section-head">
+          <div>
+            <h2 id="current-rules-title">Load-Bearing Rules</h2>
+          </div>
+          <p>
+            These are the constraints the diagram assumes. They are the current architecture boundaries, not UI
+            suggestions.
+          </p>
+        </div>
+
+        <div class="notes">
+          <article class="note">
+            <h3>Provider defaults are ordinary packages</h3>
+            <p>
+              App defaults live in AppDeploymentConfig, and capsule defaults live in CapsuleTemplate packages.
+              Generic app composition receives provider ids and config; it does not hard-code the reference default
+              choices.
+            </p>
+          </article>
+          <article class="note">
+            <h3>Provider graph is the read model</h3>
+            <p>
+              Catalog, admission, doctor, and CLI/schema output consume projections of the same graph:
+              manifests, deployment config, capsule templates, compatibility, WPM evidence, probes, config schemas,
+              and skills.
+            </p>
+          </article>
+          <article class="note">
+            <h3>ProviderRegistry owns provider registration</h3>
+            <p>
+              Trusted provider modules register at boot. ProviderHost is internal factory machinery; runtime agents
+              can inspect and consume the result, but cannot register executable provider code.
+            </p>
+          </article>
+          <article class="note">
+            <h3>Access Gateway is the only public door</h3>
+            <p>
+              User traffic always transits grant verification, recipient binding, revocation, and assurance checks
+              before it can reach a capsule entrypoint.
+            </p>
+          </article>
+          <article class="note">
+            <h3>Agent Bridge is unprivileged</h3>
+            <p>
+              The agent enters through CLI/MCP and gets capabilities, read models, and completion envelopes. It
+              never gets raw secrets, gateway admin authority, or host control paths.
+            </p>
+          </article>
+          <article class="note">
+            <h3>WPM satisfies host dependencies</h3>
+            <p>
+              GLA declares dependency needs. WPM performs host-specific install/adopt/verify work and leaves
+              receipts that become graph availability evidence.
+            </p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

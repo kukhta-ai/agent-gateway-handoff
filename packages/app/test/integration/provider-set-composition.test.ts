@@ -1,4 +1,8 @@
-import type { ProviderFamily, ProviderManifest } from "@gla/catalog";
+import {
+  type ProviderFamily,
+  type ProviderManifest,
+  referenceWpmDependencyBindings,
+} from "@gla/catalog";
 import {
   type AgentConnector,
   type AgentConnectorPort,
@@ -6,6 +10,7 @@ import {
   type ChannelPort,
   type CompletionDetectorPort,
   type ConfigSchema,
+  EMPTY_CONFIG_SCHEMA,
   type HumanEntrypointBinding,
   type HumanEntrypointPort,
   KERNEL_MODULE,
@@ -15,32 +20,70 @@ import {
   type PartRef,
   type RawCompletionSignal,
   type RecipientRef,
+  type Ref,
   type ResolvedAssemblySpec,
+  type ResolvedCapsulePlan,
   type RuntimeHandle,
+  type SecretStorePort,
   type WorkspaceHandle,
   type WorkspacePort,
   encodeRuntimeHandle,
 } from "@gla/kernel";
 import { POLICY_CEDAR_MODULE } from "@gla/policy-cedar";
-import type { GlaProviderModule, ProviderRegistrationContext } from "@gla/provider-host";
+import {
+  type GlaProviderModule,
+  ProviderHost,
+  type ProviderRegistrationContext,
+  ProviderRegistry,
+} from "@gla/provider-host";
 import { describe, expect, it } from "vitest";
 import {
-  type AppProviderSet,
+  type AppDeploymentConfigInput,
+  type CapsuleProviderSelectionInput,
+  type ProviderCompositionOptions,
   createApp,
   createBridge,
+  createEnrollmentStack,
   createProvisioningBridge,
 } from "../../src/composition.js";
 
 interface FakeRecords {
   configs: Record<string, Record<string, unknown>>;
+  workspaceConfigs: Array<Record<string, unknown>>;
   serviceBindings: Record<string, boolean>;
   assetProviderIds: string[];
   delivered: Array<{ recipient: RecipientRef; link: string }>;
 }
 
+interface FakeProviderBundle {
+  modules: GlaProviderModule[];
+  appDeploymentConfig: AppDeploymentConfigInput;
+  capsuleProviders: CapsuleProviderSelectionInput;
+  capsuleProviderConfig?: Record<string, Record<string, unknown>>;
+  entrypointClientAssets: ProviderCompositionOptions["entrypointClientAssets"];
+  templateProbes?: ProviderCompositionOptions["templateProbes"];
+}
+
+function emptySchema(): ConfigSchema {
+  return structuredClone(EMPTY_CONFIG_SCHEMA);
+}
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
+
 function fakeRecords(): FakeRecords {
   return {
     configs: {},
+    workspaceConfigs: [],
     serviceBindings: {},
     assetProviderIds: [],
     delivered: [],
@@ -55,6 +98,7 @@ function providerManifest(opts: {
   configSchema?: ConfigSchema;
   factoryConfigSchema?: ConfigSchema;
   capability?: Record<string, unknown>;
+  relations?: ProviderManifest["spec"]["relations"];
 }): ProviderManifest {
   return {
     apiVersion: "gla.dev/v1",
@@ -67,6 +111,7 @@ function providerManifest(opts: {
       ...(opts.factoryConfigSchema !== undefined
         ? { factory_config_schema: opts.factoryConfigSchema }
         : {}),
+      ...(opts.relations !== undefined ? { relations: opts.relations } : {}),
       probe: opts.id,
       skills: [{ id: `use-${opts.id}`, for: opts.id, body: `Use ${opts.id}.` }],
     },
@@ -125,7 +170,7 @@ class FakeLauncher implements LauncherPort {
           resourceId: "fake-human-resource",
           transport: "http",
           address: "http://127.0.0.1/fake",
-          client: { kind: "fake-client", ref: "fake-client" },
+          client: { kind: "fake-client", ref: "fake-entrypoint.fake-client" },
         },
       ],
     });
@@ -161,14 +206,14 @@ class FakeEntrypoint implements HumanEntrypointPort {
     return {
       resourceId: "fake-human-resource",
       provider: "fake-entrypoint",
-      client: { kind: "fake-client", ref: "fake-client" },
+      client: { kind: "fake-client", ref: "fake-entrypoint.fake-client" },
       transport: { kind: "reverse-proxy", protocol: "http", upstream: "http://127.0.0.1/fake" },
     };
   }
 }
 
 class FakeDetector implements CompletionDetectorPort {
-  readonly contract: ConfigSchema = {};
+  readonly contract: ConfigSchema = emptySchema();
 
   async *watch(
     _h: RuntimeHandle,
@@ -176,7 +221,15 @@ class FakeDetector implements CompletionDetectorPort {
   ): AsyncIterable<RawCompletionSignal> {}
 }
 
-function fakeProviderSet(records: FakeRecords): AppProviderSet {
+class FakeSecretStore implements SecretStorePort {
+  async put(_value: unknown, _audience: string): Promise<Ref<"secret-ref">> {
+    return "secret:fake" as Ref<"secret-ref">;
+  }
+
+  async injectInto(_ref: Ref<"secret-ref">, _target: unknown): Promise<void> {}
+}
+
+function fakeProviderBundle(records: FakeRecords): FakeProviderBundle {
   const modules: GlaProviderModule[] = [
     moduleFor(
       providerManifest({
@@ -184,11 +237,18 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "AuthProvider",
         family: "auth",
         summary: "fake auth",
-        configSchema: {
-          rpID: { type: "string", required: true, min: 1 },
-          rpName: { type: "string", required: false, min: 1 },
-          expectedOrigin: { type: "list", required: true, min: 1, items: { type: "string" } },
-        },
+        configSchema: objectSchema(
+          {
+            rpID: { type: "string", minLength: 1 },
+            rpName: { type: "string", minLength: 1 },
+            expectedOrigin: {
+              type: "array",
+              minItems: 1,
+              items: { type: "string", minLength: 1 },
+            },
+          },
+          ["rpID", "expectedOrigin"],
+        ),
       }),
       "@fake/auth",
       (ctx) =>
@@ -205,7 +265,15 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "Launcher",
         family: "launcher",
         summary: "fake launcher",
-        configSchema: { mode: { type: "enum", enum: ["auto", "headless"], required: true } },
+        configSchema: objectSchema({
+          mode: { type: "string", enum: ["auto", "headless"], default: "headless" },
+        }),
+        relations: {
+          compatibleWith: {
+            entrypoints: ["fake-entrypoint"],
+            connectors: ["fake-connector"],
+          },
+        },
       }),
       "@fake/launcher",
       (ctx) =>
@@ -222,13 +290,14 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "Workspace",
         family: "workspace",
         summary: "fake workspace",
-        configSchema: { root: { type: "string", required: false, min: 1 } },
+        configSchema: objectSchema({ root: { type: "string", minLength: 1 } }),
       }),
       "@fake/workspace",
       (ctx) =>
         ctx.registerWorkspace("fake-workspace", {
           create(createCtx) {
             records.configs.workspace = createCtx.config;
+            records.workspaceConfigs.push(createCtx.config);
             return new FakeWorkspace();
           },
         }),
@@ -249,8 +318,11 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "HumanEntrypoint",
         family: "entrypoint",
         summary: "fake entrypoint",
+        configSchema: objectSchema({
+          clientTheme: { type: "string", enum: ["light", "dark"], default: "light" },
+        }),
         capability: {
-          clientAssets: [{ ref: "fake-client", kind: "fake-client" }],
+          clientAssets: [{ ref: "fake-entrypoint.fake-client", kind: "fake-client" }],
         },
       }),
       "@fake/entrypoint",
@@ -263,8 +335,9 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
         kind: "CompletionDetector",
         family: "detector",
         summary: "fake detector",
-        factoryConfigSchema: { pollMs: { type: "number", required: true, min: 1 } },
+        factoryConfigSchema: objectSchema({ pollMs: { type: "number", minimum: 1 } }, ["pollMs"]),
         capability: { completion: { statuses: { fake: { status: "done" } } } },
+        relations: { compatibleWith: { templates: ["browser-handoff"] } },
       }),
       "@fake/detector",
       (ctx) =>
@@ -272,7 +345,7 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
           create(createCtx) {
             records.configs.detector = createCtx.config;
             records.serviceBindings.detectorReadUrl =
-              createCtx.services.get<() => Promise<string | undefined>>("fake.detector.readUrl") !==
+              createCtx.services.get<() => Promise<string | undefined>>("detectorUrl.readUrl") !==
               undefined;
             return new FakeDetector();
           },
@@ -300,48 +373,94 @@ function fakeProviderSet(records: FakeRecords): AppProviderSet {
           },
         }),
     ),
+    moduleFor(
+      providerManifest({
+        id: "fake-secret-store",
+        kind: "SecretStore",
+        family: "secret-store",
+        summary: "fake secret store",
+      }),
+      "@fake/secret-store",
+      (ctx) =>
+        ctx.registerSecretStore("fake-secret-store", {
+          create: () => new FakeSecretStore(),
+        }),
+    ),
   ];
+  records.assetProviderIds = ["fake-entrypoint"];
   return {
-    moduleId: "@fake/provider-set",
     modules,
-    profile: {
+    appDeploymentConfig: {
       auth: "fake-auth",
+      channel: "fake-channel",
+      secretStore: "fake-secret-store",
+    },
+    capsuleProviders: {
       launcher: "fake-launcher",
       connector: "fake-connector",
       workspace: "fake-workspace",
       entrypoint: "fake-entrypoint",
       detector: "fake-detector",
-      channel: "fake-channel",
     },
-    defaultConfig({ family, providerId, legacy }) {
-      if (family === "auth" && providerId === "fake-auth") {
-        return legacy;
-      }
-      if (family === "launcher" && providerId === "fake-launcher") {
-        return legacy;
-      }
-      if (family === "workspace" && providerId === "fake-workspace") {
-        return legacy;
-      }
-      if (family === "detector" && providerId === "fake-detector") {
-        return legacy;
-      }
-      return undefined;
-    },
-    defaultServices({ family, providerId, legacy }) {
-      if (
-        family === "detector" &&
-        providerId === "fake-detector" &&
-        typeof legacy.readUrl === "function"
-      ) {
-        return { "fake.detector.readUrl": legacy.readUrl };
-      }
-      return undefined;
-    },
-    entrypointClientAssets(_host, providerIds) {
-      records.assetProviderIds = [...providerIds];
-      return [{ ref: "fake-client", root: process.cwd() }];
-    },
+    entrypointClientAssets: [
+      {
+        providerId: "fake-entrypoint",
+        ref: "fake-entrypoint.fake-client",
+        root: process.cwd(),
+        readOnly: true,
+      },
+    ],
+    templateProbes: { "browser-handoff": () => "available" },
+  };
+}
+
+function fakeProviderOptions(bundle: FakeProviderBundle): ProviderCompositionOptions {
+  return {
+    providerRegistry: ProviderRegistry.fromProviderModules(bundle.modules),
+    appDeploymentConfig: bundle.appDeploymentConfig,
+    capsuleProviders: bundle.capsuleProviders,
+    ...(bundle.capsuleProviderConfig !== undefined
+      ? { capsuleProviderConfig: bundle.capsuleProviderConfig }
+      : {}),
+    ...(bundle.entrypointClientAssets !== undefined
+      ? { entrypointClientAssets: bundle.entrypointClientAssets }
+      : {}),
+    ...(bundle.templateProbes !== undefined ? { templateProbes: bundle.templateProbes } : {}),
+  };
+}
+
+function fakeCapsulePlan(opts: {
+  launcherConfig?: Record<string, unknown>;
+  workspaceConfig?: Record<string, unknown>;
+}): ResolvedCapsulePlan {
+  return {
+    template: "browser-handoff",
+    providers: [
+      {
+        role: "launcher",
+        providerId: "fake-launcher",
+        config: opts.launcherConfig ?? { mode: "headless" },
+        available: true,
+        evidenceRequirements: [],
+        diagnostics: [],
+      },
+      {
+        role: "workspace",
+        providerId: "fake-workspace",
+        config: opts.workspaceConfig ?? {},
+        available: true,
+        evidenceRequirements: [],
+        diagnostics: [],
+      },
+      {
+        role: "connector",
+        providerId: "fake-connector",
+        config: {},
+        available: true,
+        evidenceRequirements: [],
+        diagnostics: [],
+      },
+    ],
   };
 }
 
@@ -354,12 +473,12 @@ function captureThrown(run: () => unknown): unknown {
   throw new Error("expected function to throw");
 }
 
-describe("provider-set agnostic app composition", () => {
-  it("projects wiring and catalog read models from Provider Host metadata for a non-reference provider set", () => {
+describe("registry-backed app composition", () => {
+  it("projects wiring and catalog read models from Provider Host metadata for a non-reference provider bundle", () => {
     const records = fakeRecords();
-    const providerSet = fakeProviderSet(records);
+    const bundle = fakeProviderBundle(records);
 
-    expect(createApp({ providerSet }).wiring).toEqual({
+    expect(createApp(fakeProviderOptions(bundle)).wiring).toEqual({
       kernel: KERNEL_MODULE,
       policy: POLICY_CEDAR_MODULE,
       auth: "@fake/auth",
@@ -368,9 +487,10 @@ describe("provider-set agnostic app composition", () => {
       workspace: "@fake/workspace",
       detector: "@fake/detector",
       channel: "@fake/channel",
+      secretStore: "@fake/secret-store",
     });
 
-    const bridge = createBridge({ providerSet });
+    const bridge = createBridge(fakeProviderOptions(bundle));
     expect(bridge.catalogList().map((entity) => entity.name)).toEqual(
       expect.arrayContaining([
         "fake-auth",
@@ -394,12 +514,250 @@ describe("provider-set agnostic app composition", () => {
     );
   });
 
+  it("awaits async capsule provider factories during provisioning", async () => {
+    const records = fakeRecords();
+    const base = fakeProviderBundle(records);
+    const bundle: FakeProviderBundle = {
+      ...base,
+      modules: [
+        ...base.modules,
+        moduleFor(
+          providerManifest({
+            id: "fake-async-launcher",
+            kind: "Launcher",
+            family: "launcher",
+            summary: "fake async launcher",
+            relations: {
+              compatibleWith: {
+                entrypoints: ["fake-entrypoint"],
+                connectors: ["fake-connector"],
+              },
+            },
+          }),
+          "@fake/async-launcher",
+          (ctx) =>
+            ctx.registerLauncher("fake-async-launcher", {
+              create: async () => new FakeLauncher(),
+            }),
+        ),
+      ],
+      capsuleProviders: { ...base.capsuleProviders, launcher: "fake-async-launcher" },
+    };
+
+    const stack = createProvisioningBridge({
+      ...fakeProviderOptions(bundle),
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+    try {
+      const created = await stack.bridge.sessionCreate({
+        proposal: {
+          intent: "reg",
+          template: "browser-handoff",
+          recipient: "tg:user:1",
+        },
+      });
+      expect(created).toMatchObject({
+        decision: "accept",
+        state: "active",
+        capsule_plan: {
+          providers: expect.arrayContaining([
+            expect.objectContaining({ role: "launcher", providerId: "fake-async-launcher" }),
+          ]),
+        },
+      });
+    } finally {
+      await stack.close();
+    }
+  });
+
+  it("creates separate workspace providers for same provider id with different plan config", async () => {
+    const records = fakeRecords();
+    const bundle = fakeProviderBundle(records);
+    const stack = createProvisioningBridge({
+      ...fakeProviderOptions(bundle),
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+    const spec: ResolvedAssemblySpec = {
+      apiVersion: "gla.dev/v1",
+      kind: "Assembly",
+      metadata: { intent: "workspace config cache proof" },
+      spec: {
+        template: "browser-handoff",
+        recipient: "tg:user:1" as never,
+        launcher: { use: "fake-launcher" },
+        workspace: { use: "fake-workspace" },
+      },
+      __resolved: true,
+    };
+    try {
+      await stack.lifecycle.spawn(
+        "sess_workspace_a",
+        spec,
+        fakeCapsulePlan({ workspaceConfig: { root: "/tmp/fake-a" } }),
+      );
+      await stack.lifecycle.spawn(
+        "sess_workspace_b",
+        spec,
+        fakeCapsulePlan({ workspaceConfig: { root: "/tmp/fake-b" } }),
+      );
+
+      expect(records.workspaceConfigs).toEqual([{ root: "/tmp/fake-a" }, { root: "/tmp/fake-b" }]);
+    } finally {
+      await stack.lifecycle.teardown("sess_workspace_a");
+      await stack.lifecycle.teardown("sess_workspace_b");
+      await stack.close();
+    }
+  });
+
+  it("reports provider.async_unsupported for remaining synchronous boot provider paths", () => {
+    const records = fakeRecords();
+    const base = fakeProviderBundle(records);
+    const bundle: FakeProviderBundle = {
+      ...base,
+      modules: [
+        ...base.modules,
+        moduleFor(
+          providerManifest({
+            id: "fake-async-auth",
+            kind: "AuthProvider",
+            family: "auth",
+            summary: "fake async auth",
+            configSchema: objectSchema({
+              rpID: { type: "string", minLength: 1 },
+              expectedOrigin: {
+                type: "array",
+                minItems: 1,
+                items: { type: "string", minLength: 1 },
+              },
+            }),
+          }),
+          "@fake/async-auth",
+          (ctx) =>
+            ctx.registerAuthProvider("fake-async-auth", {
+              create: async () => new FakeAuthProvider(),
+            }),
+        ),
+      ],
+      appDeploymentConfig: { ...base.appDeploymentConfig, auth: "fake-async-auth" },
+    };
+
+    const error = captureThrown(() =>
+      createEnrollmentStack({
+        ...fakeProviderOptions(bundle),
+        expectedOrigin: "http://127.0.0.1:3000",
+        publicBaseUrl: "http://127.0.0.1:3000",
+      }),
+    );
+    expect(error).toMatchObject({
+      code: "dependency.unavailable",
+      detail: {
+        diagnostics: [
+          expect.objectContaining({
+            code: "provider.async_unsupported",
+            providerId: "fake-async-auth",
+            family: "auth",
+          }),
+        ],
+      },
+    });
+  });
+
+  it("does not treat public-edge WPM evidence as reachable without a template probe", () => {
+    const records = fakeRecords();
+    const bundle = fakeProviderBundle(records);
+
+    const bridge = createBridge({
+      ...fakeProviderOptions({ ...bundle, templateProbes: undefined }),
+      dependencyBindings: referenceWpmDependencyBindings(),
+    });
+    const show = bridge.templateShow("browser-handoff");
+
+    expect(show.available).toBe(false);
+    expect(show.availability).toBe("unavailable");
+    expect(show.dependencies[0]).toMatchObject({
+      dependency: "edge-proxy",
+      status: "bound",
+      diagnostics: { install: "available", runtime: "unavailable" },
+      publicEdgeTransport: expect.objectContaining({
+        currentReachability: { result: "unavailable" },
+      }),
+    });
+    expect(show.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "template.dependency_unavailable",
+          dependency: "edge-proxy",
+          dependencyScope: "template",
+          install: "available",
+          runtime: "unavailable",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps the runtime bridge closed to providers registered after boot composition", async () => {
+    const records = fakeRecords();
+    const bundle = fakeProviderBundle(records);
+    const providerHost = new ProviderHost().registerModules(bundle.modules);
+    const bridge = createBridge({
+      providerHost,
+      appDeploymentConfig: bundle.appDeploymentConfig,
+      capsuleProviders: bundle.capsuleProviders,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      templateProbes: bundle.templateProbes ?? {},
+    });
+
+    expect(bridge.catalogList().map((entity) => entity.name)).not.toContain("late-entrypoint");
+    expect(() => bridge.skillShow("use-late-entrypoint")).toThrowError(/unknown skill/i);
+
+    providerHost.registerModule(
+      moduleFor(
+        providerManifest({
+          id: "late-entrypoint",
+          kind: "HumanEntrypoint",
+          family: "entrypoint",
+          summary: "late entrypoint",
+        }),
+        "@fake/late-entrypoint",
+        (ctx) =>
+          ctx.registerHumanEntrypoint("late-entrypoint", {
+            create: () => new FakeEntrypoint(),
+          }),
+      ),
+    );
+
+    expect(providerHost.providerManifest("late-entrypoint")).toBeDefined();
+    expect(bridge.catalogList().map((entity) => entity.name)).not.toContain("late-entrypoint");
+    const compatibleEntrypoints =
+      bridge.templateShow("browser-handoff").compatibleProviders?.entrypoint ?? [];
+    expect(compatibleEntrypoints).not.toContain("late-entrypoint");
+    expect(() => bridge.skillShow("use-late-entrypoint")).toThrowError(/unknown skill/i);
+    await expect(
+      bridge.sessionCreate({
+        proposal: {
+          intent: "try a provider registered after daemon boot",
+          template: "browser-handoff",
+          recipient: "tg:user:123",
+          entrypoints: [{ use: "late-entrypoint" }],
+        },
+        dryRun: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "policy.denied",
+      detail: {
+        part: "entrypoint",
+        use: "late-entrypoint",
+        compatibleWith: ["fake-entrypoint"],
+      },
+    });
+  });
+
   it("fails closed through Provider Host diagnostics when a selected provider is unknown", () => {
-    const providerSet = fakeProviderSet(fakeRecords());
+    const bundle = fakeProviderBundle(fakeRecords());
     const error = captureThrown(() =>
       createApp({
-        providerSet,
-        providerProfile: { auth: "missing-auth" },
+        ...fakeProviderOptions(bundle),
+        appDeploymentConfig: { ...bundle.appDeploymentConfig, auth: "missing-auth" },
       }),
     );
 
@@ -419,11 +777,11 @@ describe("provider-set agnostic app composition", () => {
   });
 
   it("fails closed through Provider Host diagnostics when a selected provider has the wrong family", () => {
-    const providerSet = fakeProviderSet(fakeRecords());
+    const bundle = fakeProviderBundle(fakeRecords());
     const error = captureThrown(() =>
       createApp({
-        providerSet,
-        providerProfile: { auth: "fake-launcher" },
+        ...fakeProviderOptions(bundle),
+        appDeploymentConfig: { ...bundle.appDeploymentConfig, auth: "fake-launcher" },
       }),
     );
 
@@ -446,11 +804,12 @@ describe("provider-set agnostic app composition", () => {
     expect(JSON.stringify(error)).not.toContain("super-secret-token");
   });
 
-  it("creates runtime ports, provider defaults, services, and assets through the same generic boot path", async () => {
+  it("creates runtime ports, provider config, services, and assets through the same generic boot path", async () => {
     const records = fakeRecords();
-    const providerSet = fakeProviderSet(records);
+    const bundle = fakeProviderBundle(records);
     const stack = createProvisioningBridge({
-      providerSet,
+      ...fakeProviderOptions(bundle),
+      dependencyBindings: referenceWpmDependencyBindings(),
       launcherMode: "headless",
       workspaceRoot: "/tmp/fake-gla-workspace",
       handoff: {
@@ -465,9 +824,63 @@ describe("provider-set agnostic app composition", () => {
       },
     });
     try {
+      expect(stack.providerGraphDoctor).toMatchObject({
+        status: "PASS",
+        profileId: "resolved-runtime-selection",
+        selectedProviders: expect.objectContaining({
+          Launcher: "fake-launcher",
+          HumanEntrypoint: "fake-entrypoint",
+          AgentConnector: "fake-connector",
+        }),
+        providers: expect.arrayContaining([
+          expect.objectContaining({
+            providerId: "fake-entrypoint",
+            selected: true,
+            diagnostics: expect.arrayContaining([
+              expect.objectContaining({ code: "provider.available" }),
+            ]),
+          }),
+        ]),
+      });
+      expect(stack.bridge.catalogList().map((entity) => entity.name)).toContain("fake-entrypoint");
+      expect(stack.bridge.skillShow("use-fake-entrypoint")).toMatchObject({
+        id: "use-fake-entrypoint",
+        for: "fake-entrypoint",
+      });
+      const created = await stack.bridge.sessionCreate({
+        proposal: {
+          intent: "exercise fake provider set",
+          template: "browser-handoff",
+          recipient: "tg:user:123",
+        },
+      });
+      expect(created).toMatchObject({
+        decision: "accept",
+        state: "active",
+      });
+      const detector = stack.detector;
+      expect(detector).toBeDefined();
+      if (detector === undefined) {
+        throw new Error("expected detector to be wired");
+      }
+      for await (const _signal of detector.watch("runtime:fake" as RuntimeHandle, {})) {
+        // The fake detector does not emit; iterating is enough to force lazy Provider Host creation.
+      }
+      await expect(
+        stack.bridge.sessionCreate({
+          proposal: {
+            intent: "exercise fake provider set",
+            template: "browser-handoff",
+            recipient: "tg:user:123",
+          },
+          dryRun: true,
+        }),
+      ).resolves.toMatchObject({
+        decision: "accept",
+        dry_run: true,
+      });
       expect(stack.authModule).toBe("@fake/auth");
       expect(stack.entrypoint).toBeDefined();
-      expect(stack.detector).toBeDefined();
       await expect(stack.connector.attach("runtime:fake" as RuntimeHandle)).resolves.toMatchObject({
         type: "fake",
         provider: "fake-connector",
@@ -479,7 +892,7 @@ describe("provider-set agnostic app composition", () => {
       });
       expect(records.configs.launcher).toMatchObject({ mode: "headless" });
       expect(records.configs.workspace).toMatchObject({ root: "/tmp/fake-gla-workspace" });
-      expect(records.configs.detector).toMatchObject({ pollMs: 7 });
+      await expect.poll(() => records.configs.detector).toMatchObject({ pollMs: 7 });
       expect(records.serviceBindings.detectorReadUrl).toBe(true);
       expect(records.serviceBindings.channelIdentity).toBe(true);
       expect(records.assetProviderIds).toEqual(["fake-entrypoint"]);

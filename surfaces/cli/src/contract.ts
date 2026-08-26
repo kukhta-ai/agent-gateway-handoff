@@ -10,17 +10,34 @@ export interface CliCommandSpec {
   summary: string;
   args: string[];
   flags: string[];
+  /** Long flag names that may be supplied more than once, preserving input order. */
+  repeatableFlags?: string[];
   output: string;
   fields: string[];
   exitCodes: number[];
   effect: CliCommandEffect;
 }
 
+type PublicCliCommandSpec = Omit<CliCommandSpec, "repeatableFlags">;
+
 /** Machine-readable contract for a documented but intentionally deferred CLI surface. */
 export interface DeferredCliSurface {
   surface: string;
   reason: string;
   followUp: string;
+}
+
+interface DeferredCliSurfaceContract extends DeferredCliSurface {
+  nouns: readonly string[];
+  verbs?: readonly string[];
+  matchesBare?: boolean;
+  matchesAnyVerb?: boolean;
+  message: string;
+}
+
+export interface DeferredCliUnsupported {
+  surface: string;
+  message: string;
 }
 
 /** Supported global flags for the current executable contract. */
@@ -33,54 +50,109 @@ export const CURRENT_GLOBAL_FLAGS = [
   "-h/--help",
 ] as const;
 
-/** Documented future/deferred surfaces that must fail with stable unsupported diagnostics today. */
-export const DEFERRED_CLI_SURFACES: readonly DeferredCliSurface[] = [
+const DEFERRED_CLI_SURFACE_CONTRACTS: readonly DeferredCliSurfaceContract[] = [
   {
     surface: "policy mounts",
     reason: "policy inspection is planned but not part of the current executable agent CLI slice",
     followUp: "future CLI policy surface",
+    nouns: ["policy"],
+    verbs: ["mounts"],
+    matchesBare: true,
+    message: "policy inspection is deferred for the current CLI contract",
   },
   {
     surface: "events",
     reason: "event streaming and NDJSON follow mode are planned but not implemented in this slice",
     followUp: "future CLI events stream",
+    nouns: ["events"],
+    matchesAnyVerb: true,
+    message: "event streaming is deferred for the current CLI contract",
   },
   {
     surface: "audit list",
     reason: "audit browsing is planned but not implemented in this slice",
     followUp: "future CLI audit browser",
+    nouns: ["audit"],
+    verbs: ["list"],
+    matchesBare: true,
+    message: "audit browsing is deferred for the current CLI contract",
   },
   {
     surface: "auth login/logout",
     reason:
       "authenticated-agent profiles are future work; the current local profile is credential-free",
     followUp: "future authenticated Agent Bridge profile",
+    nouns: ["auth"],
+    verbs: ["login", "logout"],
+    message:
+      "authenticated-agent login/logout is deferred; the current local profile is credential-free",
   },
   {
     surface: "output ndjson",
     reason: "streaming output is reserved for future events/audit surfaces",
     followUp: "future CLI streaming contract",
+    nouns: [],
+    message: "ndjson output is deferred until streaming commands exist",
   },
   {
     surface: "--context",
     reason:
       "multi-install context selection is planned; current endpoint selection uses GLA_ENDPOINT or --endpoint",
     followUp: "future CLI context profiles",
+    nouns: [],
+    message:
+      "context selection is deferred; use GLA_ENDPOINT or --endpoint for the current local profile",
   },
   {
     surface: "--trace-id",
     reason: "trace correlation is planned with audit/event work",
     followUp: "future CLI trace/audit correlation",
+    nouns: [],
+    message: "trace correlation is deferred until audit/event support is implemented",
   },
   {
     surface: "batch operations",
     reason:
       "bulk task/session operations are planned only after single-operation semantics are stable",
     followUp: "future CLI batch contract",
+    nouns: ["batch"],
+    matchesAnyVerb: true,
+    message: "batch operations are deferred for the current CLI contract",
   },
 ] as const;
 
-/** The current executable leaf command contract. Keep this in lockstep with the parser in cli.ts. */
+/** Documented future/deferred surfaces that must fail with stable unsupported diagnostics today. */
+export const DEFERRED_CLI_SURFACES: readonly DeferredCliSurface[] =
+  DEFERRED_CLI_SURFACE_CONTRACTS.map(({ surface, reason, followUp }) => ({
+    surface,
+    reason,
+    followUp,
+  }));
+
+/** Find a documented deferred surface by parsed noun/verb. */
+export function findDeferredCliSurface(
+  noun: string,
+  verb: string | undefined,
+): DeferredCliUnsupported | undefined {
+  const match = DEFERRED_CLI_SURFACE_CONTRACTS.find((surface) => {
+    if (!surface.nouns.includes(noun)) {
+      return false;
+    }
+    if (surface.matchesAnyVerb === true) {
+      return true;
+    }
+    if (verb === undefined) {
+      return surface.matchesBare === true;
+    }
+    return surface.verbs?.includes(verb) === true;
+  });
+  if (match === undefined) {
+    return undefined;
+  }
+  return { surface: match.surface, message: match.message };
+}
+
+/** The current executable leaf command contract. The parser consumes this contract rather than duplicating arity/flag metadata. */
 export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   {
     noun: "whoami",
@@ -119,8 +191,51 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     args: [],
     flags: ["--kind <k>", "--available"],
     output: "entity[]",
-    fields: ["id", "name", "kind", "family", "status", "available", "dependencies"],
+    fields: [
+      "id",
+      "name",
+      "kind",
+      "family",
+      "status",
+      "available",
+      "availability",
+      "dependencies",
+      "defaultSource",
+      "provenance",
+      "clientAssets",
+      "diagnostics",
+    ],
     exitCodes: [ExitCode.OK, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "catalog",
+    verb: "show",
+    summary: "show one provider/template catalog entity with graph availability and diagnostics",
+    args: ["id"],
+    flags: [],
+    output: "entity",
+    fields: [
+      "id",
+      "name",
+      "kind",
+      "family",
+      "status",
+      "available",
+      "availability",
+      "dependencies",
+      "requires",
+      "config_schema",
+      "diagnostics",
+      "provenance",
+      "defaultSource",
+      "resolvedConfig",
+      "clientAssets",
+      "compatibleProviders",
+      "parts",
+      "defaultSources",
+    ],
+    exitCodes: [ExitCode.OK, ExitCode.NOT_FOUND, ExitCode.USAGE, ExitCode.INTERNAL],
     effect: "read",
   },
   {
@@ -141,7 +256,20 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     args: ["id"],
     flags: [],
     output: "template",
-    fields: ["id", "name", "requiredParts", "parts"],
+    fields: [
+      "id",
+      "name",
+      "requiredParts",
+      "available",
+      "availability",
+      "dependencies",
+      "parts",
+      "compatibleProviders",
+      "compatibilityConstraints",
+      "packageProvenance",
+      "defaultSources",
+      "diagnostics",
+    ],
     exitCodes: [ExitCode.OK, ExitCode.NOT_FOUND, ExitCode.USAGE, ExitCode.INTERNAL],
     effect: "read",
   },
@@ -165,6 +293,206 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     output: "skill",
     fields: ["id", "for", "body"],
     exitCodes: [ExitCode.OK, ExitCode.NOT_FOUND, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "provider",
+    verb: "scaffold",
+    summary: "emit a JSON runtime provider package authoring skeleton",
+    args: [],
+    flags: ["--family <family>", "--id <provider-id>", "--version <version>", "--summary <text>"],
+    output: "provider-authoring-skeleton",
+    fields: ["manifest", "module", "docs", "contractTests", "changedFiles", "wpmSkeletons"],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "provider",
+    verb: "validate",
+    summary: "validate a provider authoring JSON file or local authoring bundle",
+    args: ["path"],
+    flags: [],
+    output: "provider-authoring-report",
+    fields: ["ok", "diagnostics", "readiness", "providers", "templatePackages"],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "provider",
+    verb: "test",
+    summary: "run local provider authoring contract preflight",
+    args: ["path"],
+    flags: [],
+    output: "provider-authoring-test-report",
+    fields: [
+      "ok",
+      "harness",
+      "declaredContractTests",
+      "externalContractTests",
+      "validation",
+      "tests",
+    ],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "provider",
+    verb: "inspect",
+    summary: "show provider authoring readiness for reviewer/operator handoff",
+    args: ["path"],
+    flags: [],
+    output: "provider-authoring-inspection",
+    fields: [
+      "kind",
+      "providerId",
+      "family",
+      "version",
+      "ok",
+      "diagnostics",
+      "readiness",
+      "changedFiles",
+      "capability",
+      "configSchema",
+      "factoryConfigSchema",
+      "requirements",
+      "skills",
+      "docs",
+      "contractTests",
+      "module",
+      "wpmSkeletons",
+    ],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "template-package",
+    verb: "scaffold",
+    summary: "emit a JSON TemplatePackage authoring skeleton",
+    args: [],
+    flags: [
+      "--id <package-id>",
+      "--template <template-id>",
+      "--launcher <provider-id>",
+      "--entrypoint <provider-id>",
+      "--connector <provider-id>",
+      "--workspace <provider-id>",
+      "--detector <provider-id>",
+      "--open-parts <parts>",
+      "--version <version>",
+      "--summary <text>",
+    ],
+    output: "template-package-authoring-skeleton",
+    fields: ["manifest", "docs", "changedFiles", "wpmSkeletons"],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "template-package",
+    verb: "validate",
+    summary: "validate a TemplatePackage authoring JSON file or local authoring bundle",
+    args: ["path"],
+    flags: [],
+    output: "template-package-authoring-report",
+    fields: ["ok", "diagnostics", "readiness", "providers", "templatePackages"],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "template-package",
+    verb: "test",
+    summary: "run local TemplatePackage authoring contract preflight",
+    args: ["path"],
+    flags: [],
+    output: "template-package-authoring-test-report",
+    fields: [
+      "ok",
+      "harness",
+      "declaredContractTests",
+      "externalContractTests",
+      "validation",
+      "tests",
+    ],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "template-package",
+    verb: "inspect",
+    summary: "show TemplatePackage readiness for reviewer/operator handoff",
+    args: ["path"],
+    flags: [],
+    output: "template-package-authoring-inspection",
+    fields: [
+      "kind",
+      "packageId",
+      "templateIds",
+      "version",
+      "ok",
+      "diagnostics",
+      "readiness",
+      "changedFiles",
+      "defaults",
+      "compatibility",
+      "templates",
+      "docs",
+      "tests",
+      "wpmSkeletons",
+    ],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "provider-install",
+    verb: "plan",
+    summary: "preview an operator provider package install or update without mutating state",
+    args: ["path"],
+    flags: ["--state <path>"],
+    output: "provider-install-plan",
+    fields: [
+      "ok",
+      "mode",
+      "status",
+      "candidate",
+      "active",
+      "changes",
+      "diagnostics",
+      "doctor",
+      "activation",
+    ],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "read",
+  },
+  {
+    noun: "provider-install",
+    verb: "apply",
+    summary: "activate a verified provider inventory into an operator state file",
+    args: ["path"],
+    flags: ["--state <path>"],
+    output: "provider-install-apply-result",
+    fields: ["ok", "activated", "plan", "activeInventory", "activeSummary", "rollbackSnapshot"],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "mutates",
+  },
+  {
+    noun: "provider-install",
+    verb: "rollback",
+    summary: "restore a provider install rollback snapshot into an operator state file",
+    args: ["path"],
+    flags: ["--state <path>"],
+    output: "provider-install-rollback-result",
+    fields: ["ok", "restoredInventory", "restoredSummary"],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
+    effect: "mutates",
+  },
+  {
+    noun: "doctor",
+    verb: "provider-graph",
+    summary: "report installed provider inventory, selected defaults, and graph problems",
+    args: ["path"],
+    flags: [],
+    output: "provider-graph-doctor",
+    fields: ["mode", "inventory", "doctor"],
+    exitCodes: [ExitCode.OK, ExitCode.USAGE, ExitCode.INTERNAL],
     effect: "read",
   },
   {
@@ -281,8 +609,18 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
       "--mount <host>:<target>:<ro|rw>",
       "--dry-run",
     ],
+    repeatableFlags: ["entrypoint", "detector", "mount"],
     output: "session-create-result",
-    fields: ["decision", "dry_run", "session_id", "state", "task_id", "capsule", "connector"],
+    fields: [
+      "decision",
+      "dry_run",
+      "session_id",
+      "state",
+      "task_id",
+      "capsule_plan",
+      "capsule",
+      "connector",
+    ],
     exitCodes: [
       ExitCode.OK,
       ExitCode.USAGE,
@@ -470,22 +808,40 @@ export function schemaPayload(noun?: string, verb?: string): Record<string, unkn
       command: "gla",
       current_contract: "GLA-094 current executable CLI surface",
       global_flags: [...CURRENT_GLOBAL_FLAGS],
-      commands: CLI_COMMANDS,
+      commands: publicCommandSpecs(CLI_COMMANDS),
       deferred_surfaces: DEFERRED_CLI_SURFACES,
       exit_codes: exitCodePayload(),
     };
   }
+  const found = verb === undefined ? undefined : findCommandSpec(noun, verb);
   const scoped =
-    verb === undefined ? commandSpecsForNoun(noun) : [findCommandSpec(noun, verb)].filter(Boolean);
+    verb === undefined ? commandSpecsForNoun(noun) : found === undefined ? [] : [found];
   return {
     command: ["gla", noun, verb].filter(Boolean).join(" "),
     global_flags: [...CURRENT_GLOBAL_FLAGS],
-    commands: scoped,
+    commands: publicCommandSpecs(scoped),
     deferred_surfaces: DEFERRED_CLI_SURFACES.filter(
       (d) => d.surface === noun || d.surface.startsWith(`${noun} `),
     ),
     exit_codes: exitCodePayload(),
   };
+}
+
+function publicCommandSpecs(commands: readonly CliCommandSpec[]): PublicCliCommandSpec[] {
+  return commands.map((command) => {
+    const { noun, verb, summary, args, flags, output, fields, exitCodes, effect } = command;
+    return {
+      noun,
+      ...(verb === undefined ? {} : { verb }),
+      summary,
+      args,
+      flags,
+      output,
+      fields,
+      exitCodes,
+      effect,
+    };
+  });
 }
 
 /** Stable exit-code taxonomy exposed through help/schema. */

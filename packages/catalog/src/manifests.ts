@@ -9,7 +9,12 @@
 // each with static dependency requirements. Dynamic DependencyBinding receipts are supplied by WPM
 // at runtime; manifests must never imply host software is already installed.
 
-import type { ConfigSchema } from "@gla/kernel";
+import type {
+  AuthAssuranceDiagnostic,
+  AuthAssuranceLevel,
+  AuthAssuranceProfile,
+  ConfigSchema,
+} from "@gla/kernel";
 
 /** The pluggable provider families (docs/02 §3) this slice seeds. */
 export type ProviderFamily =
@@ -67,8 +72,38 @@ export interface DependencyRequirement {
   hostTouching?: boolean;
   /** Named connection references the WPM receipt must expose for this dependency to be usable. */
   connectionRefs?: string[];
+  /** True when this dependency proves public transport to Access Gateway, not authorization semantics. */
+  publicEdge?: boolean;
   /** Deterministic bundle evidence for the dependency, if the dependency is WPM-managed. */
   bundle?: WpmBundleEvidence;
+}
+
+/** Provider-neutral proof fields an AuthProvider can emit for assurance enforcement. */
+export type AuthProviderAssuranceEvidenceField =
+  | "methodResolvable"
+  | "userPresent"
+  | "userVerified"
+  | "recipientBound"
+  | "replayResistant";
+
+/**
+ * AuthProvider assurance capability declared in provider manifests.
+ *
+ * This is static read-model metadata: it tells operators and graph/doctor surfaces which provider-neutral
+ * assurance policies the provider can satisfy and which common evidence fields are required. Runtime enforcement
+ * still uses the actual {@link AuthAssuranceEvidence} returned by the provider for each ceremony.
+ */
+export interface AuthProviderAssuranceCapability {
+  /** Operator-facing policies this provider can satisfy when runtime evidence proves the required facts. */
+  supportedPolicies: readonly AuthAssuranceProfile[];
+  /** Highest provider-neutral assurance tier this provider can emit. */
+  maxLevel: AuthAssuranceLevel;
+  /** Evidence fields required before this provider can satisfy phishing-resistant policy. */
+  requiredEvidence: readonly AuthProviderAssuranceEvidenceField[];
+  /** Safe floor for valid but missing, ambiguous, or provider-specific evidence. */
+  degradesTo?: AuthAssuranceLevel;
+  /** Redacted diagnostic reasons this provider may emit when evidence degrades or fails. */
+  diagnostics?: readonly AuthAssuranceDiagnostic[];
 }
 
 /** A reference to a connection fact. Sensitive facts must be secret refs, never literal values. */
@@ -83,6 +118,30 @@ export interface DependencyConnectionRef {
 export interface DependencyConnectionEvidence {
   /** Named connection references, such as `endpoint`, `chromium`, `clientSecret`, or `socket`. */
   refs: Record<string, DependencyConnectionRef>;
+}
+
+/** Public-edge route operation mode recorded by WPM for the edge proxy dependency. */
+export type PublicEdgeRouteMode = "route-programming" | "manual-route";
+
+/** Accepted log handling posture for sensitive public-edge carrier fields. */
+export type PublicEdgeLogRedactionState = "redacted" | "not-logged";
+
+/** Public-edge log posture for carrier fields that may contain grants or bearer material. */
+export interface PublicEdgeLogRedactionPosture {
+  queryString: PublicEdgeLogRedactionState;
+  cookie: PublicEdgeLogRedactionState;
+  authorization: PublicEdgeLogRedactionState;
+  secWebSocketProtocol: PublicEdgeLogRedactionState;
+}
+
+/** WPM-recorded public-edge transport evidence. It is transport proof, not auth proof. */
+export interface PublicEdgeTransportEvidence {
+  /** Public base path configured on the edge, e.g. `/` or `/team-a/`. */
+  basePath: string;
+  /** Whether GLA can program routes or the operator maintains them manually. */
+  routeMode: PublicEdgeRouteMode;
+  /** Redaction posture for public-edge logs carrying handoff URLs or stream tickets. */
+  logRedaction: PublicEdgeLogRedactionPosture;
 }
 
 /** Probe evidence captured at a specific point in time. */
@@ -146,6 +205,8 @@ export interface DependencyBinding {
   receipt: DependencyReceiptEvidence;
   /** Connection references GLA may use; secrets must be secret refs. */
   connection?: DependencyConnectionEvidence;
+  /** Public-edge transport evidence when the dependency exposes Access Gateway publicly. */
+  publicEdge?: PublicEdgeTransportEvidence;
   /** Legacy compatibility flag from the earlier binding sketch; structured `state` is authoritative. */
   installed?: boolean;
   /** Last WPM install-time verification probe. */
@@ -169,6 +230,8 @@ export interface IndexedDependencyBinding extends DependencyRequirement {
   state?: DependencyState;
   /** Sanitized connection references. */
   connection?: DependencyConnectionEvidence;
+  /** Accepted public-edge transport descriptor, if this dependency is the selected edge transport. */
+  publicEdgeTransport?: PublicEdgeTransportDescriptor;
   /** WPM receipt metadata. */
   receipt?: DependencyReceiptEvidence;
   /** WPM install-time probe evidence. */
@@ -186,6 +249,21 @@ export interface IndexedDependencyBinding extends DependencyRequirement {
     install: ProbeResult;
     runtime: ProbeResult;
   };
+}
+
+/** Public-edge transport descriptor projected to catalog, doctor, and graph read models. */
+export interface PublicEdgeTransportDescriptor extends PublicEdgeTransportEvidence {
+  dependency: string;
+  publicBaseUrl: DependencyConnectionRef;
+  accessGatewayUpstream: DependencyConnectionRef;
+  acceptedReceipt: {
+    source: "wpm-receipt";
+    bundleId: string;
+    bundleVersion: string;
+    taskId: string;
+    refs?: string[];
+  };
+  currentReachability: DependencyProbeEvidence;
 }
 
 /** A skill a provider/template ships (docs/02 §3). The body is emitted by `gla skill show`. */
@@ -282,16 +360,27 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         mounts: { host_paths: ["file", "directory"], modes: ["ro", "rw"] },
       },
       config_schema: {
-        mode: {
-          type: "enum",
-          required: false,
-          default: "auto",
-          enum: ["auto", "headless", "full"],
-          conflicts_with: ["headless"],
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          mode: {
+            type: "string",
+            default: "auto",
+            enum: ["auto", "headless", "full"],
+          },
+          headless: { type: "boolean" },
+          chromiumPath: { type: "string", minLength: 1 },
+          startTimeoutMs: { type: "number", minimum: 1 },
         },
-        headless: { type: "bool", required: false, conflicts_with: ["mode"] },
-        chromiumPath: { type: "string", required: false, min: 1 },
-        startTimeoutMs: { type: "number", required: false, min: 1 },
+        allOf: [
+          {
+            not: {
+              type: "object",
+              required: ["mode", "headless"],
+              properties: { mode: {}, headless: {} },
+            },
+          },
+        ],
       },
       // The browser-runtime host dependency (GLA-007 stands it up via WPM); not seeded as bound.
       requires: [
@@ -331,7 +420,7 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         summary: "noVNC live-view human entrypoint (agent-blind input path)",
         client: {
           kind: "rfb-web-client",
-          ref: "novnc",
+          ref: "entrypoint-novnc.novnc",
           bootstrap: {
             module: "core/rfb.js",
             scaleViewport: true,
@@ -341,7 +430,7 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
         },
         clientAssets: [
           {
-            ref: "novnc",
+            ref: "entrypoint-novnc.novnc",
             source: "package",
             package: "@novnc/novnc",
             env: "GLA_NOVNC_WEB_ROOT",
@@ -406,7 +495,11 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
       family: "workspace",
       capability: { summary: "ephemeral browser-profile-temp workspace (wiped at reap)" },
       config_schema: {
-        root: { type: "string", required: false, min: 1 },
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          root: { type: "string", minLength: 1 },
+        },
       },
       // In-tree, no host dependency to stand up.
       probe: "workspace-profile",
@@ -431,19 +524,33 @@ export const PROVIDER_MANIFESTS: Record<string, ProviderManifest> = {
             "url-complete": { status: "verified" },
           },
           resultSchema: {
-            url: { type: "string", required: true },
-            match: { type: "string", required: false },
+            type: "object",
+            additionalProperties: false,
+            required: ["url"],
+            properties: {
+              url: { type: "string" },
+              match: { type: "string" },
+            },
           },
         },
       },
       config_schema: {
-        complete_on: { type: "string", required: true, pattern: "^/" },
-        // An optional INTERMEDIATE URL (e.g. `/verify`) — the watcher emits an intermediate signal on its first
-        // match before the terminal `complete_on` (scenario-01 Phase 8: `/verify` → submitted, next email-verification).
-        intermediate: { type: "string", required: false, pattern: "^/" },
+        type: "object",
+        additionalProperties: false,
+        required: ["complete_on"],
+        properties: {
+          complete_on: { type: "string", pattern: "^/" },
+          // An optional INTERMEDIATE URL (e.g. `/verify`) — the watcher emits an intermediate signal on its first
+          // match before the terminal `complete_on` (scenario-01 Phase 8: `/verify` → submitted, next email-verification).
+          intermediate: { type: "string", pattern: "^/" },
+        },
       },
       factory_config_schema: {
-        pollMs: { type: "number", required: false, min: 1 },
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          pollMs: { type: "number", minimum: 1 },
+        },
       },
       probe: "url-watcher",
       relations: { compatibleWith: { templates: ["browser-handoff"] } },
@@ -495,6 +602,7 @@ export const BROWSER_HANDOFF_TEMPLATE: TemplateManifest = {
         dependency: "edge-proxy",
         hostTouching: true,
         connectionRefs: ["publicBaseUrl", "gatewayUpstream"],
+        publicEdge: true,
         bundle: {
           id: "edge-proxy",
           version: "0.1.0",
@@ -508,8 +616,13 @@ export const BROWSER_HANDOFF_TEMPLATE: TemplateManifest = {
     // registered provider manifests.
     openParts: ["entrypoint", "connector", "detector"],
     openParams: {
-      recipient: { type: "string", required: true },
-      ttl: { type: "string", required: false, pattern: "^[0-9]+(s|m|h|d)$" },
+      type: "object",
+      additionalProperties: false,
+      required: ["recipient"],
+      properties: {
+        recipient: { type: "string" },
+        ttl: { type: "string", pattern: "^[0-9]+(s|m|h|d)$" },
+      },
     },
     probe: "browser-handoff",
     skills: [
@@ -541,8 +654,12 @@ export const CHANNEL_CLI_MANIFEST: ProviderManifest = {
     family: "channel",
     capability: { summary: "local/CLI fallback channel (headless tests)" },
     config_schema: {
-      delivery: { type: "enum", enum: ["stdout", "injected"], required: false },
-      inbound: { type: "enum", enum: ["memory", "injected"], required: false },
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        delivery: { type: "string", enum: ["stdout", "injected"] },
+        inbound: { type: "string", enum: ["memory", "injected"] },
+      },
     },
     probe: "channel-cli",
   },

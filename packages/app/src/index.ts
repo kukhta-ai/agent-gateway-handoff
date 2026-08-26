@@ -3,16 +3,15 @@
 // reference provider set and selected profile as boot-time distribution data.
 
 import {
-  AUTH_WEBAUTHN_PROVIDER_ID,
-  CHANNEL_CLI_PROVIDER_ID,
-  CONNECTOR_CDP_PROVIDER_ID,
-  DETECTOR_URL_PROVIDER_ID,
-  ENTRYPOINT_NOVNC_PROVIDER_ID,
-  LAUNCHER_PROCESS_PROVIDER_ID,
-  PROVIDER_SET_REFERENCE_MODULE,
-  WORKSPACE_PROFILE_PROVIDER_ID,
+  REFERENCE_PROFILE_HARDENED_IDP_ID,
+  REFERENCE_PROFILE_LOCAL_DEV_ID,
+  REFERENCE_PROFILE_SCENARIO_01_ID,
+  REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
+  createReferenceProviderRegistry,
+  referenceAppDeploymentConfigForProfile,
+  referenceCapsuleProviderSelectionForProfile,
   referenceEntrypointClientAssetMounts,
-  referenceProviderModules,
+  referenceTemplateProbes,
 } from "@gla/provider-set-reference";
 import {
   createApp as createGenericApp,
@@ -22,15 +21,12 @@ import {
 } from "./composition.js";
 import type {
   App,
-  AppProviderSet,
+  AppDeploymentConfigInput,
   CreateBridgeOptions,
   CreateEnrollmentStackOptions,
   CreateProvisioningBridgeOptions,
   EnrollmentStack,
   ProviderCompositionOptions,
-  ProviderDefaultConfigArgs,
-  ProviderDefaultServicesArgs,
-  ProviderSelectionProfile,
   ProvisioningStack,
 } from "./composition.js";
 import {
@@ -46,103 +42,132 @@ export * from "./composition.js";
 export { defaultBridgeEndpoint, endpointIsLocal, parseServeArgs };
 export type { DaemonHandle, ServeOptions };
 
-/** Default selected provider ids for the in-tree reference distribution. */
-export const referenceProviderProfile: ProviderSelectionProfile = {
-  auth: AUTH_WEBAUTHN_PROVIDER_ID,
-  launcher: LAUNCHER_PROCESS_PROVIDER_ID,
-  connector: CONNECTOR_CDP_PROVIDER_ID,
-  workspace: WORKSPACE_PROFILE_PROVIDER_ID,
-  entrypoint: ENTRYPOINT_NOVNC_PROVIDER_ID,
-  detector: DETECTOR_URL_PROVIDER_ID,
-  channel: CHANNEL_CLI_PROVIDER_ID,
-};
-
-function referenceDefaultConfig({
-  family,
-  providerId,
-  legacy,
-}: ProviderDefaultConfigArgs): Record<string, unknown> | undefined {
-  if (family === "auth" && providerId === AUTH_WEBAUTHN_PROVIDER_ID) {
-    return legacy;
-  }
-  if (family === "launcher" && providerId === LAUNCHER_PROCESS_PROVIDER_ID) {
-    return legacy;
-  }
-  if (family === "workspace" && providerId === WORKSPACE_PROFILE_PROVIDER_ID) {
-    return legacy;
-  }
-  if (family === "detector" && providerId === DETECTOR_URL_PROVIDER_ID) {
-    return legacy;
-  }
-  return undefined;
+/** Reference-distribution preset selector expanded into the target provider-layer inputs. */
+export interface ReferencePresetOptions {
+  /** Named reference preset used to populate deployment config and capsule defaults. */
+  referencePresetId?: ReferencePresetId;
 }
 
-function referenceDefaultServices({
-  family,
-  providerId,
-  legacy,
-}: ProviderDefaultServicesArgs): Record<string, unknown> | undefined {
+type ReferencePresetId =
+  | typeof REFERENCE_PROFILE_HARDENED_IDP_ID
+  | typeof REFERENCE_PROFILE_LOCAL_DEV_ID
+  | typeof REFERENCE_PROFILE_SCENARIO_01_ID
+  | typeof REFERENCE_PROFILE_SINGLE_OPERATOR_ID;
+
+type ReferenceProviderCompositionOptions = ProviderCompositionOptions & ReferencePresetOptions;
+type ReferenceCreateBridgeOptions = CreateBridgeOptions & ReferencePresetOptions;
+type ReferenceCreateProvisioningBridgeOptions = CreateProvisioningBridgeOptions &
+  ReferencePresetOptions;
+type ReferenceCreateEnrollmentStackOptions = CreateEnrollmentStackOptions & ReferencePresetOptions;
+type ReferenceServeOptions = ServeOptions & ReferencePresetOptions;
+
+function referencePresetId(opts: ReferencePresetOptions): ReferencePresetId {
+  const presetId = opts.referencePresetId;
+  if (presetId === undefined) {
+    return REFERENCE_PROFILE_SCENARIO_01_ID;
+  }
   if (
-    family === "detector" &&
-    providerId === DETECTOR_URL_PROVIDER_ID &&
-    typeof legacy.readUrl === "function"
+    presetId === REFERENCE_PROFILE_LOCAL_DEV_ID ||
+    presetId === REFERENCE_PROFILE_SINGLE_OPERATOR_ID ||
+    presetId === REFERENCE_PROFILE_SCENARIO_01_ID ||
+    presetId === REFERENCE_PROFILE_HARDENED_IDP_ID
   ) {
-    return { "detectorUrl.readUrl": legacy.readUrl };
+    return presetId;
   }
-  return undefined;
+  if (/[<>{}⟨⟩]/u.test(presetId)) {
+    return REFERENCE_PROFILE_SCENARIO_01_ID;
+  }
+  throw new Error(`unknown reference preset "${presetId}"`);
 }
 
-/** Trusted provider set used by the default `@gla/app` package entrypoint. */
-export const referenceProviderSet: AppProviderSet = {
-  moduleId: PROVIDER_SET_REFERENCE_MODULE,
-  modules: referenceProviderModules,
-  profile: referenceProviderProfile,
-  defaultConfig: referenceDefaultConfig,
-  defaultServices: referenceDefaultServices,
-  entrypointClientAssets: referenceEntrypointClientAssetMounts,
-};
+function mergeProviderConfig(
+  base: Record<string, Record<string, unknown>> | undefined,
+  override: Record<string, Record<string, unknown>> | undefined,
+): Record<string, Record<string, unknown>> | undefined {
+  const merged: Record<string, Record<string, unknown>> = {};
+  for (const [providerId, values] of Object.entries(base ?? {})) {
+    merged[providerId] = { ...values };
+  }
+  for (const [providerId, values] of Object.entries(override ?? {})) {
+    merged[providerId] = { ...(merged[providerId] ?? {}), ...values };
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
 
-function withDefaultProviderSet<T extends ProviderCompositionOptions>(
-  opts: T,
+function mergeAppDeploymentConfig(
+  base: AppDeploymentConfigInput,
+  override: AppDeploymentConfigInput | undefined,
+): AppDeploymentConfigInput {
+  const providerConfig = mergeProviderConfig(base.providerConfig, override?.providerConfig);
+  return {
+    ...base,
+    ...(override ?? {}),
+    ...(providerConfig !== undefined ? { providerConfig } : {}),
+  };
+}
+
+function withReferenceDefaults<T extends ProviderCompositionOptions>(
+  opts: T & ReferencePresetOptions,
 ): T & ProviderCompositionOptions {
-  const providerSet = opts.providerSet ?? referenceProviderSet;
+  const presetId = referencePresetId(opts);
+  const registry =
+    opts.providerRegistry ??
+    (opts.providerHost === undefined ? createReferenceProviderRegistry() : undefined);
+  const { providerConfig: capsuleDefaultProviderConfig, ...capsuleDefaults } =
+    referenceCapsuleProviderSelectionForProfile(presetId);
+  const capsuleProviderConfig = mergeProviderConfig(
+    capsuleDefaultProviderConfig,
+    opts.capsuleProviderConfig,
+  );
   return {
     ...opts,
-    providerSet,
-    providerProfile: {
-      ...providerSet.profile,
-      ...(opts.providerProfile ?? {}),
+    ...(registry !== undefined ? { providerRegistry: registry } : {}),
+    appDeploymentConfig: mergeAppDeploymentConfig(
+      referenceAppDeploymentConfigForProfile(presetId),
+      opts.appDeploymentConfig,
+    ),
+    capsuleProviders: {
+      ...capsuleDefaults,
+      ...(opts.capsuleProviders ?? {}),
+    },
+    ...(capsuleProviderConfig !== undefined ? { capsuleProviderConfig } : {}),
+    entrypointClientAssets: opts.entrypointClientAssets ?? referenceEntrypointClientAssetMounts(),
+    templateProbes: {
+      ...referenceTemplateProbes,
+      ...(opts.templateProbes ?? {}),
     },
   };
 }
 
 /** Compose the reference GLA app distribution. */
-export function createApp(opts: ProviderCompositionOptions = {}): App {
-  return createGenericApp(withDefaultProviderSet(opts));
+export function createApp(opts: ReferenceProviderCompositionOptions = {}): App {
+  return createGenericApp(withReferenceDefaults(opts));
 }
 
 /** Compose the reference Agent Bridge distribution. */
 export function createBridge(
-  opts: CreateBridgeOptions = {},
+  opts: ReferenceCreateBridgeOptions = {},
 ): ReturnType<typeof createGenericBridge> {
-  return createGenericBridge(withDefaultProviderSet(opts));
+  return createGenericBridge(withReferenceDefaults(opts));
 }
 
 /** Compose the reference provisioning bridge distribution. */
 export function createProvisioningBridge(
-  opts: CreateProvisioningBridgeOptions = {},
+  opts: ReferenceCreateProvisioningBridgeOptions = {},
 ): ProvisioningStack {
-  return createGenericProvisioningBridge(withDefaultProviderSet(opts));
+  return createGenericProvisioningBridge(withReferenceDefaults(opts));
 }
 
 /** Compose the reference enrollment stack distribution. */
-export function createEnrollmentStack(opts: CreateEnrollmentStackOptions): EnrollmentStack {
-  return createGenericEnrollmentStack(withDefaultProviderSet(opts));
+export function createEnrollmentStack(
+  opts: ReferenceCreateEnrollmentStackOptions,
+): EnrollmentStack {
+  return createGenericEnrollmentStack(withReferenceDefaults(opts));
 }
 
 /** Boot the reference GLA daemon distribution with the in-tree provider set selected by default. */
-export function serve(opts: ServeOptions = {}): Promise<DaemonHandle> {
-  return serveGeneric(withDefaultProviderSet(opts));
+export function serve(opts: ReferenceServeOptions = {}): Promise<DaemonHandle> {
+  return serveGeneric(withReferenceDefaults(opts));
 }
 
 /** Run the reference `gla serve` command with the in-tree provider set selected by default. */
@@ -150,7 +175,7 @@ export function runServe(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
-  return runGenericServe(argv, env, { providerSet: referenceProviderSet });
+  return runGenericServe(argv, env, withReferenceDefaults({}));
 }
 
 /** Process entry point for the reference `:3000` deployable. */

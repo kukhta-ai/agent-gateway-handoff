@@ -1,14 +1,19 @@
 import {
   CatalogService,
   type ProviderManifest,
+  providerGraphDoctorReport,
   referenceWpmDependencyBindings,
+  resolveProviderGraphProjection,
   toAdmissionCatalog,
+  toAdmissionCatalogFromProviderGraphProjection,
+  validateProviderProfileInputs,
 } from "@gla/catalog";
 import type {
   AgentConnectorPort,
   AuthProviderPort,
   ChannelPort,
   CompletionDetectorPort,
+  ConfigSchema,
   HumanEntrypointPort,
   IdentityPort,
   IdentityVerificationResult,
@@ -31,12 +36,35 @@ import {
 } from "@gla/provider-host";
 import { describe, expect, it } from "vitest";
 import {
+  AUTH_AUTHENTIK_PROVIDER_ID,
+  AUTH_WEBAUTHN_PROVIDER_ID,
+  REFERENCE_PROFILE_HARDENED_IDP_ID,
+  REFERENCE_PROFILE_LOCAL_DEV_ID,
+  REFERENCE_PROFILE_SCENARIO_01_ID,
+  REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
   SECRET_STORE_REFERENCE_PROVIDER_ID,
   createReferenceProviderHost,
   createReferenceSecretStoreProvider,
   referenceProviderModules,
+  referenceProviderProfile,
+  referenceProviderProfileManifests,
+  referenceProviderProfiles,
+  referenceProviderRuntimeProfile,
   referenceProviderStoreContent,
+  referenceTemplateProviderDefaultsForProfile,
 } from "../../src/index.js";
+
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
 
 const fakeIdentity: IdentityPort = {
   async bind(recipient: RecipientRef, _ctx: { channel: string }): Promise<RecipientBinding> {
@@ -119,7 +147,7 @@ function contractManifest(spec: ContractModuleSpec): ProviderManifest {
     spec: {
       family: spec.family,
       capability: { summary: spec.summary },
-      config_schema: { mode: { type: "enum", enum: ["ok"], required: true } },
+      config_schema: objectSchema({ mode: { type: "string", enum: ["ok"] } }, ["mode"]),
       probe: spec.id,
       skills: [
         {
@@ -226,9 +254,9 @@ function contractModule(spec: ContractModuleSpec): GlaProviderModule {
         }
         case "detector": {
           const detector: CompletionDetectorPort = {
-            contract: {
-              status: { type: "enum", enum: ["contract-complete"], required: true },
-            },
+            contract: objectSchema({ status: { type: "string", enum: ["contract-complete"] } }, [
+              "status",
+            ]),
             async *watch(): AsyncIterable<RawCompletionSignal> {
               yield {
                 detector: spec.id,
@@ -326,6 +354,181 @@ describe("referenceProviderModules", () => {
     ]);
   });
 
+  it("exposes provider-neutral auth assurance capability through reference graph read models", () => {
+    const host = createReferenceProviderHost();
+    const content = referenceProviderStoreContent(host);
+    const webauthnManifest = content.providers.find(
+      (provider) => provider.metadata.name === AUTH_WEBAUTHN_PROVIDER_ID,
+    );
+    const authentikManifest = content.providers.find(
+      (provider) => provider.metadata.name === AUTH_AUTHENTIK_PROVIDER_ID,
+    );
+
+    expect(webauthnManifest?.spec.capability).toMatchObject({
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "none",
+      },
+    });
+    expect(authentikManifest?.spec.capability).toMatchObject({
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "password",
+        diagnostics: expect.arrayContaining([
+          "missing-user-verification",
+          "method-unresolved",
+          "ambiguous-provider-evidence",
+          "password-grade-proof",
+        ]),
+      },
+    });
+
+    const graph = resolveProviderGraphProjection({
+      providerSet: {
+        id: "@gla/provider-set-reference",
+        providers: content.providers,
+        templates: content.templates,
+      },
+      baseProfile: referenceProviderProfile(REFERENCE_PROFILE_SINGLE_OPERATOR_ID).manifest,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      configValidationMode: "factory",
+    });
+    const catalog = new CatalogService({
+      content,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      providerGraph: graph,
+    });
+
+    expect(catalog.show(AUTH_WEBAUTHN_PROVIDER_ID)?.authAssurance).toMatchObject({
+      maxLevel: "phishing-resistant",
+      requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+    });
+    expect(
+      toAdmissionCatalogFromProviderGraphProjection(graph).provider(AUTH_WEBAUTHN_PROVIDER_ID)
+        ?.authAssurance,
+    ).toMatchObject({
+      supportedPolicies: ["phishing-resistant", "password-permitted"],
+    });
+    expect(
+      providerGraphDoctorReport(graph).providers.find(
+        (provider) => provider.providerId === AUTH_WEBAUTHN_PROVIDER_ID,
+      )?.authAssurance,
+    ).toMatchObject({
+      maxLevel: "phishing-resistant",
+      degradesTo: "none",
+    });
+  });
+
+  it("exposes named reference profiles with explicit posture selections and template defaults", () => {
+    const host = createReferenceProviderHost();
+    const content = referenceProviderStoreContent(host);
+
+    expect(referenceProviderProfiles.map((profile) => profile.id)).toEqual([
+      REFERENCE_PROFILE_LOCAL_DEV_ID,
+      REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
+      REFERENCE_PROFILE_SCENARIO_01_ID,
+      REFERENCE_PROFILE_HARDENED_IDP_ID,
+    ]);
+    expect(referenceProviderProfiles.map((profile) => profile.purpose).join("\n")).toContain(
+      "Scenario-01",
+    );
+    expect(
+      validateProviderProfileInputs({
+        profiles: referenceProviderProfileManifests,
+        providers: content.providers,
+      }),
+    ).toEqual({ ok: true, diagnostics: [] });
+
+    expect(referenceProviderRuntimeProfile(REFERENCE_PROFILE_LOCAL_DEV_ID)).toMatchObject({
+      auth: "webauthn",
+      detector: "user-done",
+      channel: "channel-cli",
+    });
+    expect(referenceProviderRuntimeProfile(REFERENCE_PROFILE_SCENARIO_01_ID)).toMatchObject({
+      auth: "webauthn",
+      detector: "url-watcher",
+    });
+    expect(referenceProviderRuntimeProfile(REFERENCE_PROFILE_HARDENED_IDP_ID)).toMatchObject({
+      auth: "authentik",
+      detector: "url-watcher",
+    });
+    expect(
+      referenceTemplateProviderDefaultsForProfile(REFERENCE_PROFILE_LOCAL_DEV_ID),
+    ).toMatchObject({
+      detector: "user-done",
+    });
+  });
+
+  it("validates named reference profiles through the provider graph with profile-specific diagnostics", () => {
+    const host = createReferenceProviderHost();
+    const dependencyBindings = referenceWpmDependencyBindings();
+
+    for (const profileId of [
+      REFERENCE_PROFILE_LOCAL_DEV_ID,
+      REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
+      REFERENCE_PROFILE_SCENARIO_01_ID,
+    ]) {
+      const content = referenceProviderStoreContent(
+        host,
+        referenceTemplateProviderDefaultsForProfile(profileId),
+      );
+      const graph = resolveProviderGraphProjection({
+        providerSet: {
+          id: "@gla/provider-set-reference",
+          providers: content.providers,
+          templates: content.templates,
+        },
+        baseProfile: referenceProviderProfile(profileId).manifest,
+        dependencyBindings,
+        configValidationMode: "factory",
+      });
+
+      expect(graph.ok).toBe(true);
+      expect(providerGraphDoctorReport(graph)).toMatchObject({
+        status: "PASS",
+        profileId,
+        selectedProviders: expect.objectContaining({
+          AuthProvider: "webauthn",
+          ChannelAdapter: "channel-cli",
+        }),
+      });
+    }
+
+    const hardenedContent = referenceProviderStoreContent(
+      host,
+      referenceTemplateProviderDefaultsForProfile(REFERENCE_PROFILE_HARDENED_IDP_ID),
+    );
+    const hardened = resolveProviderGraphProjection({
+      providerSet: {
+        id: "@gla/provider-set-reference",
+        providers: hardenedContent.providers,
+        templates: hardenedContent.templates,
+      },
+      baseProfile: referenceProviderProfile(REFERENCE_PROFILE_HARDENED_IDP_ID).manifest,
+      dependencyBindings,
+      configValidationMode: "factory",
+    });
+
+    expect(hardened.ok).toBe(false);
+    expect(hardened.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "graph.config_invalid",
+          providerId: "authentik",
+        }),
+      ]),
+    );
+    expect(providerGraphDoctorReport(hardened)).toMatchObject({
+      status: "FAIL",
+      profileId: REFERENCE_PROFILE_HARDENED_IDP_ID,
+      selectedProviders: expect.objectContaining({ AuthProvider: "authentik" }),
+    });
+  });
+
   it("applies operator-selected template defaults without embedding compatibility tables in the provider set", () => {
     const host = createReferenceProviderHost();
     const content = referenceProviderStoreContent(host, {
@@ -362,7 +565,10 @@ describe("referenceProviderModules", () => {
         metadata: { name: spec.id, version: "0.1.0" },
         spec: {
           family: spec.family,
-          config_schema: { mode: { enum: ["ok"], required: true } },
+          config_schema: {
+            required: ["mode"],
+            properties: { mode: { type: "string", enum: ["ok"] } },
+          },
           probe: spec.id,
           skills: [{ id: `use-${spec.id}`, for: spec.id }],
         },
@@ -378,9 +584,9 @@ describe("referenceProviderModules", () => {
         id: `use-${spec.id}`,
         for: spec.id,
       });
-      expect(admissionCatalog.provider(spec.id)?.config_schema).toEqual({
-        mode: { type: "enum", enum: ["ok"], required: true },
-      });
+      expect(admissionCatalog.provider(spec.id)?.config_schema).toEqual(
+        objectSchema({ mode: { type: "string", enum: ["ok"] } }, ["mode"]),
+      );
 
       await expect(
         host.createProvider(spec.family, spec.id, { config: { mode: "ok" } }),
@@ -477,12 +683,14 @@ describe("referenceProviderModules", () => {
     });
 
     expect(host.providerManifest("launcher-process")?.spec.config_schema).toMatchObject({
-      mode: { type: "enum", enum: ["auto", "headless", "full"] },
-      chromiumPath: { type: "string" },
-      startTimeoutMs: { type: "number" },
+      properties: {
+        mode: { type: "string", enum: ["auto", "headless", "full"] },
+        chromiumPath: { type: "string" },
+        startTimeoutMs: { type: "number" },
+      },
     });
     expect(host.providerManifest("workspace-profile")?.spec.config_schema).toMatchObject({
-      root: { type: "string" },
+      properties: { root: { type: "string" } },
     });
 
     const launcherDependencyEvidence = catalog.show("launcher-process")?.requires;
@@ -539,8 +747,10 @@ describe("referenceProviderModules", () => {
     const host = createReferenceProviderHost();
 
     expect(host.providerManifest("channel-cli")?.spec.config_schema).toMatchObject({
-      delivery: { type: "enum", enum: ["stdout", "injected"] },
-      inbound: { type: "enum", enum: ["memory", "injected"] },
+      properties: {
+        delivery: { type: "string", enum: ["stdout", "injected"] },
+        inbound: { type: "string", enum: ["memory", "injected"] },
+      },
     });
     expect(() =>
       host.createProviderSync("channel", "channel-cli", {
@@ -605,7 +815,7 @@ describe("referenceProviderModules", () => {
       kind: "SecretStore",
       spec: {
         family: "secret-store",
-        config_schema: { namespace: { type: "string" } },
+        config_schema: { properties: { namespace: { type: "string" } } },
         probe: "secret-store-reference",
       },
     });
@@ -635,7 +845,7 @@ describe("referenceProviderModules", () => {
           spec: {
             family: "channel",
             capability: { summary: "fake channel" },
-            config_schema: { mode: { type: "enum", enum: ["record"], required: false } },
+            config_schema: objectSchema({ mode: { type: "string", enum: ["record"] } }),
             probe: "channel-fake",
           },
         },
@@ -652,7 +862,7 @@ describe("referenceProviderModules", () => {
           spec: {
             family: "secret-store",
             capability: { summary: "fake secret store", diagnostics: "secret-ref-only" },
-            config_schema: { namespace: { type: "string", required: false } },
+            config_schema: objectSchema({ namespace: { type: "string" } }),
             probe: "secret-store-fake",
           },
         },

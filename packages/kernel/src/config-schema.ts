@@ -1,94 +1,121 @@
-// K4 — typed config_schema vocabulary + validator (kernel-contracts.md §4, docs/04 §3).
-// The mechanism that makes authoring allowlist-by-construction: a provider declares the typed
-// set of options the agent may set; anything off-schema is rejected OFFLINE, before anything
-// runs, and the rejection NAMES the offending field (task AC#5). Pure: no I/O, no host touch.
-//
-// Defects are collected in a SINGLE PASS (never fail-fast) so the agent sees every problem at
-// once — same discipline as the AssemblySpec validator.
+// K4 — config_schema contract + validator (kernel-contracts.md §4, docs/04 §3).
+// The public boundary stays deliberately small: provider authors publish a conservative JSON
+// Schema object, and callers validate plain config data through validateConfig(). Validation is
+// pure: no defaults are applied, no coercion happens, and unknown fields are not removed.
 
+import { Ajv, type ErrorObject, type ValidateFunction } from "ajv/dist/ajv.js";
 import type { ErrorCode, GlaError } from "./errors.js";
 
-/** The closed set of value types a config field may declare (§4). */
-export type ConfigType = "string" | "number" | "bool" | "enum" | "object" | "list";
+/** JSON Schema types admitted by GLA's conservative provider config profile. */
+export type ConfigSchemaType =
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "object"
+  | "array"
+  | "null";
 
 /**
- * One typed option a provider exposes (§4). The trusted provider/template author draws the line
- * once — which native knobs become options and their bounds; the untrusted agent only sets
- * conforming values.
+ * A JSON Schema node in GLA's conservative provider config profile.
+ *
+ * The profile intentionally keeps the expressive set small: object properties, required fields,
+ * additionalProperties:false, primitive type checks, enum/const, string/number/array bounds,
+ * nested objects/arrays, and simple composition for standard JSON Schema constraints such as
+ * `not`/`allOf`. GLA metadata such as `x-gla-sensitive` is explicit data and is ignored by the
+ * validator; redaction/default behavior remains owned by GLA code that chooses to read it.
  */
-export interface ConfigField {
-  type: ConfigType;
-  /** Required ⇒ must be present; else optional. */
-  required?: boolean;
-  /** Applied at admission-mutate when omitted (not enforced by validation here). */
-  default?: unknown;
-  /** Closed set of allowed values (for `enum`, or to restrict a `string`/`number`). */
+export interface ConfigSchemaNode {
+  $schema?: string;
+  title?: string;
+  description?: string;
+  type?: ConfigSchemaType | ConfigSchemaType[];
+  properties?: Record<string, ConfigSchemaNode>;
+  required?: string[];
+  additionalProperties?: false;
+  items?: ConfigSchemaNode;
   enum?: unknown[];
-  /** Range for `number`; length bound for `string` and `list`. */
-  min?: number;
-  max?: number;
-  /** Regex the whole `string` value must match. */
+  const?: unknown;
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  minLength?: number;
+  maxLength?: number;
   pattern?: string;
-  /** Sibling fields this one may NOT be set together with. */
-  conflicts_with?: string[];
-  /** Sibling fields that MUST be set together with this one. */
-  required_with?: string[];
-  /** A secret-ref, never a literal — never echoed in schema/catalog output or logs. */
-  sensitive?: boolean;
-  /** Field set for `type:"object"`. */
-  fields?: Record<string, ConfigField>;
-  /** Element schema for `type:"list"`. */
-  items?: ConfigField;
+  minItems?: number;
+  maxItems?: number;
+  dependencies?: Record<string, string[]>;
+  allOf?: ConfigSchemaNode[];
+  anyOf?: ConfigSchemaNode[];
+  oneOf?: ConfigSchemaNode[];
+  not?: ConfigSchemaNode;
+  if?: ConfigSchemaNode;
+  then?: ConfigSchemaNode;
+  else?: ConfigSchemaNode;
+  default?: unknown;
+  examples?: unknown[];
+  "x-gla-sensitive"?: boolean;
 }
 
-/** A provider's full option schema: field-name → typed {@link ConfigField} (§4). */
-export type ConfigSchema = Record<string, ConfigField>;
+/**
+ * A provider's full option schema. The root is always a JSON Schema object and must close unknown
+ * fields with `additionalProperties:false`.
+ */
+export interface ConfigSchema extends ConfigSchemaNode {
+  type: "object";
+  properties?: Record<string, ConfigSchemaNode>;
+  required?: string[];
+  additionalProperties: false;
+}
 
-/** A single defect found while validating params against a schema — carries the offending field. */
+/** Reusable empty schema: no accepted config fields, unknown fields rejected. */
+export const EMPTY_CONFIG_SCHEMA: ConfigSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {},
+};
+
+/** A single defect found while validating params against a schema. */
 export interface ConfigDefect {
-  /** Dotted path to the offending field, e.g. `"viewport"` or `"limits.memory"`. The NAMED field. */
+  /** Dotted/bracket path to the offending config field, e.g. `limits.memory` or `tags[1]`. */
   field: string;
   code: ErrorCode;
   message: string;
 }
 
-/** Outcome of {@link validateConfig}: ok, or every defect found in one pass (each names a field). */
+/** Outcome of {@link validateConfig}: ok, or every defect found in one pass. */
 export type ConfigValidation = { ok: true } | { ok: false; defects: ConfigDefect[] };
 
-function typeOfValue(v: unknown): ConfigType | "null" | "unknown" {
-  if (v === null) {
-    return "null";
-  }
-  if (typeof v === "boolean") {
-    return "bool";
-  }
-  if (typeof v === "number") {
-    return "number";
-  }
-  if (typeof v === "string") {
-    return "string";
-  }
-  if (Array.isArray(v)) {
-    return "list";
-  }
-  if (typeof v === "object") {
-    return "object";
-  }
-  return "unknown";
-}
+const MAX_SCHEMA_BYTES = 64 * 1024;
+const MAX_SCHEMA_DEPTH = 24;
+const MAX_SCHEMA_NODES = 1_000;
+const MAX_SCHEMA_ARRAY_ITEMS = 512;
 
-/** Does a concrete value match the declared field `type`? (`enum` accepts any JSON value.) */
-function valueMatchesType(value: unknown, type: ConfigType): boolean {
-  switch (type) {
-    case "enum":
-      return true; // membership is checked separately against `enum`
-    case "object":
-      return typeOfValue(value) === "object";
-    case "list":
-      return Array.isArray(value);
-    default:
-      return typeOfValue(value) === type;
-  }
+const ajv = new Ajv({
+  allErrors: true,
+  allowUnionTypes: true,
+  coerceTypes: false,
+  messages: true,
+  removeAdditional: false,
+  strict: true,
+  strictRequired: true,
+  strictSchema: true,
+  strictTuples: true,
+  strictTypes: true,
+  useDefaults: false,
+  validateFormats: false,
+});
+
+ajv.addKeyword({
+  keyword: "x-gla-sensitive",
+  schemaType: "boolean",
+});
+
+const validatorCache = new WeakMap<ConfigSchema, ValidateFunction>();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function pushDefect(
@@ -100,238 +127,393 @@ function pushDefect(
   defects.push({ field, code, message });
 }
 
-/** Validate one field's present value (type, enum, range/length, pattern, nested). Collects all. */
-function validateValue(
-  path: string,
-  field: ConfigField,
-  value: unknown,
-  defects: ConfigDefect[],
-): void {
-  if (!valueMatchesType(value, field.type)) {
+function pointerToField(pointer: string): string {
+  if (pointer.length === 0) {
+    return "$";
+  }
+  const parts = pointer
+    .split("/")
+    .slice(1)
+    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+  let out = "";
+  for (const part of parts) {
+    if (/^[0-9]+$/.test(part)) {
+      out += `[${part}]`;
+    } else {
+      out = out.length === 0 ? part : `${out}.${part}`;
+    }
+  }
+  return out.length === 0 ? "$" : out;
+}
+
+function joinField(basePointer: string, child: unknown): string {
+  const base = pointerToField(basePointer);
+  const suffix = typeof child === "string" && child.length > 0 ? child : undefined;
+  if (suffix === undefined) {
+    return base;
+  }
+  return base === "$" ? suffix : `${base}.${suffix}`;
+}
+
+function schemaPath(pointer: string): string {
+  return pointerToField(pointer).replace(/^\$/, "schema");
+}
+
+function schemaLimitDefects(schema: unknown): ConfigDefect[] {
+  const defects: ConfigDefect[] = [];
+  let json: string;
+  try {
+    json = JSON.stringify(schema);
+  } catch {
+    pushDefect(defects, "schema", "policy.denied", "config_schema must be JSON-serializable");
+    return defects;
+  }
+  if (json.length > MAX_SCHEMA_BYTES) {
     pushDefect(
       defects,
-      path,
+      "schema",
       "policy.denied",
-      `field "${path}" must be of type ${field.type}, got ${typeOfValue(value)}`,
+      `config_schema is too large (${json.length} bytes; max ${MAX_SCHEMA_BYTES})`,
     );
-    return; // type wrong → range/enum checks would be noise; other fields still validate
   }
 
-  // enum membership (deep-equal by JSON for objects/arrays; strict for primitives).
-  if (field.enum !== undefined) {
-    const ok = field.enum.some((allowed) =>
-      typeof allowed === "object" && allowed !== null
-        ? JSON.stringify(allowed) === JSON.stringify(value)
-        : allowed === value,
-    );
-    if (!ok) {
+  let nodes = 0;
+  const seen = new WeakSet<object>();
+  const walk = (value: unknown, path: string, depth: number): void => {
+    if (depth > MAX_SCHEMA_DEPTH) {
       pushDefect(
         defects,
         path,
         "policy.denied",
-        `field "${path}" must be one of ${JSON.stringify(field.enum)}`,
+        `config_schema is too deeply nested (max depth ${MAX_SCHEMA_DEPTH})`,
       );
+      return;
     }
-  }
-
-  // range (number) / length (string, list)
-  if (typeof value === "number") {
-    if (field.min !== undefined && value < field.min) {
-      pushDefect(defects, path, "policy.denied", `field "${path}" must be >= ${field.min}`);
+    if (value === null || typeof value !== "object") {
+      return;
     }
-    if (field.max !== undefined && value > field.max) {
-      pushDefect(defects, path, "policy.denied", `field "${path}" must be <= ${field.max}`);
+    if (seen.has(value)) {
+      pushDefect(defects, path, "policy.denied", "config_schema contains a cycle");
+      return;
     }
-  } else if (typeof value === "string") {
-    if (field.min !== undefined && value.length < field.min) {
+    seen.add(value);
+    nodes++;
+    if (nodes > MAX_SCHEMA_NODES) {
       pushDefect(
         defects,
         path,
         "policy.denied",
-        `field "${path}" must have length >= ${field.min}`,
+        `config_schema has too many nodes (max ${MAX_SCHEMA_NODES})`,
       );
+      return;
     }
-    if (field.max !== undefined && value.length > field.max) {
-      pushDefect(
-        defects,
-        path,
-        "policy.denied",
-        `field "${path}" must have length <= ${field.max}`,
-      );
-    }
-    if (field.pattern !== undefined) {
-      let re: RegExp | undefined;
-      try {
-        re = new RegExp(field.pattern);
-      } catch {
-        re = undefined;
-      }
-      if (re && !re.test(value)) {
+    if (Array.isArray(value)) {
+      if (value.length > MAX_SCHEMA_ARRAY_ITEMS) {
         pushDefect(
           defects,
           path,
           "policy.denied",
-          `field "${path}" must match pattern ${field.pattern}`,
+          `config_schema array is too large (max ${MAX_SCHEMA_ARRAY_ITEMS} items)`,
         );
+        return;
       }
+      value.forEach((item, index) => walk(item, `${path}[${index}]`, depth + 1));
+      return;
     }
-  } else if (Array.isArray(value)) {
-    if (field.min !== undefined && value.length < field.min) {
-      pushDefect(defects, path, "policy.denied", `field "${path}" must have >= ${field.min} items`);
+    for (const [key, child] of Object.entries(value)) {
+      walk(child, path === "schema" ? key : `${path}.${key}`, depth + 1);
     }
-    if (field.max !== undefined && value.length > field.max) {
-      pushDefect(defects, path, "policy.denied", `field "${path}" must have <= ${field.max} items`);
-    }
-    // Validate each element against `items` (if declared).
-    if (field.items !== undefined) {
-      value.forEach((el, i) => {
-        validateValue(`${path}[${i}]`, field.items as ConfigField, el, defects);
-      });
-    }
+  };
+  walk(schema, "schema", 0);
+  return defects;
+}
+
+function nodeDeclaresObject(node: Record<string, unknown>): boolean {
+  return (
+    node.type === "object" ||
+    node.properties !== undefined ||
+    node.additionalProperties !== undefined
+  );
+}
+
+function profileDefects(schema: unknown): ConfigDefect[] {
+  const defects: ConfigDefect[] = [];
+  if (!isRecord(schema)) {
+    pushDefect(defects, "schema", "policy.denied", "config_schema must be a JSON object schema");
+    return defects;
+  }
+  if (schema.type !== "object") {
+    pushDefect(defects, "type", "policy.denied", 'config_schema root type must be "object"');
+  }
+  if (schema.additionalProperties !== false) {
+    pushDefect(
+      defects,
+      "additionalProperties",
+      "policy.denied",
+      "config_schema root must declare additionalProperties:false",
+    );
   }
 
-  // nested object fields
-  if (field.type === "object" && field.fields !== undefined && typeOfValue(value) === "object") {
-    validateAgainst(field.fields, value as Record<string, unknown>, path, defects);
+  const walk = (node: unknown, path: string, requireClosedObjects = true): void => {
+    if (!isRecord(node)) {
+      pushDefect(defects, path, "policy.denied", "config_schema node must be an object");
+      return;
+    }
+    if (requireClosedObjects && nodeDeclaresObject(node) && node.additionalProperties !== false) {
+      pushDefect(
+        defects,
+        `${path}.additionalProperties`,
+        "policy.denied",
+        "object schemas must declare additionalProperties:false",
+      );
+    }
+    if (node.properties !== undefined && !isRecord(node.properties)) {
+      pushDefect(defects, `${path}.properties`, "policy.denied", "properties must be an object");
+    }
+    if (Array.isArray(node.required)) {
+      for (const required of node.required) {
+        if (typeof required !== "string" || required.length === 0) {
+          pushDefect(
+            defects,
+            `${path}.required`,
+            "policy.denied",
+            "required entries must be non-empty strings",
+          );
+        }
+      }
+    } else if (node.required !== undefined) {
+      pushDefect(defects, `${path}.required`, "policy.denied", "required must be a string array");
+    }
+    if (node.type === "array" && node.items !== undefined) {
+      walk(node.items, `${path}.items`);
+    }
+    if (isRecord(node.properties)) {
+      for (const [name, property] of Object.entries(node.properties)) {
+        walk(property, `${path}.properties.${name}`);
+      }
+    }
+    for (const key of ["allOf", "anyOf", "oneOf"] as const) {
+      const branch = node[key];
+      if (branch !== undefined) {
+        if (!Array.isArray(branch)) {
+          pushDefect(defects, `${path}.${key}`, "policy.denied", `${key} must be an array`);
+        } else {
+          branch.forEach((item, index) => walk(item, `${path}.${key}[${index}]`));
+        }
+      }
+    }
+    if (node.not !== undefined) {
+      walk(node.not, `${path}.not`, false);
+    }
+    for (const key of ["if", "then", "else"] as const) {
+      if (node[key] !== undefined) {
+        walk(node[key], `${path}.${key}`, false);
+      }
+    }
+    if (node.dependencies !== undefined && !isRecord(node.dependencies)) {
+      pushDefect(
+        defects,
+        `${path}.dependencies`,
+        "policy.denied",
+        "dependencies must be an object of string arrays",
+      );
+    } else if (isRecord(node.dependencies)) {
+      for (const [name, deps] of Object.entries(node.dependencies)) {
+        if (!Array.isArray(deps) || deps.some((dep) => typeof dep !== "string")) {
+          pushDefect(
+            defects,
+            `${path}.dependencies.${name}`,
+            "policy.denied",
+            "dependencies entries must be string arrays",
+          );
+        }
+      }
+    }
+  };
+  walk(schema, "schema");
+  return defects;
+}
+
+function shapeErrorsFromAjv(errors: ErrorObject[] | null | undefined): ConfigDefect[] {
+  return (errors ?? []).map((error) => ({
+    field: schemaPath(error.instancePath || error.schemaPath),
+    code: "policy.denied",
+    message: `config_schema is invalid: ${error.message ?? error.keyword}`,
+  }));
+}
+
+function shapeDefects(schema: unknown): ConfigDefect[] {
+  const defects = [...schemaLimitDefects(schema), ...profileDefects(schema)];
+  if (defects.length > 0) {
+    return defects;
+  }
+  const jsonSchema = schema as ConfigSchema;
+  const schemaValid = ajv.validateSchema(jsonSchema);
+  if (!schemaValid) {
+    return shapeErrorsFromAjv(ajv.errors);
+  }
+  try {
+    ajv.compile(jsonSchema);
+  } catch (error) {
+    return [
+      {
+        field: "schema",
+        code: "policy.denied",
+        message: `config_schema cannot be compiled: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      },
+    ];
+  }
+  return [];
+}
+
+function validatorFor(schema: ConfigSchema): ConfigValidation | ValidateFunction {
+  const defects = shapeDefects(schema);
+  if (defects.length > 0) {
+    return { ok: false, defects };
+  }
+  const cached = validatorCache.get(schema);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const compiled = ajv.compile(schema);
+  validatorCache.set(schema, compiled);
+  return compiled;
+}
+
+function typeName(type: unknown): string {
+  return Array.isArray(type) ? type.join(" or ") : String(type);
+}
+
+function validationField(error: ErrorObject): string {
+  const params = error.params as Record<string, unknown>;
+  if (error.keyword === "required") {
+    return joinField(error.instancePath, params.missingProperty);
+  }
+  if (error.keyword === "additionalProperties") {
+    return joinField(error.instancePath, params.additionalProperty);
+  }
+  if (error.keyword === "dependencies") {
+    return joinField(error.instancePath, params.property);
+  }
+  return pointerToField(error.instancePath);
+}
+
+function schemaNodeForInstancePath(
+  schema: ConfigSchema,
+  pointer: string,
+): ConfigSchemaNode | undefined {
+  let node: ConfigSchemaNode | undefined = schema;
+  for (const rawPart of pointer.split("/").slice(1)) {
+    if (node === undefined) {
+      return undefined;
+    }
+    const part = rawPart.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (/^[0-9]+$/.test(part)) {
+      node = node.items;
+    } else {
+      node = node.properties?.[part];
+    }
+  }
+  return node;
+}
+
+function sensitiveSchemaError(error: ErrorObject, schema: ConfigSchema): boolean {
+  return (
+    (isRecord(error.parentSchema) && error.parentSchema["x-gla-sensitive"] === true) ||
+    schemaNodeForInstancePath(schema, error.instancePath)?.["x-gla-sensitive"] === true
+  );
+}
+
+function validationMessage(error: ErrorObject, field: string, schema: ConfigSchema): string {
+  const params = error.params as Record<string, unknown>;
+  if (
+    sensitiveSchemaError(error, schema) &&
+    (error.keyword === "enum" || error.keyword === "const" || error.keyword === "pattern")
+  ) {
+    return `field "${field}" does not match its sensitive config_schema constraint`;
+  }
+  switch (error.keyword) {
+    case "required":
+      return `required field "${field}" is missing`;
+    case "additionalProperties":
+      return `unknown field "${field}" is not in the provider config_schema`;
+    case "type":
+      return `field "${field}" must be of type ${typeName(params.type)}`;
+    case "enum":
+      return `field "${field}" must be one of ${JSON.stringify(error.schema)}`;
+    case "const":
+      return `field "${field}" must equal ${JSON.stringify(error.schema)}`;
+    case "minimum":
+      return `field "${field}" must be >= ${params.limit}`;
+    case "maximum":
+      return `field "${field}" must be <= ${params.limit}`;
+    case "exclusiveMinimum":
+      return `field "${field}" must be > ${params.limit}`;
+    case "exclusiveMaximum":
+      return `field "${field}" must be < ${params.limit}`;
+    case "minLength":
+      return `field "${field}" must have length >= ${params.limit}`;
+    case "maxLength":
+      return `field "${field}" must have length <= ${params.limit}`;
+    case "pattern":
+      return `field "${field}" must match pattern ${params.pattern}`;
+    case "minItems":
+      return `field "${field}" must have >= ${params.limit} items`;
+    case "maxItems":
+      return `field "${field}" must have <= ${params.limit} items`;
+    case "dependencies":
+      return `field "${field}" requires ${String(params.deps)}`;
+    case "not":
+      return `field "${field}" violates a not constraint`;
+    default:
+      return `field "${field}" ${error.message ?? "does not match config_schema"}`;
   }
 }
 
-/** Validate a params object against a (sub)schema, accumulating defects (single pass). */
-function validateAgainst(
+function validationErrors(
   schema: ConfigSchema,
-  params: Record<string, unknown>,
-  prefix: string,
-  defects: ConfigDefect[],
-): void {
-  const at = (name: string): string => (prefix === "" ? name : `${prefix}.${name}`);
-  const isSet = (name: string): boolean =>
-    Object.hasOwn(params, name) && params[name] !== undefined;
-
-  // Unknown fields: off-schema input is rejected, naming the field (allowlist-by-construction).
-  for (const name of Object.keys(params)) {
-    if (!Object.hasOwn(schema, name)) {
-      pushDefect(
-        defects,
-        at(name),
-        "policy.denied",
-        `unknown field "${at(name)}" is not in the provider config_schema`,
-      );
-    }
-  }
-
-  for (const [name, field] of Object.entries(schema)) {
-    const present = isSet(name);
-    const path = at(name);
-
-    if (!present) {
-      if (field.required === true) {
-        pushDefect(defects, path, "policy.denied", `required field "${path}" is missing`);
-      }
-      continue; // absent + optional → nothing more to check for this field
-    }
-
-    // present: value-level checks
-    validateValue(path, field, params[name], defects);
-
-    // cross-field: conflicts_with
-    if (field.conflicts_with !== undefined) {
-      for (const other of field.conflicts_with) {
-        if (isSet(other)) {
-          pushDefect(
-            defects,
-            path,
-            "policy.denied",
-            `field "${path}" conflicts with "${at(other)}" — they may not be set together`,
-          );
-        }
-      }
-    }
-    // cross-field: required_with
-    if (field.required_with !== undefined) {
-      for (const other of field.required_with) {
-        if (!isSet(other)) {
-          pushDefect(
-            defects,
-            path,
-            "policy.denied",
-            `field "${path}" requires "${at(other)}" to also be set`,
-          );
-        }
-      }
-    }
-  }
+  errors: ErrorObject[] | null | undefined,
+): ConfigDefect[] {
+  return (errors ?? []).map((error) => {
+    const field = validationField(error);
+    return {
+      field,
+      code: "policy.denied",
+      message: validationMessage(error, field, schema),
+    };
+  });
 }
 
 /**
- * Validate a `params` object against a provider's typed {@link ConfigSchema} — OFFLINE, before
- * anything runs (§4, AC#5). Checks type, enum, range/length, pattern, unknown fields, required,
- * and the `conflicts_with` / `required_with` cross-field rules, **collecting every defect in a
- * single pass** and **naming the offending field** in each. A violating value yields
- * `{ ok: false, defects }`; a conforming object yields `{ ok: true }`.
+ * Validate a params object against a provider's JSON Schema config_schema. The validator is
+ * all-errors and fail-closed, but intentionally non-mutating: defaults, coercion, removal of
+ * unknown fields, and redaction metadata are explicit GLA behavior outside this function.
  */
 export function validateConfig(
   schema: ConfigSchema,
   params: Record<string, unknown>,
 ): ConfigValidation {
-  const defects: ConfigDefect[] = [];
-  validateAgainst(schema, params, "", defects);
-  return defects.length === 0 ? { ok: true } : { ok: false, defects };
+  const validator = validatorFor(schema);
+  if (typeof validator !== "function") {
+    return validator;
+  }
+  const ok = validator(params);
+  return ok ? { ok: true } : { ok: false, defects: validationErrors(schema, validator.errors) };
 }
 
 /**
- * Structural check that a {@link ConfigSchema} is itself well-formed (the ingester asserts this:
- * a `config_schema` must be valid before it can constrain anything — §4). Single-pass, collects
- * every structural defect. This is the "schema is valid JSON-Schema-class" guard the kernel owns
- * without pulling in a full JSON-Schema engine.
+ * Structural check that a config_schema is itself a valid member of GLA's conservative JSON
+ * Schema profile before it can constrain provider config. Oversized, cyclic, out-of-profile, and
+ * uncompileable schemas return typed diagnostics instead of throwing.
  */
-export function validateSchemaShape(schema: ConfigSchema): ConfigValidation {
-  const defects: ConfigDefect[] = [];
-  const types: ReadonlySet<ConfigType> = new Set<ConfigType>([
-    "string",
-    "number",
-    "bool",
-    "enum",
-    "object",
-    "list",
-  ]);
-
-  const walk = (s: ConfigSchema, prefix: string): void => {
-    for (const [name, field] of Object.entries(s)) {
-      const path = prefix === "" ? name : `${prefix}.${name}`;
-      if (field === null || typeof field !== "object") {
-        pushDefect(defects, path, "policy.denied", `field "${path}" is not a config-field object`);
-        continue;
-      }
-      if (!types.has(field.type)) {
-        pushDefect(
-          defects,
-          path,
-          "policy.denied",
-          `field "${path}" has unknown type "${String(field.type)}"`,
-        );
-      }
-      if (field.type === "enum" && (field.enum === undefined || field.enum.length === 0)) {
-        pushDefect(
-          defects,
-          path,
-          "policy.denied",
-          `enum field "${path}" must declare a non-empty "enum" set`,
-        );
-      }
-      if (field.type === "object" && field.fields !== undefined) {
-        walk(field.fields, path);
-      }
-      if (field.type === "list" && field.items !== undefined) {
-        walk({ [`${name}[]`]: field.items }, prefix);
-      }
-    }
-  };
-
-  walk(schema, "");
+export function validateSchemaShape(schema: unknown): ConfigValidation {
+  const defects = shapeDefects(schema);
   return defects.length === 0 ? { ok: true } : { ok: false, defects };
 }
 
-/** Turn config defects into the wire {@link GlaError} (the first defect is the headline; all in `detail`). */
+/** Turn config defects into the wire {@link GlaError}. */
 export function configDefectsToError(
   defects: ConfigDefect[],
   skill = "interpret-gla-rejections",

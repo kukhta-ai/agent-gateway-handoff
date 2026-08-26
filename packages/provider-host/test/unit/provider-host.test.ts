@@ -1,5 +1,5 @@
-import type { ProviderManifest } from "@gla/catalog";
-import type { LauncherPort, RuntimeHandle } from "@gla/kernel";
+import type { IndexedDependencyBinding, ProviderManifest } from "@gla/catalog";
+import type { ConfigSchema, LauncherPort, RuntimeHandle } from "@gla/kernel";
 import { describe, expect, it } from "vitest";
 import {
   type GlaProviderModule,
@@ -21,6 +21,18 @@ const fakeLauncher: LauncherPort = {
   async stop(): Promise<void> {},
 };
 
+function objectSchema(
+  properties: NonNullable<ConfigSchema["properties"]>,
+  required: string[] = [],
+): ConfigSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    ...(required.length > 0 ? { required } : {}),
+    properties,
+  };
+}
+
 function manifest(overrides: Partial<ProviderManifest["spec"]> = {}): ProviderManifest {
   return {
     apiVersion: "gla.dev/v1",
@@ -29,9 +41,7 @@ function manifest(overrides: Partial<ProviderManifest["spec"]> = {}): ProviderMa
     spec: {
       family: "launcher",
       capability: { summary: "fake launcher" },
-      config_schema: {
-        mode: { type: "enum", enum: ["safe"], required: true },
-      },
+      config_schema: objectSchema({ mode: { type: "string", enum: ["safe"] } }, ["mode"]),
       probe: "fake-launcher",
       skills: [{ id: "use-fake-launcher", for: "fake-launcher", body: "Use fake launcher." }],
       relations: { compatibleWith: { connectors: ["fake-connector"] } },
@@ -75,13 +85,21 @@ describe("ProviderHost", () => {
       },
     });
     expect(host.providerStateSchema("fake-launcher")).toEqual({
-      slots: { runtime: { summary: "fake runtime state" } },
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
+      slots: { runtime: { summary: "fake runtime state", sensitivity: "sensitive" } },
     });
     expect(host.providerDescriptor("fake-launcher")).toMatchObject({
       providerId: "fake-launcher",
       moduleId: "@gla/fake-launcher-provider",
       manifest: { metadata: { name: "fake-launcher" } },
-      stateSchema: { slots: { runtime: { summary: "fake runtime state" } } },
+      stateSchema: {
+        schemaVersion: 1,
+        sensitivity: "sensitive",
+        migration: "fail-closed",
+        slots: { runtime: { summary: "fake runtime state", sensitivity: "sensitive" } },
+      },
     });
     expect(host.providerDescriptors().map((descriptor) => descriptor.moduleId)).toEqual([
       "@gla/fake-launcher-provider",
@@ -95,6 +113,22 @@ describe("ProviderHost", () => {
       stateRoot.namespace("fake-launcher").kv<{ seen: boolean }>("runtime").get("created"),
     ).toEqual({
       seen: true,
+    });
+    expect(stateRoot.namespace("fake-launcher")).toMatchObject({
+      providerId: "fake-launcher",
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
+      diagnostics: [
+        expect.objectContaining({
+          code: "provider.state_namespace",
+          providerId: "fake-launcher",
+          detail: expect.objectContaining({
+            schemaVersion: 1,
+            slots: ["runtime"],
+          }),
+        }),
+      ],
     });
   });
 
@@ -164,6 +198,26 @@ describe("ProviderHost", () => {
     expect(host.providerStateSchema("fake-launcher")).toBeUndefined();
   });
 
+  it("fails closed when a provider declares an unknown state schema version", () => {
+    const unsupportedState: GlaProviderModule = {
+      manifest: manifest(),
+      register(ctx) {
+        ctx.registerLauncher("fake-launcher", { create: () => fakeLauncher });
+        ctx.registerProbe("fake-launcher", () => "available");
+        ctx.registerStateSchema("fake-launcher", {
+          schemaVersion: 99,
+          sensitivity: "sensitive",
+          migration: "fail-closed",
+          slots: { runtime: { summary: "future state" } },
+        });
+      },
+    };
+
+    expect(() => new ProviderHost().registerModule(unsupportedState)).toThrow(
+      /unsupported state schema version/,
+    );
+  });
+
   it("fails closed with redacted diagnostics when provider-owned state namespace is unavailable", async () => {
     const stateRoot: ProviderStateRoot = {
       namespace() {
@@ -221,18 +275,16 @@ describe("ProviderHost", () => {
   it("uses factory_config_schema for runtime creation while preserving agent-facing config_schema metadata", async () => {
     const host = new ProviderHost().registerModule(
       module({
-        config_schema: {
-          complete_on: { type: "string", required: true, pattern: "^/" },
-        },
-        factory_config_schema: {
-          mode: { type: "enum", enum: ["safe"], required: true },
-        },
+        config_schema: objectSchema({ complete_on: { type: "string", pattern: "^/" } }, [
+          "complete_on",
+        ]),
+        factory_config_schema: objectSchema({ mode: { type: "string", enum: ["safe"] } }, ["mode"]),
       }),
     );
 
-    expect(host.providerManifest("fake-launcher")?.spec.config_schema).toEqual({
-      complete_on: { type: "string", required: true, pattern: "^/" },
-    });
+    expect(host.providerManifest("fake-launcher")?.spec.config_schema).toEqual(
+      objectSchema({ complete_on: { type: "string", pattern: "^/" } }, ["complete_on"]),
+    );
     await expect(
       host.createProvider("launcher", "fake-launcher", {
         config: { mode: "safe" },
@@ -301,6 +353,35 @@ describe("ProviderHost", () => {
         ],
       },
     });
+  });
+
+  it("projects registered synchronous probes with indexed dependency evidence", () => {
+    const dependency: IndexedDependencyBinding = {
+      dependency: "browser-runtime",
+      hostTouching: true,
+      status: "bound",
+      missingEvidence: [],
+      diagnostics: { install: "available", runtime: "available" },
+    };
+    const dependencyAware: GlaProviderModule = {
+      manifest: manifest({
+        requires: [{ dependency: "browser-runtime", hostTouching: true }],
+      }),
+      register(ctx) {
+        ctx.registerLauncher("fake-launcher", { create: () => fakeLauncher });
+        ctx.registerProbe("fake-launcher", ({ dependencies }) =>
+          dependencies.bindingFor("browser-runtime")?.status === "bound"
+            ? "available"
+            : "unavailable",
+        );
+      },
+    };
+    const host = new ProviderHost().registerModule(dependencyAware);
+
+    expect(host.providerProbeRegistry()["fake-launcher"]?.()).toBe("unavailable");
+    expect(host.providerProbeRegistry({ "fake-launcher": [dependency] })["fake-launcher"]?.()).toBe(
+      "available",
+    );
   });
 
   it("redacts provider-emitted diagnostics before forwarding to caller-supplied sinks", async () => {

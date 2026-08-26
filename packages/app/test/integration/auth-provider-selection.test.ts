@@ -10,6 +10,12 @@ import { fileURLToPath } from "node:url";
 import { AUTH_AUTHENTIK_MODULE } from "@gla/auth-authentik";
 import { AUTH_WEBAUTHN_MODULE } from "@gla/auth-webauthn";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
+import {
+  DETECTOR_USER_DONE_PROVIDER_ID,
+  REFERENCE_PROFILE_HARDENED_IDP_ID,
+  REFERENCE_PROFILE_LOCAL_DEV_ID,
+  referenceAppDeploymentConfigForProfile,
+} from "@gla/provider-set-reference";
 import { describe, expect, it } from "vitest";
 import {
   authEnrollmentDiagnostics,
@@ -200,6 +206,26 @@ describe("AC#6 · the DEFAULT provider is the in-tree WebAuthn adapter (path unc
     expect(stack.authModule).toBe(AUTH_WEBAUTHN_MODULE);
   });
 
+  it("createProvisioningBridge() applies an explicit named reference preset at boot", async () => {
+    const stack = createProvisioningBridge({
+      referencePresetId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      dependencyBindings: referenceWpmDependencyBindings(),
+      launcherMode: "headless",
+      handoff: { ...ENROLL_BASE },
+    });
+    try {
+      expect(stack.providerGraphDoctor).toMatchObject({
+        status: "PASS",
+        profileId: "resolved-runtime-selection",
+        selectedProviders: expect.objectContaining({
+          CompletionDetector: DETECTOR_USER_DONE_PROVIDER_ID,
+        }),
+      });
+    } finally {
+      await stack.close();
+    }
+  });
+
   it("createApp().wiring.auth (the static default profile) still names @gla/auth-webauthn", async () => {
     const { createApp } = await import("../../src/index.js");
     expect(createApp().wiring.auth).toBe(AUTH_WEBAUTHN_MODULE);
@@ -364,6 +390,54 @@ describe("AC#6 · daemon parseServeArgs threads opaque provider ids and provider
         "webauthn-passkey",
         "oauth:github",
       ]);
+    }
+  });
+
+  it("parses enrollment policy JSON against a provider selected by reference deployment config", () => {
+    const parsed = parseServeArgs(
+      [],
+      {
+        GLA_AUTH_ENROLLMENT_POLICY_JSON: JSON.stringify({
+          declared: true,
+          credentialSetupStages: [],
+          externalSources: [],
+          mfaRecoveryMethods: [],
+          requiredMethods: [],
+          optionalRecipientChoices: [],
+        }),
+      } as NodeJS.ProcessEnv,
+      {
+        appDeploymentConfig: referenceAppDeploymentConfigForProfile(
+          REFERENCE_PROFILE_HARDENED_IDP_ID,
+        ),
+      },
+    );
+    expect(parsed.help).toBe(false);
+    if (!parsed.help) {
+      expect(parsed.options.authEnrollmentPolicy?.provider).toBe("authentik");
+    }
+  });
+
+  it("parses enrollment policy JSON against a provider selected by app deployment config", () => {
+    const parsed = parseServeArgs(
+      [],
+      {
+        GLA_AUTH_ENROLLMENT_POLICY_JSON: JSON.stringify({
+          declared: true,
+          credentialSetupStages: [],
+          externalSources: [],
+          mfaRecoveryMethods: [],
+          requiredMethods: [],
+          optionalRecipientChoices: [],
+        }),
+      } as NodeJS.ProcessEnv,
+      {
+        appDeploymentConfig: { auth: "authentik" },
+      },
+    );
+    expect(parsed.help).toBe(false);
+    if (!parsed.help) {
+      expect(parsed.options.authEnrollmentPolicy?.provider).toBe("authentik");
     }
   });
 

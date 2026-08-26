@@ -44,10 +44,15 @@ import { join } from "node:path";
 import { referenceWpmDependencyBindings } from "@gla/catalog";
 import { DaemonBridgeClient, Output, type OutputStreams, run } from "@gla/cli";
 import type { RecipientRef } from "@gla/kernel";
+import {
+  DETECTOR_USER_DONE_PROVIDER_ID,
+  LAUNCHER_PROCESS_PROVIDER_ID,
+  REFERENCE_PROFILE_LOCAL_DEV_ID,
+} from "@gla/provider-set-reference";
 import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it } from "vitest";
-import { endpointIsLocal, parseServeArgs } from "../../src/daemon.js";
-import { type DaemonHandle, serve } from "../../src/index.js";
+import { type ServeOptions, endpointIsLocal, parseServeArgs } from "../../src/daemon.js";
+import { type DaemonHandle, type ReferencePresetOptions, serve } from "../../src/index.js";
 
 const recipient = "tg:user:123" as RecipientRef;
 function authentikConfig(
@@ -221,8 +226,14 @@ async function cliOverDaemon(
 /** Boot a daemon on an ephemeral gateway port + a temp uds, with the given public base URL. */
 async function startDaemon(opts: {
   publicBaseUrl: string;
+  referencePresetId?: ReferencePresetOptions["referencePresetId"];
   workspaceRoot?: string;
   deliverySink?: { write(line: string): void };
+  appDeploymentConfig?: ServeOptions["appDeploymentConfig"];
+  capsuleProviders?: ServeOptions["capsuleProviders"];
+  capsuleProviderConfig?: ServeOptions["capsuleProviderConfig"];
+  launcherMode?: ServeOptions["launcherMode"] | "unset";
+  log?: ServeOptions["log"];
 }): Promise<DaemonHandle> {
   const sock = join(scratch("gla-daemon-sock-"), "gla.sock");
   const handle = await serve({
@@ -230,13 +241,21 @@ async function startDaemon(opts: {
     port: 0, // ephemeral gateway port (a real deploy binds 0.0.0.0:3000).
     bridgeEndpoint: sock,
     publicBaseUrl: opts.publicBaseUrl,
+    ...(opts.referencePresetId !== undefined ? { referencePresetId: opts.referencePresetId } : {}),
+    ...(opts.appDeploymentConfig !== undefined
+      ? { appDeploymentConfig: opts.appDeploymentConfig }
+      : {}),
+    ...(opts.capsuleProviders !== undefined ? { capsuleProviders: opts.capsuleProviders } : {}),
+    ...(opts.capsuleProviderConfig !== undefined
+      ? { capsuleProviderConfig: opts.capsuleProviderConfig }
+      : {}),
     dependencyBindings: referenceWpmDependencyBindings(),
     rpID: "localhost",
     expectedOrigin: opts.publicBaseUrl,
-    launcherMode: "headless",
+    ...(opts.launcherMode !== "unset" ? { launcherMode: opts.launcherMode ?? "headless" } : {}),
     ...(opts.workspaceRoot !== undefined ? { workspaceRoot: opts.workspaceRoot } : {}),
     deliverySink: opts.deliverySink ?? { write: () => {} }, // quiet by default; tests may capture recipient links.
-    log: () => {}, // quiet in tests.
+    log: opts.log ?? (() => {}), // quiet in tests unless a test captures the startup banner.
   });
   liveHandles.push(handle);
   return handle;
@@ -402,6 +421,63 @@ describe("gla serve daemon — deployable long-running service (round-trip, gate
     const handle = await startDaemon({ publicBaseUrl: "https://203.0.113.10/" });
     const status = await gatewayStatus(handle.gateway.host, handle.gateway.port, "/no-such-path");
     expect(status).toBe(404); // the gateway is bound + serving (its 404 for an unknown public path).
+  });
+
+  it("reference preset boot config changes the daemon's selected provider defaults", async () => {
+    const handle = await startDaemon({
+      publicBaseUrl: "https://203.0.113.10/",
+      referencePresetId: REFERENCE_PROFILE_LOCAL_DEV_ID,
+      launcherMode: "unset",
+    });
+    expect(handle.bridge.templateShow("browser-handoff").parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          part: "detector",
+          provider: DETECTOR_USER_DONE_PROVIDER_ID,
+        }),
+      ]),
+    );
+    expect(handle.bridge.catalogShow(LAUNCHER_PROCESS_PROVIDER_ID)).toMatchObject({
+      resolvedConfig: { mode: "headless" },
+    });
+  });
+
+  it("split capsule provider config is forwarded into the live daemon stack", async () => {
+    const handle = await startDaemon({
+      publicBaseUrl: "https://203.0.113.10/",
+      capsuleProviders: { detector: DETECTOR_USER_DONE_PROVIDER_ID },
+      capsuleProviderConfig: {
+        [LAUNCHER_PROCESS_PROVIDER_ID]: { mode: "headless" },
+      },
+      launcherMode: "unset",
+    });
+    expect(handle.bridge.templateShow("browser-handoff").parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          part: "detector",
+          provider: DETECTOR_USER_DONE_PROVIDER_ID,
+        }),
+      ]),
+    );
+    expect(handle.bridge.catalogShow(LAUNCHER_PROCESS_PROVIDER_ID)).toMatchObject({
+      resolvedConfig: { mode: "headless" },
+    });
+  });
+
+  it("split app deployment config is forwarded into the live daemon stack", async () => {
+    const logs: string[] = [];
+    const handle = await startDaemon({
+      publicBaseUrl: "https://gla.example/team-a/",
+      appDeploymentConfig: {
+        auth: "authentik",
+        providerConfig: {
+          authentik: authentikConfig("https://gla.example/team-a/auth/callback"),
+        },
+      },
+      log: (line) => void logs.push(line),
+    });
+    expect(handle.authDiagnostics().summary).toMatch(/authentik/i);
+    expect(logs.join("\n")).toContain("@gla/auth-authentik");
   });
 
   it("public-base-url: a link minted through the daemon (enrollInvite) uses the PUBLIC base, not loopback", async () => {
@@ -1105,6 +1181,9 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
     expect(() =>
       parseServeArgs(["--public-base-url", "<redacted>"], {} as NodeJS.ProcessEnv),
     ).toThrow(/placeholder/i);
+    expect(() =>
+      parseServeArgs(["--auth-provider", "<provider-id>"], {} as NodeJS.ProcessEnv),
+    ).toThrow(/placeholder/i);
     expect(() => parseServeArgs(["--rp-id", "<rp-id>"], {} as NodeJS.ProcessEnv)).toThrow(
       /placeholder/i,
     );
@@ -1120,6 +1199,11 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
     expect(() =>
       parseServeArgs([], {
         GLA_PUBLIC_BASE_URL: "⟨https://your-public-host/⟩",
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/placeholder/i);
+    expect(() =>
+      parseServeArgs([], {
+        GLA_AUTH_PROVIDER: "⟨provider-id⟩",
       } as NodeJS.ProcessEnv),
     ).toThrow(/placeholder/i);
     expect(() =>
@@ -1162,6 +1246,17 @@ describe("gla serve — argument parsing (flags layer over env; flags win)", () 
         port: 0,
         bridgeEndpoint: join(scratch("gla-direct-public-placeholder-"), "gla.sock"),
         publicBaseUrl: "⟨https://your-public-host/⟩",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/placeholder/i);
+
+    await expect(
+      serve({
+        host: "127.0.0.1",
+        port: 0,
+        bridgeEndpoint: join(scratch("gla-direct-provider-placeholder-"), "gla.sock"),
+        publicBaseUrl: "https://gla.example/",
+        authProvider: "<provider-id>",
         log: () => {},
       }),
     ).rejects.toThrow(/placeholder/i);

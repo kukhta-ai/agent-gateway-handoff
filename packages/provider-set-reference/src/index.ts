@@ -19,7 +19,10 @@ import {
   BROWSER_HANDOFF_TEMPLATE,
   CHANNEL_CLI_MANIFEST,
   PROVIDER_MANIFESTS,
+  type Probe,
   type ProviderManifest,
+  type ProviderProfileManifest,
+  type ProviderProfileSelection,
   type StoreContent,
 } from "@gla/catalog";
 import {
@@ -58,8 +61,9 @@ import type {
   SecretValue,
   WorkspacePort,
 } from "@gla/kernel";
+import { EMPTY_CONFIG_SCHEMA } from "@gla/kernel";
 import { LAUNCHER_PROCESS_MODULE, LauncherProcessAdapter } from "@gla/launcher-process";
-import { ProviderHost } from "@gla/provider-host";
+import { ProviderHost, ProviderRegistry } from "@gla/provider-host";
 import type {
   CreateProviderOptions,
   GlaProviderModule,
@@ -68,6 +72,7 @@ import type {
   ProviderId,
   ProviderKvStore,
   ProviderRegistrationContext,
+  ProviderRegistryOptions,
   ProviderStateRoot,
 } from "@gla/provider-host";
 import { WORKSPACE_PROFILE_MODULE, WorkspaceProfileAdapter } from "@gla/workspace-profile";
@@ -94,6 +99,269 @@ export const DETECTOR_USER_DONE_PROVIDER_ID = "user-done" as const;
 export const SECRET_STORE_REFERENCE_PROVIDER_ID = "secret-store-reference" as const;
 /** Provider id for the reference CLI channel provider. */
 export const CHANNEL_CLI_PROVIDER_ID = "channel-cli" as const;
+
+/** Fast local and CI profile id. */
+export const REFERENCE_PROFILE_LOCAL_DEV_ID = "local-dev" as const;
+/** Single-operator self-hosted profile id. */
+export const REFERENCE_PROFILE_SINGLE_OPERATOR_ID = "single-operator" as const;
+/** Scenario-01 product reference profile id. */
+export const REFERENCE_PROFILE_SCENARIO_01_ID = "scenario-01" as const;
+/** Delegated identity posture profile id. */
+export const REFERENCE_PROFILE_HARDENED_IDP_ID = "hardened-idp" as const;
+
+/** Named reference provider profiles exposed by the reference provider set. */
+export type ReferenceProviderProfileId =
+  | typeof REFERENCE_PROFILE_LOCAL_DEV_ID
+  | typeof REFERENCE_PROFILE_SINGLE_OPERATOR_ID
+  | typeof REFERENCE_PROFILE_SCENARIO_01_ID
+  | typeof REFERENCE_PROFILE_HARDENED_IDP_ID;
+
+/** Runtime provider ids selected by a named reference profile for app composition. */
+export interface ReferenceRuntimeProviderProfile {
+  auth: ProviderId;
+  launcher: ProviderId;
+  connector: ProviderId;
+  workspace: ProviderId;
+  entrypoint: ProviderId;
+  detector: ProviderId;
+  channel: ProviderId;
+  secretStore: ProviderId;
+}
+
+/** App deployment provider defaults selected by a named reference profile. */
+export interface ReferenceAppDeploymentConfig {
+  auth: ProviderId;
+  channel: ProviderId;
+  secretStore: ProviderId;
+  providerConfig?: Record<string, Record<string, unknown>>;
+}
+
+/** Capsule provider defaults selected by a named reference template/profile. */
+export interface ReferenceCapsuleProviderSelection {
+  launcher: ProviderId;
+  connector: ProviderId;
+  workspace: ProviderId;
+  entrypoint: ProviderId;
+  detector: ProviderId;
+  providerConfig?: Record<string, Record<string, unknown>>;
+}
+
+/** Operator-facing read model for a named reference profile. */
+export interface ReferenceProviderProfile {
+  id: ReferenceProviderProfileId;
+  purpose: string;
+  manifest: ProviderProfileManifest;
+}
+
+const REFERENCE_PROFILE_LIFECYCLE = {
+  owner: "operator",
+  apply: "boot",
+  hotReload: false,
+} as const;
+
+function selectionProviderId(selection: ProviderProfileSelection | undefined): ProviderId {
+  if (typeof selection === "string" && selection.length > 0) {
+    return selection;
+  }
+  if (
+    typeof selection === "object" &&
+    selection !== null &&
+    "providerId" in selection &&
+    typeof selection.providerId === "string" &&
+    selection.providerId.length > 0
+  ) {
+    return selection.providerId;
+  }
+  throw new Error("reference profile selection is missing a provider id");
+}
+
+const referenceBrowserHandoffDefaults: NonNullable<
+  ProviderProfileManifest["spec"]["defaults"]
+>[string] = {
+  Launcher: LAUNCHER_PROCESS_PROVIDER_ID,
+  Workspace: WORKSPACE_PROFILE_PROVIDER_ID,
+  HumanEntrypoint: ENTRYPOINT_NOVNC_PROVIDER_ID,
+  AgentConnector: CONNECTOR_CDP_PROVIDER_ID,
+  CompletionDetector: DETECTOR_URL_PROVIDER_ID,
+};
+
+function referenceProfileManifest(args: {
+  id: ReferenceProviderProfileId;
+  select?: Partial<NonNullable<ProviderProfileManifest["spec"]["select"]>>;
+  config?: NonNullable<ProviderProfileManifest["spec"]["config"]>;
+  defaults?: NonNullable<ProviderProfileManifest["spec"]["defaults"]>[string];
+}): ProviderProfileManifest {
+  return {
+    apiVersion: "gla.dev/v1",
+    kind: "ProviderProfile",
+    metadata: { name: args.id, version: "0.1.0" },
+    spec: {
+      lifecycle: REFERENCE_PROFILE_LIFECYCLE,
+      select: {
+        AuthProvider: AUTH_WEBAUTHN_PROVIDER_ID,
+        Launcher: LAUNCHER_PROCESS_PROVIDER_ID,
+        Workspace: WORKSPACE_PROFILE_PROVIDER_ID,
+        HumanEntrypoint: ENTRYPOINT_NOVNC_PROVIDER_ID,
+        AgentConnector: CONNECTOR_CDP_PROVIDER_ID,
+        CompletionDetector: DETECTOR_URL_PROVIDER_ID,
+        ChannelAdapter: CHANNEL_CLI_PROVIDER_ID,
+        SecretStore: SECRET_STORE_REFERENCE_PROVIDER_ID,
+        ...(args.select ?? {}),
+      },
+      defaults: {
+        "template.browser-handoff": {
+          ...referenceBrowserHandoffDefaults,
+          ...(args.defaults ?? {}),
+        },
+      },
+      ...(args.config !== undefined ? { config: args.config } : {}),
+    },
+  };
+}
+
+/** Named `local-dev` reference profile. */
+export const REFERENCE_PROFILE_LOCAL_DEV: ReferenceProviderProfile = {
+  id: REFERENCE_PROFILE_LOCAL_DEV_ID,
+  purpose: "Fast local and CI exercise of the graph with in-tree/local providers.",
+  manifest: referenceProfileManifest({
+    id: REFERENCE_PROFILE_LOCAL_DEV_ID,
+    select: { CompletionDetector: DETECTOR_USER_DONE_PROVIDER_ID },
+    defaults: { CompletionDetector: DETECTOR_USER_DONE_PROVIDER_ID },
+    config: {
+      [AUTH_WEBAUTHN_PROVIDER_ID]: {
+        rpID: "localhost",
+        rpName: "GLA Local Dev",
+        expectedOrigin: ["http://localhost:3000"],
+      },
+      [LAUNCHER_PROCESS_PROVIDER_ID]: { mode: "headless" },
+      [CHANNEL_CLI_PROVIDER_ID]: { delivery: "stdout", inbound: "memory" },
+    },
+  }),
+};
+
+/** Named `single-operator` self-hosted reference profile. */
+export const REFERENCE_PROFILE_SINGLE_OPERATOR: ReferenceProviderProfile = {
+  id: REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
+  purpose: "Single-operator self-hosted VPS posture with local providers and WPM evidence.",
+  manifest: referenceProfileManifest({
+    id: REFERENCE_PROFILE_SINGLE_OPERATOR_ID,
+    config: {
+      [AUTH_WEBAUTHN_PROVIDER_ID]: {
+        rpID: "gla.example",
+        rpName: "GLA",
+        expectedOrigin: ["https://gla.example"],
+      },
+      [LAUNCHER_PROCESS_PROVIDER_ID]: { mode: "auto" },
+      [CHANNEL_CLI_PROVIDER_ID]: { delivery: "stdout", inbound: "memory" },
+    },
+  }),
+};
+
+/** Named `scenario-01` product reference profile. */
+export const REFERENCE_PROFILE_SCENARIO_01: ReferenceProviderProfile = {
+  id: REFERENCE_PROFILE_SCENARIO_01_ID,
+  purpose: "Scenario-01 same-session browser handoff reference flow.",
+  manifest: referenceProfileManifest({
+    id: REFERENCE_PROFILE_SCENARIO_01_ID,
+    config: {
+      [AUTH_WEBAUTHN_PROVIDER_ID]: {
+        rpID: "localhost",
+        rpName: "GLA",
+        expectedOrigin: ["http://localhost:3000"],
+      },
+      [LAUNCHER_PROCESS_PROVIDER_ID]: { mode: "auto" },
+      [CHANNEL_CLI_PROVIDER_ID]: { delivery: "stdout", inbound: "memory" },
+    },
+  }),
+};
+
+/** Named `hardened-idp` delegated identity reference profile. */
+export const REFERENCE_PROFILE_HARDENED_IDP: ReferenceProviderProfile = {
+  id: REFERENCE_PROFILE_HARDENED_IDP_ID,
+  purpose:
+    "Delegated authentik/OIDC posture; unavailable until operator overlay supplies IdP config and evidence.",
+  manifest: referenceProfileManifest({
+    id: REFERENCE_PROFILE_HARDENED_IDP_ID,
+    select: { AuthProvider: AUTH_AUTHENTIK_PROVIDER_ID },
+    config: {
+      [LAUNCHER_PROCESS_PROVIDER_ID]: { mode: "auto" },
+      [CHANNEL_CLI_PROVIDER_ID]: { delivery: "stdout", inbound: "memory" },
+    },
+  }),
+};
+
+/** All named reference provider profile read models. */
+export const referenceProviderProfiles: readonly ReferenceProviderProfile[] = [
+  REFERENCE_PROFILE_LOCAL_DEV,
+  REFERENCE_PROFILE_SINGLE_OPERATOR,
+  REFERENCE_PROFILE_SCENARIO_01,
+  REFERENCE_PROFILE_HARDENED_IDP,
+];
+
+/** ProviderProfile manifests exposed by the reference provider set. */
+export const referenceProviderProfileManifests: readonly ProviderProfileManifest[] =
+  referenceProviderProfiles.map((profile) => profile.manifest);
+
+/** Return one named reference profile read model. */
+export function referenceProviderProfile(
+  profileId: ReferenceProviderProfileId,
+): ReferenceProviderProfile {
+  const profile = referenceProviderProfiles.find((entry) => entry.id === profileId);
+  if (profile === undefined) {
+    throw new Error(`unknown reference provider profile "${profileId}"`);
+  }
+  return profile;
+}
+
+/** Runtime provider id selection for app composition from a named reference profile. */
+export function referenceProviderRuntimeProfile(
+  profileId: ReferenceProviderProfileId = REFERENCE_PROFILE_SCENARIO_01_ID,
+): ReferenceRuntimeProviderProfile {
+  const select = referenceProviderProfile(profileId).manifest.spec.select ?? {};
+  return {
+    auth: selectionProviderId(select.AuthProvider),
+    launcher: selectionProviderId(select.Launcher),
+    connector: selectionProviderId(select.AgentConnector),
+    workspace: selectionProviderId(select.Workspace),
+    entrypoint: selectionProviderId(select.HumanEntrypoint),
+    detector: selectionProviderId(select.CompletionDetector),
+    channel: selectionProviderId(select.ChannelAdapter),
+    secretStore: selectionProviderId(select.SecretStore),
+  };
+}
+
+function selectedProviderConfig(
+  profileId: ReferenceProviderProfileId,
+  providerIds: readonly ProviderId[],
+): Record<string, Record<string, unknown>> | undefined {
+  const config = referenceProviderProfile(profileId).manifest.spec.config ?? {};
+  const selectedConfig: Record<string, Record<string, unknown>> = {};
+  for (const providerId of providerIds) {
+    const values = config[providerId];
+    if (values !== undefined && Object.keys(values).length > 0) {
+      selectedConfig[providerId] = structuredClone(values);
+    }
+  }
+  return Object.keys(selectedConfig).length > 0 ? selectedConfig : undefined;
+}
+
+/** App deployment defaults for AuthProvider, ChannelAdapter, and SecretStore only. */
+export function referenceAppDeploymentConfigForProfile(
+  profileId: ReferenceProviderProfileId = REFERENCE_PROFILE_SCENARIO_01_ID,
+): ReferenceAppDeploymentConfig {
+  const profile = referenceProviderRuntimeProfile(profileId);
+  const providerConfig = selectedProviderConfig(profileId, [
+    profile.auth,
+    profile.channel,
+    profile.secretStore,
+  ]);
+  return {
+    auth: profile.auth,
+    channel: profile.channel,
+    secretStore: profile.secretStore,
+    ...(providerConfig !== undefined ? { providerConfig } : {}),
+  };
+}
 
 /** Provider-owned auth config values keyed by the selected provider's schema. */
 export type ReferenceAuthProviderConfig = Record<string, unknown>;
@@ -279,7 +547,7 @@ function moduleFor(
   };
 }
 
-const USER_DONE_CONTRACT: ConfigSchema = {};
+const USER_DONE_CONTRACT: ConfigSchema = EMPTY_CONFIG_SCHEMA;
 
 class UserDoneDetectorAdapter implements CompletionDetectorPort {
   readonly contract: ConfigSchema = USER_DONE_CONTRACT;
@@ -327,15 +595,28 @@ export const AUTH_WEBAUTHN_PROVIDER_MANIFEST: ProviderManifest = {
   metadata: { name: AUTH_WEBAUTHN_PROVIDER_ID, version: "0.1.0" },
   spec: {
     family: "auth",
-    capability: { summary: "in-tree WebAuthn/passkey auth provider" },
+    capability: {
+      summary: "in-tree WebAuthn/passkey auth provider",
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "none",
+        diagnostics: ["missing-user-verification", "assertion-verification-failed"],
+      },
+    },
     config_schema: {
-      rpID: { type: "string", required: true, min: 1 },
-      rpName: { type: "string", required: false, min: 1 },
-      expectedOrigin: {
-        type: "list",
-        required: true,
-        min: 1,
-        items: { type: "string", min: 1 },
+      type: "object",
+      additionalProperties: false,
+      required: ["rpID", "expectedOrigin"],
+      properties: {
+        rpID: { type: "string", minLength: 1 },
+        rpName: { type: "string", minLength: 1 },
+        expectedOrigin: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", minLength: 1 },
+        },
       },
     },
     probe: "webauthn",
@@ -355,13 +636,32 @@ export const AUTH_AUTHENTIK_PROVIDER_MANIFEST: ProviderManifest = {
   metadata: { name: AUTH_AUTHENTIK_PROVIDER_ID, version: "0.1.0" },
   spec: {
     family: "auth",
-    capability: { summary: "delegated authentik OIDC auth provider" },
+    capability: {
+      summary: "delegated authentik OIDC auth provider",
+      authAssurance: {
+        supportedPolicies: ["phishing-resistant", "password-permitted"],
+        maxLevel: "phishing-resistant",
+        requiredEvidence: ["userVerified", "recipientBound", "replayResistant"],
+        degradesTo: "password",
+        diagnostics: [
+          "missing-user-verification",
+          "method-unresolved",
+          "ambiguous-provider-evidence",
+          "password-grade-proof",
+        ],
+      },
+    },
     config_schema: {
-      issuerUrl: { type: "string", required: true, min: 1 },
-      clientId: { type: "string", required: true, min: 1 },
-      clientSecret: { type: "string", required: true, min: 1, sensitive: true },
-      redirectUri: { type: "string", required: true, min: 1 },
-      scopes: { type: "string", required: false, min: 1 },
+      type: "object",
+      additionalProperties: false,
+      required: ["issuerUrl", "clientId", "clientSecret", "redirectUri"],
+      properties: {
+        issuerUrl: { type: "string", minLength: 1 },
+        clientId: { type: "string", minLength: 1 },
+        clientSecret: { type: "string", minLength: 1, "x-gla-sensitive": true },
+        redirectUri: { type: "string", minLength: 1 },
+        scopes: { type: "string", minLength: 1 },
+      },
     },
     requires: [
       {
@@ -398,7 +698,11 @@ export const SECRET_STORE_REFERENCE_MANIFEST: ProviderManifest = {
       diagnostics: "secret-ref-only",
     },
     config_schema: {
-      namespace: { type: "string", required: false, min: 1 },
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        namespace: { type: "string", minLength: 1 },
+      },
     },
     probe: "secret-store-reference",
     skills: [
@@ -432,6 +736,9 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
     ctx.registerStateSchema(id, {
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
       slots: {
         credentials: { sensitive: true, summary: "durable WebAuthn credential store" },
         challenges: { sensitive: true, summary: "transient WebAuthn challenge store" },
@@ -454,6 +761,9 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
     ctx.registerStateSchema(id, {
+      schemaVersion: 1,
+      sensitivity: "sensitive",
+      migration: "fail-closed",
       slots: {
         subjects: { sensitive: true, summary: "durable authentik subject bindings" },
         attempts: { sensitive: true, summary: "transient OIDC attempts" },
@@ -557,6 +867,9 @@ export const referenceProviderModules: readonly GlaProviderModule[] = [
       },
     });
     ctx.registerStateSchema(id, {
+      schemaVersion: 1,
+      sensitivity: "secret",
+      migration: "fail-closed",
       slots: {
         refs: { sensitive: true, summary: "opaque secret refs mapped to raw agent-blind values" },
       },
@@ -608,6 +921,13 @@ export function referenceProviderModuleForProviderId(providerId: ProviderId): st
 /** Build the trusted reference Provider Host from today's in-tree provider modules. */
 export function createReferenceProviderHost(opts: ProviderHostOptions = {}): ProviderHost {
   return new ProviderHost(opts).registerModules(referenceProviderModules);
+}
+
+/** Build and seal the trusted reference Provider Registry from today's in-tree provider modules. */
+export function createReferenceProviderRegistry(
+  opts: ProviderRegistryOptions = {},
+): ProviderRegistry {
+  return ProviderRegistry.fromProviderModules(referenceProviderModules, opts);
 }
 
 /** Create a reference AuthProviderPort through Provider Host. */
@@ -725,6 +1045,64 @@ export interface ReferenceTemplateProviderDefaults {
   connector?: ProviderId;
   workspace?: ProviderId;
   detector?: ProviderId;
+}
+
+/** Template reachability probes supplied by the reference package bootstrap data. */
+export const referenceTemplateProbes: Readonly<Record<string, Probe>> = {
+  "browser-handoff": () => "available",
+};
+
+/** Template provider defaults selected by a named reference profile. */
+export function referenceTemplateProviderDefaultsForProfile(
+  profileId: ReferenceProviderProfileId = REFERENCE_PROFILE_SCENARIO_01_ID,
+): ReferenceTemplateProviderDefaults {
+  const profile = referenceProviderProfile(profileId).manifest;
+  const defaults =
+    profile.spec.defaults?.["template.browser-handoff"] ??
+    profile.spec.defaults?.["browser-handoff"];
+  return {
+    ...(defaults?.Launcher !== undefined
+      ? { launcher: selectionProviderId(defaults.Launcher) }
+      : {}),
+    ...(defaults?.HumanEntrypoint !== undefined
+      ? { entrypoint: selectionProviderId(defaults.HumanEntrypoint) }
+      : {}),
+    ...(defaults?.AgentConnector !== undefined
+      ? { connector: selectionProviderId(defaults.AgentConnector) }
+      : {}),
+    ...(defaults?.Workspace !== undefined
+      ? { workspace: selectionProviderId(defaults.Workspace) }
+      : {}),
+    ...(defaults?.CompletionDetector !== undefined
+      ? { detector: selectionProviderId(defaults.CompletionDetector) }
+      : {}),
+  };
+}
+
+/** Capsule defaults for the reference browser-handoff template. */
+export function referenceCapsuleProviderSelectionForProfile(
+  profileId: ReferenceProviderProfileId = REFERENCE_PROFILE_SCENARIO_01_ID,
+): ReferenceCapsuleProviderSelection {
+  const runtimeProfile = referenceProviderRuntimeProfile(profileId);
+  const defaults = referenceTemplateProviderDefaultsForProfile(profileId);
+  const selection = {
+    launcher: defaults.launcher ?? runtimeProfile.launcher,
+    connector: defaults.connector ?? runtimeProfile.connector,
+    workspace: defaults.workspace ?? runtimeProfile.workspace,
+    entrypoint: defaults.entrypoint ?? runtimeProfile.entrypoint,
+    detector: defaults.detector ?? runtimeProfile.detector,
+  };
+  const providerConfig = selectedProviderConfig(profileId, [
+    selection.launcher,
+    selection.connector,
+    selection.workspace,
+    selection.entrypoint,
+    selection.detector,
+  ]);
+  return {
+    ...selection,
+    ...(providerConfig !== undefined ? { providerConfig } : {}),
+  };
 }
 
 function templateWithProviderDefaults(

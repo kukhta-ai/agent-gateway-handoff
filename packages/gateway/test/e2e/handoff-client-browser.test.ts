@@ -201,7 +201,7 @@ describe("handoff page RFB browser client", () => {
           .toMatch(/assets are not configured/i);
         await expect
           .poll(() => server.requests)
-          .not.toContain("/handoff/client-assets/novnc/core/rfb.js");
+          .not.toContain("/handoff/client-assets/entrypoint-novnc.novnc/core/rfb.js");
         expect(await page.evaluate("window.__glaRfb")).toBeUndefined();
       });
     },

@@ -6,7 +6,7 @@
 //   connect()         → trigger→admit→anchor: issue the agent-authority anchor (capability svc)
 //   whoami()          → identity + allowed ops, by VERIFYING the anchor (never trusting bytes)
 //   templateList/Show → the assemblable menu + each part's backing dependency binding status
-//   skillList/Show    → procedural knowledge ; catalogList → only available entities (system-derived)
+//   skillList/Show    → procedural knowledge ; catalogList/Show → system-derived catalog facts
 // Slice 2 — propose + admit (scenario-01 Phase 2; GLA-018/019/020/021):
 //   taskCreate/Get/List → open a Task + mint its `task` capability (attenuated from agent-authority)
 //   sessionCreate       → resolve task → ADMIT (mutate→validate) → dry-run accept/reject OR dispatch a
@@ -28,6 +28,7 @@ import {
 } from "@gla/capability";
 import {
   type Availability,
+  type CatalogProviderInfo,
   CatalogService,
   type IndexedEntity,
   type TemplateShowResult,
@@ -39,6 +40,7 @@ import {
   type Iso8601,
   type OpaqueToken,
   type RecipientRef,
+  type ResolvedCapsulePlan,
   type TaskId,
   glaError,
 } from "@gla/kernel";
@@ -82,6 +84,24 @@ export interface ConnectResult {
   /** The set of operations the anchor allows (the `allowed-ops` caveat). */
   allowed_ops: string[];
 }
+
+/** Rich catalog detail returned by `catalog show`: the index row plus provider/template facts. */
+export type CatalogShowResult =
+  | (IndexedEntity &
+      Partial<
+        Pick<
+          CatalogProviderInfo,
+          | "dependencies"
+          | "diagnostics"
+          | "provenance"
+          | "defaultSource"
+          | "resolvedConfig"
+          | "config_schema"
+          | "clientAssets"
+          | "authAssurance"
+        >
+      >)
+  | (IndexedEntity & Partial<TemplateShowResult>);
 
 /** Construction options for the Agent Bridge. */
 export interface AgentBridgeOptions {
@@ -254,6 +274,35 @@ export class AgentBridge {
     return this.catalog.list(filter);
   }
 
+  /** `catalog show <id>`: read one provider/template catalog entity with graph diagnostics. Read-only. */
+  catalogShow(id: string): CatalogShowResult {
+    const entity = this.catalog.show(id);
+    if (entity === undefined) {
+      throw glaError("catalog.unknown", `unknown catalog entity: "${id}"`, { detail: { id } });
+    }
+    if (entity.kind === "CapsuleTemplate" || entity.family === "template") {
+      const template = this.catalog.templateShow(id);
+      return {
+        ...entity,
+        ...template,
+        name: entity.name,
+        kind: entity.kind,
+        family: entity.family,
+        summary: entity.summary,
+        requires: template.dependencies,
+      };
+    }
+    const provider = this.catalog.providerShow(id);
+    if (provider !== undefined) {
+      return {
+        ...entity,
+        ...provider,
+        requires: provider.dependencies,
+      };
+    }
+    return entity;
+  }
+
   /**
    * A point-in-time snapshot of task/session state, so a caller can assert orientation changed
    * nothing (GLA-015 AC#3, GLA-017 AC#4). The Bridge never writes through this on a read path.
@@ -375,8 +424,13 @@ export class AgentBridge {
     //    included only when an EXPLICIT task was given (no implicit task is opened on a dry-run).
     if (dryRun) {
       return explicitTaskId !== undefined
-        ? { decision: "accept", dry_run: true, task_id: explicitTaskId }
-        : { decision: "accept", dry_run: true };
+        ? {
+            decision: "accept",
+            dry_run: true,
+            task_id: explicitTaskId,
+            capsule_plan: result.capsulePlan,
+          }
+        : { decision: "accept", dry_run: true, capsule_plan: result.capsulePlan };
     }
 
     // 5) Real accept → ensure a task (open the implicit one NOW, only on accept), then DISPATCH.
@@ -392,7 +446,7 @@ export class AgentBridge {
       );
       taskId = created.task.id;
     }
-    const session = this.session.createFromAdmitted(taskId, result.resolved);
+    const session = this.session.createFromAdmitted(taskId, result.resolved, result.capsulePlan);
     this.task.attachSession(taskId, session.id);
 
     // 6) PROVISION (Slice 3, GLA-022/023/024/025): run the reversible create-saga — spawn the capsule
@@ -407,6 +461,7 @@ export class AgentBridge {
         session_id: session.id,
         state: session.state,
         task_id: taskId,
+        capsule_plan: result.capsulePlan,
       };
     }
     const provisioned = await this.session.provision(session.id);
@@ -416,6 +471,7 @@ export class AgentBridge {
       session_id: provisioned.session_id,
       state: provisioned.state,
       task_id: taskId,
+      capsule_plan: result.capsulePlan,
       capsule: provisioned.capsule,
       connector: provisioned.connector,
     };
@@ -624,13 +680,14 @@ export interface CliAssemblyProposal extends Omit<AssemblyProposal, "task" | "re
 export type SessionCreateResult =
   // Dry-run accept: nothing provisioned and NO task created — so `task_id` is present only when an
   // EXPLICIT `--task` was given (the implicit task is opened only on a real-run accept; the §5 fix).
-  | { decision: "accept"; dry_run: true; task_id?: TaskId }
+  | { decision: "accept"; dry_run: true; task_id?: TaskId; capsule_plan: ResolvedCapsulePlan }
   | {
       decision: "accept";
       dry_run: false;
       session_id: string;
       state: string;
       task_id: TaskId;
+      capsule_plan: ResolvedCapsulePlan;
       // PROVISIONED (Slice 3): the live capsule + the agent-blind connector, present when the bridge is
       // wired to provision (`app` injects the worker). Absent on a bare bridge (Slice-2 `issued` dispatch).
       capsule?: ProvisionResult["capsule"];
